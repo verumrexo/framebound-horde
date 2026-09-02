@@ -1,0 +1,11 @@
+node_modules/
+dist/
+artifacts/
+.vite/
+vite.config.*.timestamp-*
+.DS_Store
+.env
+.env.*
+!.env.example
+src-tauri/target/
+src-tauri/gen/

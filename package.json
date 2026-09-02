@@ -1,0 +1,20 @@
+{
+  "name": "framebound-horde-visual-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/main.js && node --check src/core/protocol.js && node --check src/core/embedded-session.js && node --check src/core/effect-system.js && node --check src/core/enemy-swarm.js && node --check src/core/control-system.js && node --check src/core/tower-catalog.js && node --check src/core/strike-pattern.js && node --check src/core/session-config.js && node --check src/core/world-config.js && node --check src/core/persistence.js && node --check src/core/p2p-wire.js && node --check src/core/p2p-transport.js && node --check src/core/p2p-session.js && node --check vite.config.js && node --check scripts/benchmark-kps.mjs && node --check scripts/benchmark-gameplay.mjs",
+    "build": "vite build",
+    "dev": "vite --host 127.0.0.1 --port 4173",
+    "balance:kps": "node scripts/benchmark-kps.mjs",
+    "balance:gameplay": "node scripts/benchmark-gameplay.mjs",
+    "serve": "vite preview --host 127.0.0.1 --port 4173"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "vite": "^7.2.4"
+  }
+}
