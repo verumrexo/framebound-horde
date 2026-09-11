@@ -120,8 +120,8 @@ export class DataChannelTransport {
 }
 
 // A host-run WebSocket relay is deliberately a fallback for networks where
-// WebRTC cannot negotiate. It is single-guest: the normal P2P path remains the
-// multi-pilot implementation.
+// WebRTC cannot negotiate. It preserves the host-star authority model and
+// multiplexes up to three guest routes over the host socket.
 export class WebSocketRelayTransport {
   constructor(socket) {
     this.socket = socket;
@@ -162,6 +162,89 @@ export class WebSocketRelayTransport {
   handleClose(reason) { if (this.readyState === 'closed') return; this.readyState = 'closed'; for (const listener of this.closeListeners) listener(reason); }
 }
 
+class RelayLaneTransport {
+  constructor(parent, laneId, hub) {
+    this.parent = parent;
+    this.laneId = laneId;
+    this.hub = hub;
+    this.messageListeners = new Set();
+  }
+  get readyState() { return this.parent.readyState; }
+  send(message) {
+    if (this.laneId === 2 && (this.parent.socket.bufferedAmount || 0) > 64 * 1024) return false;
+    const binary = typeof message !== 'string';
+    const body = binary ? normalizeChannelData(message) : new TextEncoder().encode(message);
+    if (!body) return false;
+    const bytes = binary ? new Uint8Array(body) : body;
+    const framed = new Uint8Array(bytes.byteLength + 2);
+    framed[0] = this.laneId;
+    framed[1] = binary ? 1 : 0;
+    framed.set(bytes, 2);
+    return this.parent.send(framed.buffer);
+  }
+  onMessage(listener) { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
+  onOpen(listener) { return this.parent.onOpen(listener); }
+  onClose(listener) { return this.parent.onClose(listener); }
+  close(reason = 'closed') { this.parent.close(reason); }
+}
+
+class RoutedRelayTransport {
+  constructor(parent, peerId) {
+    this.parent = parent;
+    this.peerId = peerId;
+    this.slot = Number(peerId.split('-').at(-1));
+    this.messageListeners = new Set();
+    this.closeListeners = new Set();
+    this.closed = false;
+    this.unsubscribeMessage = parent.onMessage((raw) => {
+      const bytes = normalizeChannelData(raw);
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength < 2 || new Uint8Array(bytes)[0] !== this.slot) return;
+      const body = new Uint8Array(bytes).slice(1).buffer;
+      for (const listener of this.messageListeners) listener(body);
+    });
+    this.unsubscribeClose = parent.onClose((reason) => this.handleClose(reason));
+  }
+  get readyState() { return this.closed ? 'closed' : this.parent.readyState; }
+  send(message) {
+    const body = normalizeChannelData(message);
+    if (!(body instanceof ArrayBuffer) || this.readyState !== 'open') return false;
+    const framed = new Uint8Array(body.byteLength + 1);
+    framed[0] = this.slot;
+    framed.set(new Uint8Array(body), 1);
+    return this.parent.send(framed.buffer);
+  }
+  onMessage(listener) { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
+  onOpen(listener) { return this.parent.onOpen(listener); }
+  onClose(listener) { this.closeListeners.add(listener); return () => this.closeListeners.delete(listener); }
+  close(reason = 'closed') {
+    if (this.closed) return;
+    this.parent.send(JSON.stringify({ type: 'drop_peer', peerId: this.peerId }));
+    this.handleClose(reason);
+  }
+  handleClose(reason) {
+    if (this.closed) return;
+    this.closed = true;
+    this.unsubscribeMessage?.();
+    this.unsubscribeClose?.();
+    for (const listener of this.closeListeners) listener(reason);
+  }
+}
+
+function createRelayTransportBundle(parent) {
+  const lanes = [0, 1, 2].map((laneId) => new RelayLaneTransport(parent, laneId));
+  parent.onMessage((raw) => {
+    const bytes = normalizeChannelData(raw);
+    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength < 2) return;
+    const view = new Uint8Array(bytes);
+    const lane = lanes[view[0]];
+    if (!lane || (view[1] !== 0 && view[1] !== 1)) return;
+    const body = view.slice(2);
+    const message = view[1] === 0 ? new TextDecoder().decode(body) : body.buffer;
+    for (const listener of lane.messageListeners) listener(message);
+  });
+  return Object.freeze({ gameplay: lanes[0], social: lanes[1], presence: lanes[2] });
+}
+
 export function relayUrlForPage(location = globalThis.location) {
   if (!location?.protocol || !location?.host) return null;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -173,12 +256,13 @@ export class WebRtcPeerLink {
     RTCPeerConnectionClass = globalThis.RTCPeerConnection,
     initiator = false,
     iceServers = DEFAULT_ICE_SERVERS,
-    channelLabel = 'framebound-horde-v1'
+    channelLabel = 'framebound-horde-v2'
   } = {}) {
     if (typeof RTCPeerConnectionClass !== 'function') throw new Error('webrtc is unavailable');
     this.initiator = initiator;
     this.peerConnection = new RTCPeerConnectionClass({ iceServers });
-    this.transport = null;
+    this.transports = new Map();
+    this.transportBundle = null;
     this.pendingRemoteCandidates = [];
     this.onSignal = null;
     this.onTransport = null;
@@ -193,17 +277,33 @@ export class WebRtcPeerLink {
     };
     this.peerConnection.ondatachannel = (event) => this.attachChannel(event.channel);
 
-    if (initiator) this.attachChannel(this.peerConnection.createDataChannel(channelLabel, { ordered: true }));
+    if (initiator) {
+      this.attachChannel(this.peerConnection.createDataChannel(`${channelLabel}-gameplay`, { ordered: true }));
+      this.attachChannel(this.peerConnection.createDataChannel(`${channelLabel}-social`, { ordered: true }));
+      this.attachChannel(this.peerConnection.createDataChannel(`${channelLabel}-presence`, { ordered: false, maxRetransmits: 0 }));
+    }
   }
 
   attachChannel(channel) {
-    if (this.transport) return this.transport;
-    this.transport = new DataChannelTransport(channel);
-    this.transport.onOpen(() => this.onTransport?.(this.transport));
-    this.transport.onClose((reason) => {
+    const lane = channel.label.endsWith('-social') ? 'social' : channel.label.endsWith('-presence') ? 'presence' : 'gameplay';
+    if (this.transports.has(lane)) return this.transports.get(lane);
+    const transport = new DataChannelTransport(channel);
+    this.transports.set(lane, transport);
+    transport.onOpen(() => this.maybeOpenBundle());
+    transport.onClose((reason) => {
       this.onStateChange?.(reason === 'peer_link_closed' ? 'closed' : 'disconnected');
     });
-    return this.transport;
+    return transport;
+  }
+
+  maybeOpenBundle() {
+    if (this.transportBundle || !['gameplay', 'social', 'presence'].every((lane) => this.transports.get(lane)?.readyState === 'open')) return;
+    this.transportBundle = Object.freeze({
+      gameplay: this.transports.get('gameplay'),
+      social: this.transports.get('social'),
+      presence: this.transports.get('presence')
+    });
+    this.onTransport?.(this.transportBundle);
   }
 
   async createOffer() {
@@ -234,7 +334,7 @@ export class WebRtcPeerLink {
   }
 
   close() {
-    this.transport?.close('peer_link_closed');
+    for (const transport of this.transports.values()) transport.close('peer_link_closed');
     this.peerConnection.close();
   }
 }
@@ -598,7 +698,7 @@ export class RelayConnectionCoordinator {
     this.role = null;
     this.code = null;
     this.transport = null;
-    this.hostAttached = false;
+    this.hostPeers = new Map();
     this.onStatus = null;
     this.onHosted = null;
     this.onConnected = null;
@@ -630,30 +730,39 @@ export class RelayConnectionCoordinator {
     const separator = this.relayUrl.includes('?') ? '&' : '?';
     const socket = new this.WebSocketClass(`${this.relayUrl}${separator}${query}`);
     const transport = new WebSocketRelayTransport(socket);
+    const transportBundle = this.role === 'guest' ? createRelayTransportBundle(transport) : null;
     this.transport = transport;
     transport.onOpen(() => {
       this.onStatus?.('signaling_connected');
       if (this.role === 'guest') {
         this.onStatus?.('connected');
-        this.onConnected?.({ peerId: 'relay-host', transport });
+        this.onConnected?.({ peerId: 'relay-host', transport: transportBundle });
       } else this.onStatus?.('waiting_for_peers');
     });
     transport.onControl((control) => {
-      if (this.role !== 'host') return;
-      if (control.type === 'peer_joined' && !this.hostAttached) {
-        this.hostAttached = true;
-        this.onStatus?.('connected');
-        this.onConnected?.({ peerId: 'relay-guest', transport });
+      if (this.role === 'guest' && control.type === 'peer_left' && control.peerId === 'relay-host') {
+        this.onDisconnected?.({ peerId: 'relay-host', reason: 'host_left' });
+        this.onClosed?.({ reason: 'host_left' });
+        return;
       }
-      if (control.type === 'peer_left' && this.hostAttached) {
-        this.hostAttached = false;
-        this.onDisconnected?.({ peerId: 'relay-guest', reason: 'peer_left' });
+      if (this.role !== 'host' || typeof control.peerId !== 'string') return;
+      if (control.type === 'peer_joined' && !this.hostPeers.has(control.peerId)) {
+        const route = new RoutedRelayTransport(transport, control.peerId);
+        const bundle = createRelayTransportBundle(route);
+        this.hostPeers.set(control.peerId, route);
+        this.onStatus?.('connected');
+        this.onConnected?.({ peerId: control.peerId, transport: bundle });
+      }
+      if (control.type === 'peer_left' && this.hostPeers.has(control.peerId)) {
+        this.hostPeers.get(control.peerId).handleClose('peer_left');
+        this.hostPeers.delete(control.peerId);
+        this.onDisconnected?.({ peerId: control.peerId, reason: 'peer_left' });
       }
     });
     transport.onClose((reason) => {
       if (this.transport !== transport) return;
       if (this.role === 'guest') this.onDisconnected?.({ peerId: 'relay-host', reason });
-      else if (this.hostAttached) this.onDisconnected?.({ peerId: 'relay-guest', reason });
+      else for (const peerId of this.hostPeers.keys()) this.onDisconnected?.({ peerId, reason });
       this.onClosed?.({ reason });
     });
   }
@@ -661,7 +770,8 @@ export class RelayConnectionCoordinator {
   disconnect(reason = 'closed') {
     const transport = this.transport;
     this.transport = null;
-    this.hostAttached = false;
+    for (const route of this.hostPeers.values()) route.handleClose(reason);
+    this.hostPeers.clear();
     transport?.close(reason);
     this.role = null;
     this.code = null;

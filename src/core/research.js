@@ -322,15 +322,19 @@ export const reactorRank = (state, id) => state.research?.reactor?.[id] || 0;
 export const arsenalChoices = (state) => RESEARCH_NODES.filter((node) => !hasResearch(state, node.id) && (node.parent === null || hasResearch(state, node.parent)));
 
 // Every category prices independently: 10k for its first rank, then x1.25 per
-// additional rank of that same category.
+// additional rank of that same category. Damage output is the one open-ended
+// late-game line: it starts at 100k and grows x1.20 per rank so that affordable damage
+// (spend^(ln 1.10 / ln 1.20) ~ spend^0.52) always trails the enemy hp budget.
 export const REACTOR_FIRST_RANK_COST = 10_000;
 export const REACTOR_RANK_GROWTH = 1.25;
-// Each damage rank adds +10% of the weapon's base damage; ten ranks are +100%.
-export const REACTOR_DAMAGE_PER_RANK = 0.1;
-export const reactorDamageFactor = (state) => 1 + REACTOR_DAMAGE_PER_RANK * reactorRank(state, 'damage');
+export const REACTOR_DAMAGE_FIRST_RANK_COST = 100_000;
+export const REACTOR_DAMAGE_RANK_GROWTH = 1.2;
+// Each damage rank multiplies the weapon's base damage by 1.10; ranks compound.
+export const REACTOR_DAMAGE_GROWTH = 1.1;
+export const reactorDamageFactor = (state) => REACTOR_DAMAGE_GROWTH ** reactorRank(state, 'damage');
 
 export const REACTOR_CATEGORIES = Object.freeze([
-  ['damage', 'damage output', '+10% primary damage per rank; ranks add, never compound', null],
+  ['damage', 'damage output', 'primary damage x1.10 per rank; ranks compound', null, REACTOR_DAMAGE_RANK_GROWTH, REACTOR_DAMAGE_FIRST_RANK_COST],
   ['cadence', 'weapon cycling', '+2% base cadence per rank; cap +50%', 25],
   ['range', 'targeting range', '+2% base range per rank; cap +30%', 15],
   ['velocity', 'projectile velocity', '+5% base projectile speed; cap +100%', 20],
@@ -342,14 +346,14 @@ export const REACTOR_CATEGORIES = Object.freeze([
   ['lives', 'base reserve', '+5 maximum lives; heals up to 5; cap +100', 20],
   ['guidance', 'projectile guidance', '+2% homing turn strength; cap +30%', 15],
   ['sustain', 'field sustain', '+2% ordinary slow duration; cap +20%', 10]
-].map(([id,label,description,maxRank,growth=REACTOR_RANK_GROWTH]) => Object.freeze({id,label,description,maxRank,growth})));
+].map(([id,label,description,maxRank,growth=REACTOR_RANK_GROWTH,firstCost=REACTOR_FIRST_RANK_COST]) => Object.freeze({id,label,description,maxRank,growth,firstCost})));
 
 export function reactorQuote(state, id) {
   const category = REACTOR_CATEGORIES.find((item) => item.id === id);
   if (!category) return null;
   const rank = reactorRank(state, id);
   if (category.maxRank !== null && rank >= category.maxRank) return null;
-  const cost = Math.ceil(REACTOR_FIRST_RANK_COST * category.growth ** rank - 1e-8);
+  const cost = Math.ceil(category.firstCost * category.growth ** rank - 1e-8);
   if (!Number.isSafeInteger(cost)) return null;
   return { ...category, rank, cost };
 }

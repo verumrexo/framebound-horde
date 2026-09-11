@@ -47,8 +47,8 @@ for (const id of Object.keys(TOWER_DEFINITIONS)) {
   assert.ok(owned.title && owned.metric, `${id}: readable heading and metric`);
   assert.ok(owned.actions.some((action) => action.id.includes('sell')), `${id}: sale available`);
   const inspected = view(id, { ownerId: 'peer' });
-  assert.equal(inspected.inspectOnly, true, id);
-  assert.equal(inspected.actions.length, 0, `${id}: no peer mutation actions`);
+  assert.equal(inspected.inspectOnly, false, id);
+  assert.ok(inspected.actions.some((action) => action.id.includes('sell')), `${id}: teammate sale available`);
 }
 runAction(view('frame'), 'tower_upgrade_', 'openUpgradeMenu');
 runAction(view('frame'), 'tower_sell_', 'sellSelectedTower');
@@ -64,4 +64,4 @@ runAction(view(manualControl.id), 'tower_auto_aim_', 'resetSelectedControlGeomet
 runAction(view('echo', { echoWeaponId: manualControl.id }), 'echo_control_', 'openControlGeometryMenu');
 runAction(view('laser'), 'tower_aim_', 'openStrikeTargetMenu');
 runAction(view('laser'), 'tower_auto_aim_', 'clearSelectedStrikePoint');
-console.log('tactical actions: all catalog forms, ownership, station, relay/socket, echo, aim, and reset passed');
+console.log('tactical actions: all catalog forms, shared control, station, relay/socket, echo, aim, and reset passed');

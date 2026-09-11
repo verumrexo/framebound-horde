@@ -45,7 +45,7 @@ test('completing the network retires connector relays, refunds them, keeps buffs
   assert.equal(relay.relayTargetAreaId, areaB.id, 'the relay auto-links the only other nebula');
   const buffedCadence = weapon.effectiveCadence;
   assert.ok(buffedCadence > 6, 'overclock reaches across the relay link');
-  const before = a.state.economyByPlayer[player.id].credits;
+  const before = a.state.teamEconomy.credits;
   const expectedRefund = saleRefund(a.state, relay);
   a.events.length = 0;
   a.tick();
@@ -57,7 +57,7 @@ test('completing the network retires connector relays, refunds them, keeps buffs
   assert.equal(network.retired.length, 1);
   assert.equal(network.retired[0].towerId, relay.id);
   assert.equal(network.retired[0].refund, expectedRefund);
-  assert.equal(a.state.economyByPlayer[player.id].credits - before, expectedRefund);
+  assert.equal(a.state.teamEconomy.credits - before, expectedRefund);
   const event = a.events.find((item) => item.type === EVENT.RELAY_NETWORK_COMPLETED);
   assert.ok(event, 'a completion event is emitted for presentation');
   assert.deepEqual(event.payload.areaIds, [areaA.id, areaB.id].sort());
@@ -80,7 +80,7 @@ test('completion never retriggers; later relays stay buildable and upgradeable',
   assert.equal(a.state.relayNetwork.completedTick, firstTick);
   assert.equal(a.state.relayNetwork.retired.length, 1);
   assert.ok(a.state.towers.some((tower) => tower.id === late.id), 'post-completion relays remain as descendant stepping stones');
-  a.state.economyByPlayer[player.id].credits = 1e9;
+  a.state.teamEconomy.credits = 1e9;
   a.evolveTower(command({ towerId: late.id, definitionId: 'echo' }), player);
   assert.equal(late.definitionId, 'echo');
   assert.deepEqual(late.networkAreaIds, [areaA.id, areaB.id].sort());
@@ -134,7 +134,7 @@ test('a production map completes only when every nebula is joined', () => {
   const a = new EmbeddedAuthority({ ...PROTOTYPE_SESSION_CONFIG, mapId: 'map_07', autoStart: true });
   a.join({ clientId: 'host', payload: { label: 'host' } });
   const player = a.state.players[0];
-  a.state.economyByPlayer[player.id].credits = 1e12;
+  a.state.teamEconomy.credits = 1e12;
   const eligible = relayEligibleAreaIds(a.map);
   assert.equal(eligible.length, 34);
   // Link areas in a chain by placing relays that target their linkable neighbour.

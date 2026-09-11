@@ -2,7 +2,7 @@ import { fireReworked, tickReworked } from './turret-rework.js';
 import { decorateResearchAttack, secondaryAttack, damageFixed, damageResearchBonus, researchSecondaryPlans, pruneResearchCombat, enemyKey, physicalBullet } from './research-combat.js';
 import { freshResearch, hasResearch, reactorRank, reactorQuote, researchNode, arsenalChoices, researchStat } from './research.js';
 import { towerPlacementClear } from './placement.js';
-import { spawnProfileAt } from './progression.js';
+import { DEFAULT_PACE, normalizePace, spawnProfileAt, surgeScheduleAt, surgeSpawnSources, threatTickAt } from './progression.js';
 import {
   AUTHORITY_TICK_MS,
   AUTHORITY_TICK_RATE,
@@ -97,6 +97,18 @@ function initialStats() {
   };
 }
 
+function initialContribution() {
+  return {
+    hpPopped: 0,
+    kills: 0,
+    creditsSpent: 0,
+    towersCreated: 0,
+    towersSold: 0,
+    supportCredits: 0,
+    controlApplications: 0
+  };
+}
+
 export class EmbeddedAuthority {
   constructor({
     sessionId,
@@ -121,7 +133,6 @@ export class EmbeddedAuthority {
     this.nextProjectileNumber = 1;
     this.nextFieldNumber = 1;
     this.nextAttackFieldNumber = 1;
-    this.payoutCursor = 0;
     this.modifierCache = null;
     this.seed = seed;
     this.mode = mode;
@@ -153,7 +164,7 @@ export class EmbeddedAuthority {
     return new EnemySwarm({ seed: this.seed, map: this.map, ...this.swarmConfig });
   }
 
-  resetFreshRun(mapId = this.map.id) {
+  resetFreshRun(mapId = this.map.id, pace = this.state.pace ?? DEFAULT_PACE) {
     this.state.dev = {};
     const nextMap = getMapDefinition(mapId);
     if (this.mode === 'game' && !nextMap.playable) throw new Error('map is not playable');
@@ -163,6 +174,7 @@ export class EmbeddedAuthority {
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
     this.state.mapCatalog = playableMaps().map((map) => ({ id: map.id, label: map.label }));
+    this.state.pace = normalizePace(pace);
     this.state.runTick = 0;
     this.state.base = { ...this.map.base, lives: this.startingLives };
     this.state.towers = this.initialTowers.map((tower) => this.normalizeTower(tower));
@@ -174,14 +186,13 @@ export class EmbeddedAuthority {
     this.state.supportCounters = {};
     this.state.relayNetwork = freshRelayNetwork();
     this.state.research = freshResearch();
-    this.state.disconnectWait = null;
     this.state.stats = initialStats();
     this.state.test = this.initialTestConfig ? cloneSerializable(this.initialTestConfig) : null;
     this.state.swarm = this.swarmSummary(0, []);
-    for (const player of this.state.players) {
-      if (!player.eliminated) this.state.economyByPlayer[player.id] = { credits: this.startingCredits, totalEarned: 0, totalSpent: 0 };
-    }
-    this.payoutCursor = 0;
+    this.state.teamEconomy = { credits: this.startingCredits, totalEarned: 0, totalSpent: 0 };
+    this.state.contributionByPlayer = Object.fromEntries(
+      this.state.players.map((player) => [player.id, initialContribution()])
+    );
   }
 
   createInitialState(sessionId) {
@@ -193,13 +204,13 @@ export class EmbeddedAuthority {
       mapLabel: this.map.label,
       mapCatalog: playableMaps().map((map) => ({ id: map.id, label: map.label })),
       seed: this.seed,
+      pace: DEFAULT_PACE,
       tick: 0,
       runTick: 0,
       runNumber: 1,
       phase: this.autoStart ? 'running' : 'lobby',
       rosterLocked: false,
       hostPlayerId: null,
-      disconnectWait: null,
       players: [],
       base: { ...this.map.base, lives: this.startingLives },
       towers: this.initialTowers.map((tower) => this.normalizeTower(tower)),
@@ -210,7 +221,8 @@ export class EmbeddedAuthority {
       supportCounters: {},
       relayNetwork: freshRelayNetwork(),
       research: freshResearch(),
-      economyByPlayer: {},
+      teamEconomy: { credits: this.startingCredits, totalEarned: 0, totalSpent: 0 },
+      contributionByPlayer: {},
       towerCatalog: Object.values(this.towerDefinitions),
       test: this.initialTestConfig ? cloneSerializable(this.initialTestConfig) : null,
       swarm: this.swarmSummary(0, []),
@@ -285,8 +297,18 @@ export class EmbeddedAuthority {
     return normalized;
   }
 
-  swarmSummary(spawnRatePerSecond, sources, meanHp = 1) {
+  swarmSummary(spawnRatePerSecond, sources, meanHp = 1, surge = null) {
     return {
+      pace: this.state?.pace ?? DEFAULT_PACE,
+      threatSeconds: threatTickAt(this.state?.runTick || 0, this.state?.pace) / AUTHORITY_TICK_RATE,
+      surge: surge ? {
+        phase: surge.phase,
+        index: surge.index,
+        riftIds: [...surge.riftIds],
+        activeAtSeconds: surge.activeAtSeconds,
+        endsAtSeconds: surge.endsAtSeconds,
+        hpMultiplier: surge.hpMultiplier ?? null
+      } : null,
       activeEnemies: this.swarm.activeUnitCount,
       simulationRecords: this.swarm.count,
       compressedEnemies: this.swarm.activeUnitCount - this.swarm.count,
@@ -356,8 +378,10 @@ export class EmbeddedAuthority {
     for (const command of ready) this.applyCommand(command);
 
     if (this.state.players.length > 0 && this.state.runTick > 0) this.state.rosterLocked = true;
-    if (this.state.disconnectWait && this.state.tick >= this.state.disconnectWait.deadlineTick) {
-      this.completeBalancedInheritance(this.state.disconnectWait.playerId);
+    for (const player of this.state.players) {
+      if (player.connectionState === 'reconnecting' && this.state.tick >= (player.reconnectDeadlineTick || Infinity)) {
+        this.markPlayerDeparted(player);
+      }
     }
     if (this.state.phase !== 'running' || this.state.test?.paused || this.state.dev?.paused) return;
 
@@ -380,9 +404,15 @@ export class EmbeddedAuthority {
         enemyHp: this.state.test.enemyHp
       };
     }
+    // everything threat-related reads the paced clock, so a slower pace delays the
+    // curve, the rift unlocks and the surges together
+    const threatTick = threatTickAt(this.state.runTick, this.state.pace);
+    const profile = spawnProfileAt(this.map, threatTick, AUTHORITY_TICK_RATE);
+    const surge = surgeScheduleAt(this.map, threatTick, this.seed, AUTHORITY_TICK_RATE);
     return {
-      ...spawnProfileAt(this.map, this.state.runTick, AUTHORITY_TICK_RATE),
-      sources: activeSpawnSources(this.map, this.state.runTick, AUTHORITY_TICK_RATE),
+      ...profile,
+      surge,
+      sources: surgeSpawnSources(activeSpawnSources(this.map, threatTick, AUTHORITY_TICK_RATE), surge, profile),
       enemyHp: this.swarmConfig.enemyHp || 1
     };
   }
@@ -414,7 +444,7 @@ export class EmbeddedAuthority {
       this.tickAttackFields();
     }
     if (this.state.runTick % AUTHORITY_TICK_RATE === 0) this.swarm.updateChecksum();
-    this.state.swarm = this.swarmSummary(spawn.rate, spawn.sources, spawn.meanHp ?? spawn.enemyHp);
+    this.state.swarm = this.swarmSummary(spawn.rate, spawn.sources, spawn.meanHp ?? spawn.enemyHp, spawn.surge || null);
   }
 
   syncControlFields() {
@@ -483,6 +513,8 @@ export class EmbeddedAuthority {
       const triggeredUnits = Math.max(0, Math.floor(field.triggeredUnitsTick || 0));
       tower.controlStats.affectedUnitTicks += affectedUnitTicks;
       tower.controlStats.affectedUnits += triggeredUnits;
+      const contribution = this.state.contributionByPlayer[tower.ownerId];
+      if (contribution) contribution.controlApplications += affectedUnitTicks + triggeredUnits;
       if (affectedUnitTicks > 0 || triggeredUnits > 0) tower.controlStats.lastActiveTick = this.state.runTick;
     }
   }
@@ -594,9 +626,8 @@ export class EmbeddedAuthority {
     const survivors = [];
     for (const tower of [...this.state.towers].sort(compareStableIds)) {
       if (tower.definitionId !== 'relay') { survivors.push(tower); continue; }
-      const economy = this.state.economyByPlayer[tower.ownerId];
-      const refund = economy ? saleRefund(this.state, tower) : 0;
-      if (economy) economy.credits += refund;
+      const refund = saleRefund(this.state, tower);
+      this.state.teamEconomy.credits += refund;
       const record = {
         towerId: tower.id, ownerId: tower.ownerId, areaId: tower.areaId,
         targetAreaId: this.relayTargetByTowerId.get(tower.id) || null,
@@ -1384,6 +1415,15 @@ export class EmbeddedAuthority {
     const totalReward = paidHp * result.attack.rewardPerKill;
     this.state.stats.hpPopped = damageFixed((this.state.stats.hpPopped || 0) + hpPopped);
     const sourceTower = this.state.towers.find((tower) => tower.id === result.attack.sourceTowerId);
+    const attributedPlayerId = sourceTower?.ownerId || result.attack.ownerId || null;
+    const contribution = attributedPlayerId ? this.state.contributionByPlayer[attributedPlayerId] : null;
+    if (contribution) {
+      contribution.hpPopped = damageFixed(contribution.hpPopped + hpPopped);
+      contribution.controlApplications += result.controlTargets.reduce(
+        (total, target) => total + Math.max(1, Math.floor(target.units || 1)),
+        0
+      );
+    }
     if (totalReward > 0) this.distributeIncome(totalReward);
     const areaId = result.attack.sourceAreaId || sourceTower?.areaId;
     const mints = (this.networkSourcesByArea?.get(areaId) || []).filter((tower) => tower.definitionId === 'mint');
@@ -1396,6 +1436,8 @@ export class EmbeddedAuthority {
         this.distributeIncome(credits);
         mints[0].bonusCredits = (mints[0].bonusCredits || 0) + credits;
         this.state.stats.bonusCredits += credits;
+        const mintContribution = this.state.contributionByPlayer[mints[0].ownerId];
+        if (mintContribution) mintContribution.supportCredits += credits;
       }
     }
     this.applyKillIncomeSupport(result.attack, paidHp);
@@ -1405,6 +1447,7 @@ export class EmbeddedAuthority {
       sourceTower.kills = Math.max(0, Math.floor(sourceTower.kills || 0)) + killCount;
       sourceTower.lastKillTick = this.state.runTick;
     }
+    if (contribution) contribution.kills += killCount;
     this.emit(EVENT.KILLS_RECORDED, {
       count: killCount,
       totalReward,
@@ -1480,6 +1523,8 @@ export class EmbeddedAuthority {
       tower.bonusCredits = Math.max(0, Math.floor(tower.bonusCredits || 0)) + credits;
       this.state.stats.supportTriggers += milestones;
       this.state.stats.bonusCredits += credits;
+      const contribution = this.state.contributionByPlayer[tower.ownerId];
+      if (contribution) contribution.supportCredits += credits;
       this.emit(EVENT.SUPPORT_TRIGGERED, {
         type: effect.type,
         effectId: effect.id,
@@ -1510,9 +1555,9 @@ export class EmbeddedAuthority {
     const player = this.authorizedPlayer(command);
     if (!player) return;
     if (command.type === COMMAND.LEAVE) return this.leave(command, player);
+    if (command.type === COMMAND.DISCONNECT) return this.disconnectPlayer(command, player);
+    if (command.type === COMMAND.PLAYER_RENAME) return this.renamePlayer(command, player);
     if (command.type === COMMAND.SESSION_START) return this.startSession(command, player);
-    if (command.type === COMMAND.SESSION_CONTINUE_WITHOUT_PLAYER) return this.continueWithoutPlayer(command, player);
-    if (this.state.phase === 'reconnect_wait') return this.reject(command, 'waiting for player reconnect');
     if (command.type === COMMAND.DEV_TOOLS) return this.setDevTools(command, player);
     if (command.type === COMMAND.SESSION_RESTART) return this.restartSession(command);
     if (this.state.phase !== 'running') return this.reject(command, 'the run is defeated');
@@ -1558,7 +1603,9 @@ export class EmbeddedAuthority {
     const existing = this.state.players.find((player) => player.clientId === command.clientId);
     if (existing) {
       existing.connected = true;
+      existing.connectionState = 'connected';
       delete existing.disconnectedTick;
+      delete existing.reconnectDeadlineTick;
       if (this.state.phase === 'lobby') existing.eliminated = false;
       if (existing.eliminated) {
         existing.spectator = true;
@@ -1567,11 +1614,6 @@ export class EmbeddedAuthority {
       }
       existing.spectator = false;
       this.emit(EVENT.PLAYER_RECONNECTED, { player: existing });
-      if (this.state.disconnectWait?.playerId === existing.id) {
-        this.state.disconnectWait = null;
-        this.state.phase = 'running';
-        this.beginNextReconnectWait();
-      }
       return;
     }
     if (this.state.rosterLocked) return this.reject(command, 'run roster is locked');
@@ -1580,52 +1622,58 @@ export class EmbeddedAuthority {
       id: playerId,
       clientId: command.clientId,
       label: sanitizeLabel(command.payload.label),
+      colorId: `player_${this.state.players.length % 4}`,
       connected: true,
+      connectionState: 'connected',
       spectator: false,
       eliminated: false,
       joinedTick: this.state.tick
     };
     this.state.players.push(player);
-    this.state.economyByPlayer[playerId] = { credits: this.startingCredits, totalEarned: 0, totalSpent: 0 };
+    this.state.contributionByPlayer[playerId] = initialContribution();
     if (!this.state.hostPlayerId) this.state.hostPlayerId = playerId;
     this.emit(EVENT.PLAYER_JOINED, { player, hostPlayerId: this.state.hostPlayerId });
   }
 
   leave(command, player) {
     player.connected = false;
+    player.connectionState = 'departed';
     player.disconnectedTick = this.state.tick;
+    delete player.reconnectDeadlineTick;
+    player.eliminated = true;
+    player.spectator = true;
     this.emit(EVENT.PLAYER_LEFT, { playerId: player.id });
-    const connected = this.connectedPlayers();
     if (this.state.hostPlayerId === player.id) {
-      const successor = connected[0] || null;
-      this.state.hostPlayerId = successor?.id || null;
-      this.emit(EVENT.HOST_MIGRATED, { previousHostPlayerId: player.id, hostPlayerId: this.state.hostPlayerId });
+      this.state.hostPlayerId = null;
     }
-    if (this.state.phase === 'lobby') {
-      player.eliminated = true;
-      player.spectator = true;
-      return;
-    }
-    if (this.state.phase === 'defeated') return;
-    if (!connected.length) return;
-    if (this.state.disconnectWait) return;
-    this.beginNextReconnectWait();
+    this.emit(EVENT.PLAYER_DEPARTED, { playerId: player.id, reason: 'left' });
   }
 
-  beginNextReconnectWait() {
-    if (this.state.disconnectWait || !this.connectedPlayers().length) return false;
-    const player = this.state.players
-      .filter((candidate) => !candidate.connected && !candidate.eliminated && !candidate.spectator)
-      .sort((a, b) => (a.disconnectedTick || 0) - (b.disconnectedTick || 0) || compareStableIds(a, b))[0];
-    if (!player) return false;
-    const startedTick = Number.isSafeInteger(player.disconnectedTick) ? player.disconnectedTick : this.state.tick;
-    this.state.phase = 'reconnect_wait';
-    this.state.disconnectWait = {
+  renamePlayer(command, player) {
+    const label = sanitizeLabel(command.payload.label);
+    if (!label) return this.reject(command, 'player name is invalid');
+    player.label = label;
+  }
+
+  disconnectPlayer(command, player) {
+    if (player.id === this.state.hostPlayerId) return this.leave(command, player);
+    player.connected = false;
+    player.connectionState = 'reconnecting';
+    player.disconnectedTick = this.state.tick;
+    player.reconnectDeadlineTick = this.state.tick + RECONNECT_WAIT_TICKS;
+    this.emit(EVENT.PLAYER_DISCONNECTED, {
       playerId: player.id,
-      startedTick,
-      deadlineTick: startedTick + RECONNECT_WAIT_TICKS
-    };
-    this.emit(EVENT.PLAYER_RECONNECT_WAIT_STARTED, this.state.disconnectWait);
+      reconnectDeadlineTick: player.reconnectDeadlineTick
+    });
+  }
+
+  markPlayerDeparted(player) {
+    if (!player || player.connectionState !== 'reconnecting') return false;
+    player.connectionState = 'departed';
+    player.eliminated = true;
+    player.spectator = true;
+    delete player.reconnectDeadlineTick;
+    this.emit(EVENT.PLAYER_DEPARTED, { playerId: player.id, reason: 'timeout' });
     return true;
   }
 
@@ -1640,7 +1688,7 @@ export class EmbeddedAuthority {
     if (player.id !== this.state.hostPlayerId) return this.reject(command, 'only the host may start the run');
     if (this.connectedPlayers().length < 1) return this.reject(command, 'the lobby has no players');
     try {
-      this.resetFreshRun(command.payload.mapId || this.map.id);
+      this.resetFreshRun(command.payload.mapId || this.map.id, command.payload.pace ?? DEFAULT_PACE);
     } catch {
       return this.reject(command, 'selected map is unavailable');
     }
@@ -1654,61 +1702,11 @@ export class EmbeddedAuthority {
     });
   }
 
-  continueWithoutPlayer(command, player) {
-    if (player.id !== this.state.hostPlayerId) return this.reject(command, 'only the host may continue without a player');
-    if (!this.state.disconnectWait) return this.reject(command, 'no player is waiting to reconnect');
-    this.completeBalancedInheritance(this.state.disconnectWait.playerId);
-  }
-
-  completeBalancedInheritance(departedPlayerId) {
-    const departed = this.state.players.find((player) => player.id === departedPlayerId);
-    const recipients = this.connectedPlayers().filter((player) => player.id !== departedPlayerId);
-    if (!departed || !recipients.length) return false;
-    const inheritedValue = new Map(recipients.map((player) => [player.id, 0]));
-    const assignments = [];
-    const orphaned = this.state.towers
-      .filter((tower) => tower.ownerId === departedPlayerId)
-      .sort((a, b) => b.totalInvestment - a.totalInvestment || compareStableIds(a, b));
-    for (const tower of orphaned) {
-      const recipient = [...recipients].sort((a, b) => {
-        return inheritedValue.get(a.id) - inheritedValue.get(b.id)
-          || a.joinedTick - b.joinedTick
-          || compareStableIds(a, b);
-      })[0];
-      tower.ownerId = recipient.id;
-      inheritedValue.set(recipient.id, inheritedValue.get(recipient.id) + tower.totalInvestment);
-      assignments.push({ towerId: tower.id, ownerId: recipient.id, investment: tower.totalInvestment });
-    }
-
-    const departedEconomy = this.state.economyByPlayer[departedPlayerId];
-    const credits = departedEconomy?.credits || 0;
-    const share = Math.floor(credits / recipients.length);
-    let remainder = credits % recipients.length;
-    const creditTransfers = {};
-    for (const recipient of recipients) {
-      const amount = share + (remainder-- > 0 ? 1 : 0);
-      this.state.economyByPlayer[recipient.id].credits += amount;
-      creditTransfers[recipient.id] = amount;
-    }
-    if (departedEconomy) departedEconomy.credits = 0;
-    departed.eliminated = true;
-    departed.spectator = true;
-    this.state.disconnectWait = null;
-    this.state.phase = 'running';
-    this.emit(EVENT.BALANCED_INHERITANCE_COMPLETED, {
-      departedPlayerId,
-      assignments,
-      creditTransfers
-    });
-    this.beginNextReconnectWait();
-    return true;
-  }
-
   restartSession(command) {
     if (this.state.phase === 'lobby') return this.reject(command, 'start the lobby instead of restarting it');
     if (this.connectedPlayers().length !== 1) return this.reject(command, 'multiplayer restart voting is not implemented');
     try {
-      this.resetFreshRun(command.payload.mapId || this.map.id);
+      this.resetFreshRun(command.payload.mapId || this.map.id, command.payload.pace ?? DEFAULT_PACE);
     } catch {
       return this.reject(command, 'selected map is unavailable');
     }
@@ -1732,7 +1730,7 @@ export class EmbeddedAuthority {
       this.state.attackFields = [];
       this.state.forceFields = [];
       const spawn = this.spawnSettings();
-      this.state.swarm = this.swarmSummary(this.state.dev.stopSpawns ? 0 : spawn.rate, spawn.sources, spawn.meanHp ?? spawn.enemyHp);
+      this.state.swarm = this.swarmSummary(this.state.dev.stopSpawns ? 0 : spawn.rate, spawn.sources, spawn.meanHp ?? spawn.enemyHp, spawn.surge || null);
     }
     if (action === 'healBase' || (option === 'infiniteHealth' && enabled)) {
       this.state.base.lives = this.state.base.maxLives || this.startingLives;
@@ -1742,16 +1740,18 @@ export class EmbeddedAuthority {
 
   purchaseResearch(command, player) {
     const tower = this.state.towers.find((item) => item.id === command.payload.towerId);
-    if (!tower || tower.definitionId !== 'arsenal' || tower.ownerId !== player.id) return this.reject(command, 'own an arsenal to research');
+    if (!tower || tower.definitionId !== 'arsenal') return this.reject(command, 'an arsenal is required to research');
     const node = researchNode(command.payload.researchId);
     if (!node || !arsenalChoices(this.state).some((item) => item.id === node.id)) return this.reject(command, 'unlock the parent research first');
     const owned = hasResearch(this.state, node.id);
     if (owned) return this.reject(command, 'research already owned');
     const cost = node.cost;
     if (command.payload.expectedCost !== cost) return this.reject(command, 'research changed; refresh the price');
-    const wallet = this.state.economyByPlayer[player.id];
-    if (!this.state.dev?.infiniteMoney && wallet.credits < cost) return this.reject(command, 'insufficient research credits');
-    if (!this.state.dev?.infiniteMoney) wallet.credits -= cost; wallet.totalSpent += cost;
+    const economy = this.state.teamEconomy;
+    if (!this.state.dev?.infiniteMoney && economy.credits < cost) return this.reject(command, 'insufficient research credits');
+    if (!this.state.dev?.infiniteMoney) economy.credits -= cost;
+    economy.totalSpent += cost;
+    this.state.contributionByPlayer[player.id].creditsSpent += cost;
     if (!owned) this.state.research.unlocked.push(node.id);
     tower.researchPath = []; // Legacy physical-station paths are no longer used.
     this.modifierCache = null;
@@ -1760,12 +1760,14 @@ export class EmbeddedAuthority {
 
   purchaseReactor(command, player) {
     const tower = this.state.towers.find((item) => item.id === command.payload.towerId);
-    if (!tower || tower.definitionId !== 'reactor' || tower.ownerId !== player.id) return this.reject(command, 'own a reactor to upgrade');
+    if (!tower || tower.definitionId !== 'reactor') return this.reject(command, 'a reactor is required to upgrade');
     const quote = reactorQuote(this.state, command.payload.categoryId);
     if (!quote || command.payload.expectedRank !== quote.rank || command.payload.expectedCost !== quote.cost) return this.reject(command, 'reactor rank or price changed');
-    const wallet = this.state.economyByPlayer[player.id];
-    if (!this.state.dev?.infiniteMoney && wallet.credits < quote.cost) return this.reject(command, 'insufficient reactor credits');
-    if (!this.state.dev?.infiniteMoney) wallet.credits -= quote.cost; wallet.totalSpent += quote.cost;
+    const economy = this.state.teamEconomy;
+    if (!this.state.dev?.infiniteMoney && economy.credits < quote.cost) return this.reject(command, 'insufficient reactor credits');
+    if (!this.state.dev?.infiniteMoney) economy.credits -= quote.cost;
+    economy.totalSpent += quote.cost;
+    this.state.contributionByPlayer[player.id].creditsSpent += quote.cost;
     this.state.research.reactor[quote.id] = quote.rank + 1;
     if (quote.id === 'lives') {
       this.state.base.maxLives = this.startingLives + (quote.rank + 1) * 5;
@@ -1786,17 +1788,20 @@ export class EmbeddedAuthority {
       const point = socketPoint(this.state, this.map, candidate);
       return point && Math.hypot(point.x - x, point.y - y) <= 10;
     });
-    if (socket && (socket.ownerId !== player.id || definitionId === 'hardpoint'
+    if (socket && (definitionId === 'hardpoint'
       || this.state.towers.some((candidate) => candidate.socketHostId === socket.id))) return this.reject(command, 'socket unavailable');
     const point = socket ? socketPoint(this.state, this.map, socket) : { x, y };
     const areaId = socket?.areaId || findDefenseAreaAt(this.map, x, y);
     if (!areaId) return this.reject(command, 'tower must be inside a defense area');
     if (!towerPlacementClear(this.state.towers, point.x, point.y)) return this.reject(command, 'towers need 24 units of clearance');
-    const cost = purchaseCost(this.state, areaId, build.cost);
-    const economy = this.state.economyByPlayer[player.id];
+    const cost = purchaseCost(this.state, areaId, build.cost, { placement: true });
+    const economy = this.state.teamEconomy;
     if (!this.state.dev?.infiniteMoney && economy.credits < cost) return this.reject(command, 'insufficient credits');
     if (!this.state.dev?.infiniteMoney) economy.credits -= cost;
     economy.totalSpent += cost;
+    const contribution = this.state.contributionByPlayer[player.id];
+    contribution.creditsSpent += cost;
+    contribution.towersCreated += 1;
     const tower = this.normalizeTower({
       id: `tower_${this.nextTowerNumber++}`,
       ownerId: player.id,
@@ -1819,18 +1824,18 @@ export class EmbeddedAuthority {
   evolveTower(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may evolve it');
     const current = this.towerDefinitions[tower.definitionId];
     const next = this.towerDefinitions[command.payload.definitionId];
     if (!current || !next || !current.evolutionChoices?.includes(next.id) || next.evolvesFrom !== current.id) {
       return this.reject(command, 'tower form is not a valid replacement');
     }
-    const economy = this.state.economyByPlayer[player.id];
+    const economy = this.state.teamEconomy;
     if (tower.socketHostId && next.id === 'hardpoint') return this.reject(command, 'hardpoints cannot nest');
     const cost = purchaseCost(this.state, tower.areaId, next.evolutionCost);
     if (!this.state.dev?.infiniteMoney && economy.credits < cost) return this.reject(command, 'insufficient credits');
     if (!this.state.dev?.infiniteMoney) economy.credits -= cost;
     economy.totalSpent += cost;
+    this.state.contributionByPlayer[player.id].creditsSpent += cost;
     const previousDefinitionId = tower.definitionId;
     tower.definitionId = next.id;
     if (next.supportOnly || next.networkNode) {
@@ -1862,6 +1867,7 @@ export class EmbeddedAuthority {
       towerId: tower.id,
       previousDefinitionId,
       tower,
+      actorPlayerId: player.id,
       cost,
       credits: economy.credits
     });
@@ -1871,19 +1877,19 @@ export class EmbeddedAuthority {
     const towerIndex = this.state.towers.findIndex((tower) => tower.id === command.payload.towerId);
     if (towerIndex < 0) return this.reject(command, 'tower does not exist');
     const tower = this.state.towers[towerIndex];
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may sell it');
     if (this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     const refund = saleRefund(this.state, tower);
-    const economy = this.state.economyByPlayer[player.id];
+    const economy = this.state.teamEconomy;
     economy.credits += refund;
+    this.state.contributionByPlayer[player.id].towersSold += 1;
     this.state.towers.splice(towerIndex, 1);
     this.modifierCache = null;
-    this.emit(EVENT.TOWER_SOLD, { towerId: tower.id, ownerId: player.id, refund, credits: economy.credits });
+    this.emit(EVENT.TOWER_SOLD, { towerId: tower.id, ownerId: tower.ownerId, actorPlayerId: player.id, refund, credits: economy.credits });
   }
 
   setEchoSource(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
-    if (!tower || tower.ownerId !== player.id || tower.definitionId !== 'echo') return this.reject(command, 'echo unavailable');
+    if (!tower || tower.definitionId !== 'echo') return this.reject(command, 'echo unavailable');
     if (!controlSource(this.state, tower, command.payload.sourceTowerId)) return this.reject(command, 'select a connected control turret');
     tower.echoSourceId = command.payload.sourceTowerId;
     tower.controlGeometry = null;
@@ -1896,7 +1902,7 @@ export class EmbeddedAuthority {
   setSocket(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     const fraction = command.payload.fraction;
-    if (!tower || tower.ownerId !== player.id || !socketPoint(this.state, this.map, tower)) return this.reject(command, 'linked hardpoint required');
+    if (!tower || !socketPoint(this.state, this.map, tower)) return this.reject(command, 'linked hardpoint required');
     if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) return this.reject(command, 'socket must lie on the relay line');
     if (this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     tower.socketFraction = fraction;
@@ -1905,7 +1911,6 @@ export class EmbeddedAuthority {
   setTowerTargeting(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may change targeting');
     const allowedModes = [...(this.weaponDefinition(tower)?.targetingModes || ['closest']), ...(hasResearch(this.state,16) ? ['execution'] : []), ...(hasResearch(this.state,36) ? ['highest_hp'] : [])];
     if (!allowedModes.includes(command.payload.mode)) return this.reject(command, 'targeting mode is unavailable');
     tower.targetingMode = command.payload.mode;
@@ -1915,7 +1920,6 @@ export class EmbeddedAuthority {
   setTowerStrikePoint(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may set its strike point');
     const definition = this.weaponDefinition(tower);
     if (!supportsStrikePoint(definition?.attack)) return this.reject(command, 'tower does not support strike points');
     const clearing = command.payload.x === null && command.payload.y === null;
@@ -1937,7 +1941,6 @@ export class EmbeddedAuthority {
   setTowerForceDirection(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may set its force direction');
     const definition = this.weaponDefinition(tower);
     if (definition?.control?.input !== 'direction') return this.reject(command, 'tower does not support manual direction');
     const clearing = command.payload.x === null && command.payload.y === null;
@@ -1963,7 +1966,6 @@ export class EmbeddedAuthority {
   setTowerControlGeometry(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may configure it');
     const definition = this.weaponDefinition(tower);
     if ((tower.socketHostId && definition.id === 'hardpoint') || this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     if (!supportsControlGeometry(definition)) return this.reject(command, 'tower has no configurable control geometry');
@@ -1981,7 +1983,6 @@ export class EmbeddedAuthority {
   setRelayTarget(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
-    if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may set its relay');
     if (this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     const targetAreaId = this.validRelayTargetAreaId(tower, command.payload.targetAreaId);
     if (!targetAreaId) return this.reject(command, 'nebula is outside relay range');
@@ -2089,7 +2090,7 @@ export class EmbeddedAuthority {
       tower.controlGeometry = defaultControlGeometry(definition, tower, this.map);
       tower.controlReadyTick = this.state.runTick + controlRebootTicks(definition);
     }
-    this.emit(EVENT.TOWER_EVOLVED, { towerId: tower.id, previousDefinitionId, tower, cost: 0, credits: this.state.economyByPlayer[player.id].credits, test: true });
+    this.emit(EVENT.TOWER_EVOLVED, { towerId: tower.id, previousDefinitionId, tower, cost: 0, credits: this.state.teamEconomy.credits, test: true });
   }
 
   moveTestTower(command, player) {
@@ -2117,25 +2118,13 @@ export class EmbeddedAuthority {
   }
 
   distributeIncome(totalCredits) {
-    const connected = this.connectedPlayers();
-    if (!connected.length) {
+    if (!this.connectedPlayers().length) {
       this.state.stats.unclaimedCredits += totalCredits;
       return;
     }
-    const share = Math.floor(totalCredits / connected.length);
-    const remainder = totalCredits % connected.length;
-    const payouts = {};
-    for (const player of connected) payouts[player.id] = share;
-    for (let index = 0; index < remainder; index += 1) {
-      payouts[connected[(this.payoutCursor + index) % connected.length].id] += 1;
-    }
-    this.payoutCursor = (this.payoutCursor + remainder) % connected.length;
-    for (const player of connected) {
-      const economy = this.state.economyByPlayer[player.id];
-      economy.credits += payouts[player.id];
-      economy.totalEarned += payouts[player.id];
-    }
-    this.emit(EVENT.INCOME_DISTRIBUTED, { totalCredits, payouts });
+    this.state.teamEconomy.credits += totalCredits;
+    this.state.teamEconomy.totalEarned += totalCredits;
+    this.emit(EVENT.INCOME_DISTRIBUTED, { totalCredits, credits: this.state.teamEconomy.credits });
   }
 
   recordBreaches(count, invincible = false) {
@@ -2165,7 +2154,6 @@ export class EmbeddedAuthority {
         nextProjectileNumber: this.nextProjectileNumber,
         nextFieldNumber: this.nextFieldNumber,
         nextAttackFieldNumber: this.nextAttackFieldNumber,
-        payoutCursor: this.payoutCursor,
         lastSequenceByClient: [...this.lastSequenceByClient.entries()],
         pendingCommands: cloneSerializable(this.pendingCommands)
       },
@@ -2175,7 +2163,7 @@ export class EmbeddedAuthority {
   }
 
   applyCorrectionSnapshot(correction) {
-    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
+    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
       throw new Error('session correction is incompatible');
     }
     const correctionSeed = correction.state?.seed;
@@ -2192,8 +2180,28 @@ export class EmbeddedAuthority {
     }
     this.state = cloneSerializable(correction.state);
     this.state.protocolVersion = PROTOCOL_VERSION;
+    if (!this.state.teamEconomy) {
+      const wallets = Object.values(this.state.economyByPlayer || {});
+      this.state.teamEconomy = {
+        credits: wallets.reduce((sum, wallet) => sum + Math.max(0, Math.floor(wallet?.credits || 0)), 0),
+        totalEarned: wallets.reduce((sum, wallet) => sum + Math.max(0, Math.floor(wallet?.totalEarned || 0)), 0),
+        totalSpent: wallets.reduce((sum, wallet) => sum + Math.max(0, Math.floor(wallet?.totalSpent || 0)), 0)
+      };
+    }
+    delete this.state.economyByPlayer;
+    this.state.contributionByPlayer ||= {};
+    for (let index = 0; index < (this.state.players || []).length; index += 1) {
+      const player = this.state.players[index];
+      player.colorId ||= `player_${index % 4}`;
+      player.connectionState ||= player.connected ? 'connected' : player.eliminated ? 'departed' : 'reconnecting';
+      this.state.contributionByPlayer[player.id] = {
+        ...initialContribution(),
+        ...(this.state.contributionByPlayer[player.id] || {})
+      };
+    }
     this.state.research = { ...freshResearch(), ...(this.state.research || {}) };
     this.state.relayNetwork = { ...freshRelayNetwork(), ...(this.state.relayNetwork || {}) };
+    this.state.pace = normalizePace(this.state.pace ?? DEFAULT_PACE);
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
     this.state.mapCatalog = playableMaps().map((map) => ({ id: map.id, label: map.label }));
@@ -2231,7 +2239,9 @@ export class EmbeddedAuthority {
     this.state.swarm = this.swarmSummary(
       Number(this.state.swarm?.spawnRatePerSecond) || 0,
       { length: activeSpawnPoints },
-      this.state.swarm?.meanHp || 1
+      this.state.swarm?.meanHp || 1,
+      // surges are derived from the seed and tick, so a save without one simply recomputes
+      this.state.test ? null : surgeScheduleAt(this.map, threatTickAt(this.state.runTick, this.state.pace), this.seed, AUTHORITY_TICK_RATE)
     );
     const metadata = correction.authority || {};
     this.eventCounter = metadata.eventCounter || this.eventCounter;
@@ -2241,7 +2251,6 @@ export class EmbeddedAuthority {
       || this.state.projectiles.reduce((maximum, projectile) => Math.max(maximum, Number(projectile.id.split('_').at(-1)) || 0), 0) + 1;
     this.nextFieldNumber = metadata.nextFieldNumber || 1;
     this.nextAttackFieldNumber = metadata.nextAttackFieldNumber || 1;
-    this.payoutCursor = metadata.payoutCursor || 0;
     if (Array.isArray(metadata.lastSequenceByClient)) this.lastSequenceByClient = new Map(metadata.lastSequenceByClient);
     this.pendingCommands = Array.isArray(metadata.pendingCommands) ? cloneSerializable(metadata.pendingCommands) : [];
     this.events = [];

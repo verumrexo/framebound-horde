@@ -10,7 +10,7 @@ const set = (payload) => a.setDevTools(cmd(payload), player);
 a.setDevTools(cmd({ option: 'infiniteMoney', enabled: true }), { id: 'guest' });
 assert.equal(a.state.dev, undefined);
 set({ option: 'infiniteMoney', enabled: true });
-const wallet = a.state.economyByPlayer[player.id]; wallet.credits = 0;
+const wallet = a.state.teamEconomy; wallet.credits = 0;
 const area = a.map.defenseAreas[0];
 a.placeTower(cmd({ definitionId: 'frame', x: area.shape.x, y: area.shape.y }), player);
 assert.equal(a.state.towers.length, 1); assert.equal(wallet.credits, 0);

@@ -8,7 +8,7 @@ framebound horde is a real-time space tower-defense survival game about holding 
 
 - production enemies are hostile-red squares with exactly 1 hp. a future weapon that “deals 10” means it can affect up to 10 valid enemies, not that ordinary enemies become health sponges.
 - enemies enter from one broad authored top rift at the beginning of a run. spawn rate rises with elapsed time and additional broad perimeter rifts unlock with advance warning. each production map has 32 rifts, unlocks one every 60 seconds, and gradually expands from the distant north edge down both sides into late-game lower corners; nothing spawns directly beneath the base. production camera limits use a smaller authored safe view than the simulation bounds, so even maximum zoom keeps rifts and spawning offscreen.
-- there are no waves, lanes, gravity, bouncing, pachinko physics, build pauses, difficulty selector, or active-enemy cap. if the player cannot clear the horde, the population is allowed to bury the base. above 20,000 movement records, nearby 1 hp enemies begin sharing deterministic swarm packets; this limits simulation records rather than gameplay population.
+- there are no waves, lanes, gravity, bouncing, pachinko physics, build pauses, or active-enemy cap. the only run-wide setting is the horde pace chosen at deployment, a time stretch on the threat clock rather than a difficulty preset. if the player cannot clear the horde, the population is allowed to bury the base. above 20,000 movement records, nearby 1 hp enemies begin sharing deterministic swarm packets; this limits simulation records rather than gameplay population.
 - enemies steer toward one base near the bottom without lanes or predetermined paths. a deterministic crowd field supplies approximate collision, shared momentum, pressure, and broad seeded curl; nearby nebula gradients bend and split that flow. enemies approach across a distributed arc and only collapse onto the base at close range. each arrival loses one base life and arrivals are never throttled to one life per second.
 - maps are authored selectable definitions, not merely different random seeds. each may have its own bounds, defense areas, base, spawn locations, unlock timing, and flow.
 - towers may be placed anywhere inside a defense area. they do not block enemies, take damage, or get destroyed.
@@ -142,18 +142,19 @@ the field provides one primary tower, up to 8 support towers, two defense areas 
 ## cooperative multiplayer contract
 
 - cooperative play is a fixed requirement for 2–4 players over webrtc peer-to-peer data channels. there is no dedicated authoritative gameplay server; a signaling service only introduces peers and a turn relay is a connectivity fallback.
-- one peer is authoritative for commands, physical victims, kills, money, lives, ownership, checksums, and correction snapshots. peers run the same seeded fixed-tick simulation so 100 or 10,000 enemies remain visually close; the host's ids and outcomes are final.
+- one peer is authoritative for commands, physical victims, kills, the shared team economy, lives, creator attribution, checksums, and correction snapshots. peers run the same seeded fixed-tick simulation so 100 or 10,000 enemies remain visually close; the host's ids and outcomes are final.
 - the roster locks when the run starts. new players cannot join mid-run. an original player may reconnect.
-- a disconnect freezes the run for up to 90 seconds by default. the host may continue earlier. if the host disconnects, authority migrates before inheritance is resolved.
-- if a player is removed, their towers are distributed across remaining players to balance inherited total investment, and their wallet is split evenly. a player returning after transfer is a spectator.
-- wallets are individual. kill income is divided as evenly as possible among connected players.
-- solo is about individual skill; co-op is about teamwork. neither mode pauses except the explicit reconnect/host-migration hold.
+- a guest disconnect never freezes the run. their authenticated identity is reserved for 90 seconds; expiry marks them departed, and a later return is spectator-only.
+- all towers remain active and team-editable through disconnects. `ownerid` is immutable creator attribution, not an interaction permission.
+- co-op has one fixed starting team pool regardless of roster size. all kill, support and refund income enters it once, and any connected player may spend it without approval.
+- unexpected host loss ends the room. network host migration is deliberately not claimed.
+- chat, pings and live presence are host-stamped social data outside deterministic gameplay, replay, corrections and saves.
 
 ### first public beta
 
-the pixel main menu now hosts or joins a six-character room through the existing framebound signaling relay. two to four linked pilots share one host-scheduled run; the host selects its map. player commands, packed corrections, version checks, guest reconnection, and balanced inheritance are connected. foreign towers can be inspected but not edited. co-op never replaces the player's solo autosave.
+the pixel main menu hosts or joins a six-character room through the existing framebound signaling relay. two to four linked pilots share one host-scheduled run; the host selects its map. player commands, packed corrections, version checks and non-pausing guest reconnection are connected. teammates may build, upgrade, configure and sell any tower; creator colors remain subtle attribution. co-op never replaces the player's solo autosave.
 
-the full contract above remains the target. this beta does not yet have network host migration, turn fallback, or restart voting. the host must keep the game open; an original guest can reconnect, but the room cannot survive its host closing. restrictive-network connectivity and multi-machine gameplay are manual acceptance checks, not claimed as verified by a build.
+the beta does not have network host migration, turn service fallback, or restart voting. the host must keep the game open; an original guest can reconnect, but the room cannot survive its host closing. restrictive-network connectivity and multi-machine gameplay are manual acceptance checks, not claimed as verified by a build.
 
 ## network grandchildren
 
@@ -198,7 +199,7 @@ this section supersedes the earlier one-hp-only and forced low-resolution render
 
 ## arsenal and reactor / protocol 17
 
-this supersedes earlier salvage/foundry descriptions: salvage migrates to reactor and foundry to arsenal. arsenal offers 39 unique global research nodes in a 3/9/27 tree, with one path per station and free traversal of owned ancestors. tiers cost 10 million, 100 million and 1 billion. reactor offers 12 globally priced rank categories. research survives station sale and never contributes to its refund. purchases use the payer wallet; benefits are shared. see [the approved station design](arsenal-reactor-proposal.md) for effects and caps. fractional damage pays accumulated whole hp, without overkill rewards; secondary attacks cannot recursively trigger research. automated checks cover authority behavior; manual gameplay and multiplayer acceptance remain pending.
+this supersedes earlier salvage/foundry descriptions: salvage migrates to reactor and foundry to arsenal. arsenal offers 39 unique global research nodes in a 3/9/27 tree, with one path per station and free traversal of owned ancestors. tiers cost 10 million, 100 million and 1 billion. reactor offers 12 globally priced rank categories. research survives station sale and never contributes to its refund. protocol 23 purchases use the shared team pool; benefits are shared. see [the approved station design](arsenal-reactor-proposal.md) for effects and caps. fractional damage pays accumulated whole hp, without overkill rewards; secondary attacks cannot recursively trigger research. automated checks cover authority behavior; manual gameplay and multiplayer acceptance remain pending.
 
 ## september 11 follow-up
 
@@ -207,3 +208,13 @@ this supersedes earlier salvage/foundry descriptions: salvage migrates to reacto
 - reactor damage ranks are +10% each and stack additively; reactor ranks grow x1.25 per rank per category; arsenal tiers cost 100k / 1m / 10m. see `arsenal-reactor-proposal.md`.
 - once every nebula on a map shares one relay network, ordinary connector relays collapse and upload themselves into the network: they are refunded like a sale, their footprints become buildable again, and the established links persist through saves and multiplayer corrections. amplifier, echo and hardpoint keep their bodies; relays built later remain available as stepping stones to those forms.
 - pixel rings (explosions, ranges, control fields) are rasterised on the gpu with identical pixels at a fraction of the previous frame cost.
+
+## late-game balance revision // protocol 23
+
+this supersedes the reactor damage line of the september 11 follow-up and the uncapped exponential in the protocol 16 section. see `balance-late-game.md` for the diagnosis, curves and harness.
+
+- the hp budget stays `(2 + 0.8m) · 1.22^m` through minute 20 (the opening is byte-identical), then the per-minute growth factor eases log-linearly from 1.22 at minute 20 to 1.12 at minute 40 and holds there. the body cap is unchanged; the curve stays exponential, so every run still ends.
+- reactor damage ranks multiply primary damage by 1.10 each and compound; the damage category costs 100,000 for its first rank and grows x1.20 per rank, uncapped. the other eleven categories keep 10,000 x1.25 and their caps. arsenal prices are unchanged.
+- placements beyond the first thirty on a map cost x1.06 more per additional tower (upgrades never escalate; the test field is exempt; selling or network-retired relays lower the count). the construction reactor category multiplies the escalated price.
+- rift surges: sixty seconds after the last rift opens, and every six minutes after, three neighbouring rifts (one or two on maps with few rifts) run hot for two minutes with a forty-five-second warning. hot rifts take three times their ordinary share and add a separate stream of 15% of the body cap at `(3 + 0.5k)` times the current mean hp for surge `k`. the arc is deterministic from the seed and never repeats or overlaps the previous arc. the hud names the direction and counts down; hot rift markers pulse amber with a second bracket.
+- horde pace: the map selection panel offers a pace from x0.6 to x1.6 in 0.1 steps (`[` / `]` or the `-` / `+` buttons, remembered locally). pace stretches the threat clock uniformly — spawn curve, hp mixture, rift unlock timing and surges — while the run timer stays real time. it travels in the start and restart commands, corrections and saves; older saves load at x1.0. the defeat summary and hud show a non-default pace.

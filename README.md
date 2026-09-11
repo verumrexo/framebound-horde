@@ -31,6 +31,7 @@ keep the host's game open and active. this beta uses the existing framebound sig
 - `q / e`: targeting. `a`: rocket strike point, laser direction, broadside fan facing, or editable control geometry. `0`: back to automatic.
 - `g`: all ranges. `k`: kills-per-second. `t`: solo test field.
 - drag: pan. wheel: integer pixel zoom. `esc`: menu; it does not pause a running game.
+- map selection `[ / ]`: horde pace x0.6–x1.6, a time stretch on the spawn curve, rift unlocks and surges.
 
 ## local build
 

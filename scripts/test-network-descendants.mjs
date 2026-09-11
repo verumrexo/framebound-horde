@@ -64,9 +64,9 @@ test('old foundry/salvage migrate without free discounts or research', () => {
   assert.equal(saleRefund(a.state, frame), 44);
   a.evolveTower(command({ towerId: frame.id, definitionId: 'network' }), player);
   assert.equal(frame.totalInvestment, 288);
-  const before = a.state.economyByPlayer[player.id].credits;
+  const before = a.state.teamEconomy.credits;
   a.sellTower(command({ towerId: frame.id }), player);
-  assert.equal(a.state.economyByPlayer[player.id].credits - before, 144);
+  assert.equal(a.state.teamEconomy.credits - before, 144);
 });
 
 test('echo copies control once, respects network scope, and loses a sold source', () => {
