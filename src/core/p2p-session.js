@@ -305,6 +305,14 @@ export class P2PHostSession {
       if ([EVENT.PLAYER_JOINED, EVENT.PLAYER_RECONNECTED, EVENT.PLAYER_LEFT, EVENT.BALANCED_INHERITANCE_COMPLETED].includes(event.type)) {
         this.onRosterChanged?.(this.authority.snapshot());
       }
+      // A map transition is a high-value boundary. Command replication normally
+      // converges it, but an immediate correction makes relay-backed guests
+      // enter the same live run even if they arrived around the transition.
+      if ([EVENT.RUN_STARTED, EVENT.SESSION_RESTARTED].includes(event.type)) {
+        for (const peer of this.peers.values()) {
+          if (peer.ready) this.sendCorrection(peer, 'map_transition');
+        }
+      }
     }
     this.flushPeerWelcomes();
     this.syncElapsedMs += elapsedMs;
