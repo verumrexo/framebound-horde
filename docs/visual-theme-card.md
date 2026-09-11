@@ -217,18 +217,13 @@ the game now renders at display pixel density with antialiasing. the earlier for
 
 linked nebulae reveal sparse, static, world-aligned circuit traces inside their silhouettes. traces disappear beyond zoom scale 5; ordinary link lines stay below enemy contrast and render underneath enemies. at most one two-pixel signal moves across the entire network for two seconds every eight seconds. paid research triggers one outward activation on existing traces only, lasting at most four seconds; repeated purchases replace the wave. no full-field flashes, tower-body blinking, glow, particles, or additional labels. reduced-motion preference disables both traveling effects. this is presentation only and does not change buff timing or network rules.
 
-## modern tactical combat interface
+## refined pixel combat interface
 
-this section supersedes the bitmap-only interface rules for the normal combat hud and initial tower action panel. the battlefield, world labels, and remaining canvas interfaces retain their existing visual language.
+the combat hud and tower panel stay in the canvas and use the authored bitmap atlas. the readability pass increases hierarchy without introducing html chrome or a second visual language.
 
-- use an html/css overlay at screen-pixel sizes, independently of the world's display scale and zoom. use native system sans-serif, lowercase copy, and tabular numbers. the framebound wordmark still uses the authored 5×7 glyph data.
-- surfaces are opaque `#06100f`, borders are muted `#2b403b`, primary text is `#e0e9e5`, and secondary text is readable `#9aaea7`. square corners, a short mint accent rail, no glow, blur, glass, or decorative animation.
-- use a 4px spacing grid, 12–14px secondary copy, 16px controls, 24px key values, and controls at least 32px tall (the initial implementation uses 36px).
-- prioritise credits, lives, and next-rift countdown in the top hud. time and horde count are secondary; the kps toggle controls its secondary readout. expandable details retain performance, economy, firing, and network telemetry.
-- group placement/catalog/target actions at the bottom left and display/menu controls at the right. status occupies a separate line and may wrap or scroll in narrow layouts.
-- attach the selected tower panel to its projected world position, flip it below the tower when necessary, and clamp it between the measured hud edges. cap its height and scroll its contents rather than shrink text or lose actions. separate name, performance, investment, primary upgrade/link action, specialised controls, and the red sell action. peer-owned towers are inspect-only, including research stations.
-- the canvas and html tower panels consume the same action view. commands, ownership enforcement, simulation, and network schemas are unchanged.
-- top and bottom measurements set logical playable bounds for the camera, placement, and attached canvas panels. the overlay consumes its own pointer/wheel events; native focused controls consume keyboard input. clicking back on the battlefield restores game hotkeys.
-- main/escape menus, test-field hud, research/dev dialogs, loss, and reconnection screens retain the canvas presentation. full canvas dialogs temporarily use the legacy hud so html cannot obscure their controls. the build catalog and tower upgrade/target submenus remain canvas-based; the html tower panel hides while they are open.
+- top telemetry gives lives, credits, and next-rift state a larger bitmap scale where the viewport has room. time, horde, income, spawn rate, network state, and fps remain compact two-line telemetry.
+- the bottom strip has 17px pixel controls, a dedicated status line, and a separate muted performance line. narrow windows move the right control group to a second row instead of overlapping it.
+- selected towers use a larger attached pixel panel with title, activity metric, investment, and separated action rows. tall relay and echo panels paginate within the playable field. peer-owned towers remain inspect-only.
+- the same canvas hud renders during active play, defeat, reconnect, research, and menus. no overlay appears or disappears across game state transitions.
 
-verification: `npm run test:ui` covers measured bounds at both display scales, narrow/wide layouts, panel flipping/clamping, and shared tower action routes/ownership. `npm run check` includes this gate. manual visual and interaction acceptance stays with the user; the existing framebuffer-only debug capture does not include html surfaces.
+verification: `npm run test:ui` covers pixel layout, narrow reflow, telemetry clipping, panel pagination, tower action routes, and ownership. `npm run check` includes this gate.

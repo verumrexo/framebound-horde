@@ -21,7 +21,7 @@
     "test:lasers": "node scripts/test-laser-effects.mjs",
     "test:sweep": "node scripts/test-sweep-collision.mjs",
     "test:options": "node scripts/test-gameplay-options.mjs",
-    "test:ui": "node --check src/ui/tactical-hud.js && node scripts/test-tactical-layout.mjs && node scripts/test-tactical-actions.mjs"
+    "test:ui": "node scripts/test-pixel-ui.mjs && node scripts/test-tactical-actions.mjs"
   },
   "dependencies": {
     "socket.io-client": "^4.8.3"
