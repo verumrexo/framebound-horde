@@ -11,6 +11,7 @@
     "balance:kps": "node scripts/benchmark-kps.mjs",
     "balance:gameplay": "node scripts/benchmark-gameplay.mjs",
     "serve": "vite preview --host 127.0.0.1 --port 4173",
+    "relay": "npm run build && node scripts/relay-server.mjs",
     "test:art": "node scripts/test-tower-sprites.mjs",
     "test:persistence": "node scripts/test-persistence.mjs",
     "test:progression": "node scripts/test-progression.mjs",

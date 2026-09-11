@@ -19,7 +19,7 @@ keep the host's game open and active. this beta uses the existing framebound sig
 
 - new players cannot join after deployment. an original guest can reconnect using the same browser tab and room code.
 - a dropped guest holds the run for up to 90 seconds. the host may continue early; the departed player's towers are redistributed by total investment and their wallet is split.
-- host migration and turn fallback are not connected in this beta. closing the host ends the peer session, and some restrictive networks may fail to connect. connection failures are shown in the pixel lobby.
+- host migration is not connected in this beta. closing the host ends the peer session. the client accepts short-lived TURN credentials from the signaling service when that service is configured with a relay; see [turn relay setup](docs/turn-relay.md).
 - multiplayer restart voting is not implemented; start another room for a fresh co-op run.
 - solo autosaves and the local test field stay separate from co-op.
 

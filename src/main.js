@@ -15,7 +15,7 @@ import { NETWORK_DESCENDANT_IDS, controlSource, isRelayForm, purchaseCost, saleR
 import { defenseAreaBounds, defenseAreaField, findDefenseAreaAt, getMapDefinition, playableMaps } from './core/world-config.js';
 import { loadSoloRun, saveSoloRun } from './core/persistence.js';
 import { P2PGuestSession, P2PHostSession } from './core/p2p-session.js';
-import { PeerConnectionCoordinator, SIGNALING_URL, sanitizeRoomCode } from './core/p2p-transport.js';
+import { PeerConnectionCoordinator, RelayConnectionCoordinator, SIGNALING_URL, relayUrlForPage, sanitizeRoomCode } from './core/p2p-transport.js';
 
 let logicalWidth = 640;
 let logicalHeight = 360;
@@ -1053,7 +1053,10 @@ function updateMultiplayerStatus(phase, status, detail = '') {
 }
 
 function bindPeerCoordinator(bundle, role, code = null) {
-  const coordinator = new PeerConnectionCoordinator();
+  const relayMode = new URLSearchParams(window.location.search).get('relay') === '1';
+  const coordinator = relayMode
+    ? new RelayConnectionCoordinator({ relayUrl: relayUrlForPage() })
+    : new PeerConnectionCoordinator();
   peerCoordinator = coordinator;
   bundle.coordinator = coordinator;
   const networkSession = bundle.session;
@@ -1098,7 +1101,7 @@ function bindPeerCoordinator(bundle, role, code = null) {
       joining_session: 'finding room',
       connecting_to_host: 'negotiating direct link',
       peer_connecting: 'pilot found // opening direct link',
-      connected: 'direct p2p link open',
+      connected: relayMode ? 'relay link open' : 'direct p2p link open',
       reconnecting: 'reconnecting direct link',
       join_timeout: 'room connection timed out',
       connection_lost: 'direct connection lost',

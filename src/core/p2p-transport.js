@@ -9,6 +9,25 @@ export const DEFAULT_ICE_SERVERS = Object.freeze([
   Object.freeze({ urls: 'stun:stun.cloudflare.com:3478' })
 ]);
 
+// TURN credentials must be issued by the signaling service per room. Do not put
+// a permanent TURN password in this browser bundle: it is public the moment the
+// game is deployed.
+export function normalizeIceServers(value, fallback = DEFAULT_ICE_SERVERS) {
+  if (!Array.isArray(value)) return fallback;
+  const servers = value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const urls = Array.isArray(entry.urls) ? entry.urls : [entry.urls];
+    const validUrls = urls.filter((url) => typeof url === 'string' && /^(stun|turn|turns):/i.test(url));
+    if (!validUrls.length) return [];
+    const server = { urls: validUrls };
+    if (typeof entry.username === 'string') server.username = entry.username;
+    if (typeof entry.credential === 'string') server.credential = entry.credential;
+    if (typeof entry.credentialType === 'string') server.credentialType = entry.credentialType;
+    return [Object.freeze(server)];
+  });
+  return servers.length ? Object.freeze(servers) : fallback;
+}
+
 const MAX_BUFFERED_BYTES = 1_000_000;
 const MAX_QUEUED_BYTES = 32 * 1024 * 1024;
 
@@ -98,6 +117,55 @@ export class DataChannelTransport {
     this.queuedBytes = 0;
     for (const listener of this.closeListeners) listener(reason);
   }
+}
+
+// A host-run WebSocket relay is deliberately a fallback for networks where
+// WebRTC cannot negotiate. It is single-guest: the normal P2P path remains the
+// multi-pilot implementation.
+export class WebSocketRelayTransport {
+  constructor(socket) {
+    this.socket = socket;
+    this.readyState = socket.readyState === WebSocket.OPEN ? 'open' : 'connecting';
+    this.messageListeners = new Set();
+    this.openListeners = new Set();
+    this.closeListeners = new Set();
+    this.controlListeners = new Set();
+    socket.binaryType = 'arraybuffer';
+    socket.onopen = () => this.handleOpen();
+    socket.onmessage = (event) => this.handleMessage(event.data);
+    socket.onclose = () => this.handleClose('relay_closed');
+    socket.onerror = () => this.handleClose('relay_error');
+  }
+
+  send(message) {
+    if (this.readyState !== 'open') return false;
+    try { this.socket.send(message); return true; } catch { this.handleClose('relay_send_failed'); return false; }
+  }
+  onMessage(listener) { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
+  onOpen(listener) { this.openListeners.add(listener); if (this.readyState === 'open') queueMicrotask(listener); return () => this.openListeners.delete(listener); }
+  onClose(listener) { this.closeListeners.add(listener); return () => this.closeListeners.delete(listener); }
+  onControl(listener) { this.controlListeners.add(listener); return () => this.controlListeners.delete(listener); }
+  close(reason = 'closed') { try { this.socket.close(); } finally { this.handleClose(reason); } }
+  handleOpen() { if (this.readyState === 'closed') return; this.readyState = 'open'; for (const listener of this.openListeners) listener(); }
+  handleMessage(data) {
+    if (typeof data === 'string') {
+      try {
+        const control = JSON.parse(data);
+        if (control?.type === 'peer_joined' || control?.type === 'peer_left') {
+          for (const listener of this.controlListeners) listener(control);
+          return;
+        }
+      } catch {}
+    }
+    for (const listener of this.messageListeners) listener(data);
+  }
+  handleClose(reason) { if (this.readyState === 'closed') return; this.readyState = 'closed'; for (const listener of this.closeListeners) listener(reason); }
+}
+
+export function relayUrlForPage(location = globalThis.location) {
+  if (!location?.protocol || !location?.host) return null;
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}/relay`;
 }
 
 export class WebRtcPeerLink {
@@ -303,6 +371,7 @@ export class PeerConnectionCoordinator {
     this.joinTimer = null;
     this.reconnectTimer = null;
     this.reconnectAttempts = 0;
+    this.iceServers = DEFAULT_ICE_SERVERS;
     this.onStatus = null;
     this.onHosted = null;
     this.onConnected = null;
@@ -316,6 +385,7 @@ export class PeerConnectionCoordinator {
     this.signaling.onHosted = (data) => {
       if (this.role !== 'host') return;
       this.code = data.code;
+      this.setIceServers(data.iceServers);
       this.onStatus?.('waiting_for_peers');
       this.onHosted?.(data);
     };
@@ -324,6 +394,7 @@ export class PeerConnectionCoordinator {
       this.cancelJoinTimeout();
       this.code = data.code;
       this.hostId = data.hostId;
+      this.setIceServers(data.iceServers);
       this.createGuestLink(data.hostId);
       this.onStatus?.('connecting_to_host');
     };
@@ -345,6 +416,11 @@ export class PeerConnectionCoordinator {
       this.onStatus?.('error', message);
       if ((this.role === 'guest' && this.links.size === 0) || (this.role === 'host' && !this.code)) this.disconnect('signaling_error');
     };
+  }
+
+  setIceServers(iceServers) {
+    this.iceServers = normalizeIceServers(iceServers, this.iceServers);
+    return this.iceServers;
   }
 
   host() {
@@ -378,7 +454,7 @@ export class PeerConnectionCoordinator {
 
   async createHostLink(peerId) {
     this.removePeer(peerId, 'replaced');
-    const link = this.configureLink(peerId, new WebRtcPeerLink({ initiator: true }));
+    const link = this.configureLink(peerId, new WebRtcPeerLink({ initiator: true, iceServers: this.iceServers }));
     this.links.set(peerId, link);
     this.armConnectionTimeout(peerId);
     const offer = await link.createOffer();
@@ -390,7 +466,7 @@ export class PeerConnectionCoordinator {
 
   createGuestLink(hostId) {
     this.removePeer(hostId, 'replaced');
-    const link = this.configureLink(hostId, new WebRtcPeerLink({ initiator: false }));
+    const link = this.configureLink(hostId, new WebRtcPeerLink({ initiator: false, iceServers: this.iceServers }));
     this.links.set(hostId, link);
     this.armConnectionTimeout(hostId);
     return link;
@@ -512,6 +588,91 @@ export class PeerConnectionCoordinator {
   resetConnections() {
     if (this.role || this.links.size > 0 || this.signaling.socket) this.disconnect('restarting');
   }
+}
+
+export class RelayConnectionCoordinator {
+  constructor({ relayUrl, WebSocketClass = globalThis.WebSocket } = {}) {
+    if (!relayUrl || typeof WebSocketClass !== 'function') throw new Error('relay transport is unavailable');
+    this.relayUrl = relayUrl;
+    this.WebSocketClass = WebSocketClass;
+    this.role = null;
+    this.code = null;
+    this.transport = null;
+    this.hostAttached = false;
+    this.onStatus = null;
+    this.onHosted = null;
+    this.onConnected = null;
+    this.onDisconnected = null;
+    this.onClosed = null;
+  }
+
+  host() {
+    this.disconnect('replaced');
+    this.role = 'host';
+    this.code = randomRoomCode();
+    this.onStatus?.('creating_session');
+    this.onHosted?.({ code: this.code, expiresAt: null });
+    this.open();
+  }
+
+  join(code) {
+    this.disconnect('replaced');
+    this.role = 'guest';
+    this.code = sanitizeRoomCode(code);
+    if (!this.code) { this.role = null; this.onStatus?.('invalid_code'); return false; }
+    this.onStatus?.('joining_session');
+    this.open();
+    return true;
+  }
+
+  open() {
+    const query = new URLSearchParams({ room: this.code, role: this.role });
+    const separator = this.relayUrl.includes('?') ? '&' : '?';
+    const socket = new this.WebSocketClass(`${this.relayUrl}${separator}${query}`);
+    const transport = new WebSocketRelayTransport(socket);
+    this.transport = transport;
+    transport.onOpen(() => {
+      this.onStatus?.('signaling_connected');
+      if (this.role === 'guest') {
+        this.onStatus?.('connected');
+        this.onConnected?.({ peerId: 'relay-host', transport });
+      } else this.onStatus?.('waiting_for_peers');
+    });
+    transport.onControl((control) => {
+      if (this.role !== 'host') return;
+      if (control.type === 'peer_joined' && !this.hostAttached) {
+        this.hostAttached = true;
+        this.onStatus?.('connected');
+        this.onConnected?.({ peerId: 'relay-guest', transport });
+      }
+      if (control.type === 'peer_left' && this.hostAttached) {
+        this.hostAttached = false;
+        this.onDisconnected?.({ peerId: 'relay-guest', reason: 'peer_left' });
+      }
+    });
+    transport.onClose((reason) => {
+      if (this.transport !== transport) return;
+      if (this.role === 'guest') this.onDisconnected?.({ peerId: 'relay-host', reason });
+      else if (this.hostAttached) this.onDisconnected?.({ peerId: 'relay-guest', reason });
+      this.onClosed?.({ reason });
+    });
+  }
+
+  disconnect(reason = 'closed') {
+    const transport = this.transport;
+    this.transport = null;
+    this.hostAttached = false;
+    transport?.close(reason);
+    this.role = null;
+    this.code = null;
+  }
+}
+
+function randomRoomCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = new Uint32Array(6);
+  globalThis.crypto?.getRandomValues?.(bytes);
+  return [...bytes].map((value, index) => alphabet[(value || Math.floor(Math.random() * alphabet.length) + index) % alphabet.length]).join('');
 }
 
 export function sanitizeRoomCode(value) {
