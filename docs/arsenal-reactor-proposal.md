@@ -5,7 +5,7 @@ status: implemented under protocol 17. all 39 arsenal choices and 12 reactor cat
 ## replacements and ownership
 
 - salvage becomes reactor. foundry becomes arsenal. mint remains, including its income identity. forge and mint accrue their existing reward effects from hp popped rather than bodies killed.
-- each arsenal can follow one 3-tier path. additional arsenals unlock other paths, including all three roots. each research node is purchased once globally per cooperative run; the payer spends their own wallet and every player benefits. duplicate ancestors are traversed for free but never grant a second bonus.
+- each arsenal can follow one 3-tier path. additional arsenals unlock other paths, including all three roots. each research node is purchased once globally per cooperative run from the team pool, and every player benefits. duplicate ancestors are traversed for free but never grant a second bonus.
 - two arsenals can split below a shared ancestor. completing all 39 nodes is possible with 27 arsenals, not with duplicate bonus stacking. research survives station sale/disconnection; selling does not refund research or erase unlocks. simultaneous duplicate purchases reject the later command without charging it.
 - approved prices per unique node: 10,000,000 at tier 1; 100,000,000 at tier 2; 1,000,000,000 at tier 3. all nodes cost 27.93 billion in total. a single path costs 1.11 billion. these are late-game purchases, not opening buffs.
 - research prices are never affected by build discounts. benefits apply to existing and future eligible towers globally. previews list affected weapon families and exact stat changes.
@@ -96,7 +96,7 @@ status: implemented under protocol 17. all 39 arsenal choices and 12 reactor cat
 ## implementation and migration
 
 - salvage/foundry are replaced across the catalog, art, UI and save migration. legacy towers migrate in place, preserving investment, owner and identity history. no automatic spending or free ranks.
-- the authority validates station ownership, branch, current price/rank and wallet before purchase. global unlocks, ranks, combat counters and pending attacks travel in corrections. mixed protocol builds cannot join.
+- the authority validates the authenticated player, station, branch, current price/rank and team balance before purchase. global unlocks, ranks, combat counters and pending attacks travel in corrections. mixed protocol builds cannot join.
 - existing additional-copy support bonuses are unchanged in the current build. their removal/cap was discussed but not selected in the latest direction; station pricing must not silently nerf existing mint/forge income.
 - damage is quantized to 0.001 hp; fractional credit remainders accumulate until a whole hp is paid. refunds use only the amount paid for the physical tower, never its research spending.
 
@@ -109,3 +109,11 @@ select an arsenal or reactor and open its research action. select a choice with 
 - live arsenal prices are one decimal order above the previous schedule: 100,000 at tier 1, 1,000,000 at tier 2, 10,000,000 at tier 3. all 39 nodes cost 279.3 million; a single root-to-leaf path costs 11.1 million.
 - reactor ranks: 10,000 for the first rank of any category, then x1.25 per additional rank of that category (`ceil(10,000 x 1.25^rank)`). categories still price independently; damage no longer uses its own growth factor.
 - damage output ranks add +10% of base weapon damage each and never compound: rank n gives `base x (1 + 0.1n)`. that rank-adjusted value is the baseline every arsenal percentage is measured against, so root, conditional and reactor contributions stay a single additive bucket around one baseline. caps and effects of the other eleven categories are unchanged.
+
+## late-game balance revision // protocol 23
+
+this supersedes the damage line of the september 11 revision; the other eleven categories are unchanged.
+
+- damage output ranks multiply base weapon damage by 1.10 and compound: rank n gives `base x 1.10^n`. that compounded value remains the baseline every arsenal percentage is measured against, so root, conditional and reactor contributions stay one additive bucket around one baseline.
+- damage output prices `ceil(100,000 x 1.20^rank)`, uncapped. affordable damage therefore grows as roughly `spend^0.52`, strictly slower than the enemy hp budget: the reactor is the line a late-game player rides every few minutes, never a line that wins on its own. cumulative cost: rank 10 ≈ 2.6m, 20 ≈ 18.7m, 30 ≈ 118m, 40 ≈ 734m.
+- rationale and the placement escalator that makes ranks competitive with extra sockets are recorded in `balance-late-game.md`.

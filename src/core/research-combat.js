@@ -8,8 +8,8 @@ export const physicalBullet = (attack) => attack.delivery.type === 'projectile' 
 export function decorateResearchAttack(state, tower, attack) {
   const ids = attack.supportOnly ? [] : [...(state.research?.unlocked || [])];
   const has = (id) => ids.includes(id);
-  // Reactor damage ranks stack additively (+10% each) to form the baseline that
-  // arsenal percentages are measured against; nothing here compounds.
+  // Reactor damage ranks compound (x1.10 each) to form the baseline that arsenal
+  // percentages are measured against; the arsenal bonuses themselves stay additive.
   const factor = reactorDamageFactor(state);
   let baseDamage = 0;
   for (const effect of attack.effects || []) {

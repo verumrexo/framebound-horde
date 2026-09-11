@@ -97,6 +97,7 @@ export class EnemySwarm {
     this.tickNumber = 0;
     this.spawnAccumulator = 0;
     this.spawnHpAccumulator = 0;
+    this.surgeAccumulator = 0;
     this.spawnSourceCursor = 0;
     this.spawnedTotal = 0;
     this.slowedCount = 0;
@@ -304,6 +305,29 @@ export class EnemySwarm {
     for (const [source, unitCount] of mergedUnitsBySource) {
       if (!this.mergeSpawnUnits(source, unitCount, enemyHp)) this.spawnOne(source, enemyHp, unitCount);
     }
+    return spawnCount + this.spawnSurgeStream(sources);
+  }
+
+  // Surge rifts add a separate heavier stream on top of the ordinary budget. The stream
+  // keeps its own fractional accumulator so the base cadence is untouched, and each body
+  // is dealt to a hot rift in proportion to that rift's extra rate.
+  spawnSurgeStream(sources) {
+    const hot = sources.filter((source) => Number.isFinite(source.extraRatePerSecond) && source.extraRatePerSecond > 0);
+    if (!hot.length) {
+      this.surgeAccumulator = 0;
+      return 0;
+    }
+    let totalRate = 0;
+    for (const source of hot) totalRate += source.extraRatePerSecond;
+    this.surgeAccumulator += totalRate / AUTHORITY_TICK_RATE;
+    const spawnCount = Math.floor(this.surgeAccumulator);
+    this.surgeAccumulator -= spawnCount;
+    const weighted = hot.map((source) => ({ ...source, weight: source.extraRatePerSecond }));
+    for (let index = 0; index < spawnCount; index += 1) {
+      const source = this.selectSpawnSource(weighted);
+      this.spawnSourceCursor = (this.spawnSourceCursor + 1) >>> 0;
+      this.spawnOne(source, Math.max(1, Math.round(source.extraHp || 1)), 1);
+    }
     return spawnCount;
   }
 
@@ -364,6 +388,7 @@ export class EnemySwarm {
     }
     this.spawnAccumulator = 0;
     this.spawnHpAccumulator = 0;
+    this.surgeAccumulator = 0;
     this.activeUnitCount = 0;
     this.rebuildSpatialIndex();
   }
@@ -372,6 +397,7 @@ export class EnemySwarm {
     this.tickNumber = 0;
     this.spawnAccumulator = 0;
     this.spawnHpAccumulator = 0;
+    this.surgeAccumulator = 0;
     this.spawnSourceCursor = 0;
     this.spawnedTotal = 0;
     this.updateChecksum();
@@ -1663,7 +1689,8 @@ export class EnemySwarm {
       this.spawnSourceCursor,
       this.spawnedTotal,
       Math.round(this.spawnAccumulator * 1000000),
-      Math.round(this.spawnHpAccumulator * 1000000)
+      Math.round(this.spawnHpAccumulator * 1000000),
+      Math.round(this.surgeAccumulator * 1000000)
     ]) {
       checksum ^= value;
       checksum = Math.imul(checksum, 16777619);
@@ -1727,6 +1754,7 @@ export class EnemySwarm {
       freeCount: this.freeCount,
       spawnAccumulator: this.spawnAccumulator,
       spawnHpAccumulator: this.spawnHpAccumulator,
+      surgeAccumulator: this.surgeAccumulator,
       spawnSourceCursor: this.spawnSourceCursor,
       spawnedTotal: this.spawnedTotal,
       state: this.state.slice(0, this.count * STATE_STRIDE),
@@ -1793,6 +1821,7 @@ export class EnemySwarm {
     this.freeCount = correction.freeCount;
     this.spawnAccumulator = correction.spawnAccumulator;
     this.spawnHpAccumulator = correction.spawnHpAccumulator || 0;
+    this.surgeAccumulator = correction.surgeAccumulator || 0;
     this.spawnSourceCursor = correction.spawnSourceCursor;
     this.spawnedTotal = correction.spawnedTotal;
     this.state.fill(0);

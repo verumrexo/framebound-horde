@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { healthBudgetAt, spawnProfileAt } from '../src/core/progression.js';
+import {
+  healthBudgetAt, spawnProfileAt, growthLogIntegral, growthFactorAt, surgeScheduleAt, surgeRiftIds, surgeSpawnSources,
+  surgeStartSeconds, surgeArcSize, surgeRiftRing, TAPER_START_MINUTE, TAPER_END_MINUTE, LATE_GROWTH_PER_MINUTE,
+  SURGE_PERIOD_SECONDS, SURGE_WARNING_SECONDS, SURGE_ACTIVE_SECONDS, SURGE_HOT_WEIGHT, SURGE_EXTRA_BODY_FRACTION, surgeHpMultiplier,
+  normalizePace, threatTickAt, DEFAULT_PACE, PACE_MIN, PACE_MAX
+} from '../src/core/progression.js';
 import { getMapDefinition, playableMaps, defenseAreaField } from '../src/core/world-config.js';
 import { EnemySwarm } from '../src/core/enemy-swarm.js';
 import { EmbeddedAuthority } from '../src/core/embedded-session.js';
@@ -18,7 +23,148 @@ for (let seconds = 0; seconds <= 80 * 60; seconds++) {
 }
 assert.equal(spawnProfileAt(map, 120 * 60).meanHp, 1);
 assert.equal(spawnProfileAt(map, 1200 * 60).meanHp, 2);
-console.log('old economy budget retained; physical spawns flat from 20 minutes');
+console.log('budget identity retained; physical spawns flat from 20 minutes');
+
+// The opening curve is byte-identical through the taper start; afterwards the growth
+// exponent eases log-linearly to the late factor and the budget stays exponential.
+const untapered = { ...map, spawnCurve: { ...map.spawnCurve, taper: false } };
+for (let seconds = 0; seconds <= TAPER_START_MINUTE * 60; seconds += 7) {
+  assert.equal(healthBudgetAt(map, seconds * 60), healthBudgetAt(untapered, seconds * 60));
+}
+assert.ok(healthBudgetAt(map, 30 * 3600) < healthBudgetAt(untapered, 30 * 3600));
+assert.ok(Math.abs(growthFactorAt(map.spawnCurve, TAPER_START_MINUTE) - 1.22) < 1e-12);
+assert.ok(Math.abs(growthFactorAt(map.spawnCurve, (TAPER_START_MINUTE + TAPER_END_MINUTE) / 2) - Math.sqrt(1.22 * LATE_GROWTH_PER_MINUTE)) < 1e-12);
+assert.ok(Math.abs(growthFactorAt(map.spawnCurve, 70) - LATE_GROWTH_PER_MINUTE) < 1e-12);
+// closed-form integral matches a fine numeric integration of the exponent
+let numeric = 0;
+for (let step = 0; step < 60 * 600; step += 1) numeric += Math.log(growthFactorAt(map.spawnCurve, (step + 0.5) / 600)) / 600;
+assert.ok(Math.abs(numeric - growthLogIntegral(map.spawnCurve, 60)) < 1e-6);
+for (let m = 41; m <= 80; m += 1) {
+  const ratio = healthBudgetAt(map, m * 3600) / healthBudgetAt(map, (m - 1) * 3600);
+  assert.ok(ratio > LATE_GROWTH_PER_MINUTE && ratio < 1.22, `late growth stays exponential at minute ${m}`);
+}
+const meanAt = (minutes) => spawnProfileAt(map, minutes * 3600).meanHp;
+assert.ok(meanAt(30) > 15 && meanAt(30) < 19, `mean hp ${meanAt(30)} at 30`);
+assert.ok(meanAt(45) > 150 && meanAt(45) < 190, `mean hp ${meanAt(45)} at 45`);
+assert.ok(meanAt(60) > 1100 && meanAt(60) < 1350, `mean hp ${meanAt(60)} at 60`);
+assert.equal(healthBudgetAt(getMapDefinition('test_field'), 50 * 3600), 0, 'test field keeps its flat zero curve');
+console.log('threat taper: identical opening, eased exponent, still exponential');
+
+// Rift surges are a pure function of map, seed and tick.
+for (const id of ['map_01', 'map_07', 'map_04']) {
+  const world = getMapDefinition(id);
+  const ring = surgeRiftRing(world);
+  assert.equal(new Set(ring).size, world.spawnSources.length);
+  const start = surgeStartSeconds(world);
+  assert.equal(start, Math.max(...world.spawnSources.map((source) => source.unlockSeconds)) + 60);
+  assert.equal(surgeScheduleAt(world, (start - SURGE_WARNING_SECONDS - 1) * 60, 7).phase, 'idle');
+  const warning = surgeScheduleAt(world, (start - SURGE_WARNING_SECONDS) * 60, 7);
+  assert.equal(warning.phase, 'warning'); assert.equal(warning.index, 0);
+  const active = surgeScheduleAt(world, start * 60, 7);
+  assert.equal(active.phase, 'active'); assert.deepEqual(active.riftIds, warning.riftIds);
+  assert.equal(active.riftIds.length, surgeArcSize(world.spawnSources.length));
+  assert.equal(surgeScheduleAt(world, (start + SURGE_ACTIVE_SECONDS) * 60, 7).phase, 'idle');
+  const second = surgeScheduleAt(world, (start + SURGE_PERIOD_SECONDS) * 60, 7);
+  assert.equal(second.phase, 'active'); assert.equal(second.index, 1);
+  assert.deepEqual(surgeRiftIds(world, 7, 1), second.riftIds);
+  assert.deepEqual(surgeRiftIds(world, 7, 1), surgeRiftIds(world, 7, 1), 'deterministic');
+  for (let index = 1; index < 12; index += 1) {
+    const previous = surgeRiftIds(world, 7, index - 1), current = surgeRiftIds(world, 7, index);
+    if (world.spawnSources.length > 1) assert.notEqual(previous[Math.floor(previous.length / 2)], current[Math.floor(current.length / 2)], 'centre rift rotates');
+    // arc is contiguous on the ring
+    const positions = current.map((riftId) => ring.indexOf(riftId));
+    for (let step = 1; step < positions.length; step += 1) assert.equal((positions[step] - positions[step - 1] + ring.length) % ring.length, 1);
+  }
+  assert.equal(surgeHpMultiplier(0), 3); assert.equal(surgeHpMultiplier(4), 5);
+}
+// Hot rifts carry a larger share of the ordinary stream plus the additional heavy stream.
+{
+  const world = getMapDefinition('map_01');
+  const profile = spawnProfileAt(world, 40 * 3600);
+  const surge = surgeScheduleAt(world, surgeStartSeconds(world) * 60, 7);
+  const decorated = surgeSpawnSources(world.spawnSources, surge, profile);
+  const hot = decorated.filter((source) => surge.riftIds.includes(source.id));
+  assert.equal(hot.length, 3);
+  for (const source of hot) {
+    assert.equal(source.weight, SURGE_HOT_WEIGHT);
+    assert.ok(Math.abs(source.extraRatePerSecond * 3 - profile.bodyCap * SURGE_EXTRA_BODY_FRACTION) < 1e-9);
+    assert.equal(source.extraHp, profile.meanHp * 3);
+  }
+  assert.ok(decorated.filter((source) => !surge.riftIds.includes(source.id)).every((source) => source.weight === 1 && source.extraRatePerSecond === undefined));
+  assert.strictEqual(surgeSpawnSources(world.spawnSources, { phase: 'idle', riftIds: [] }, profile), world.spawnSources);
+  // the swarm spawns the heavy stream on top of the ordinary rate and keeps it in corrections
+  const surged = new EnemySwarm({ seed: 9, map: world });
+  const plain = new EnemySwarm({ seed: 9, map: world });
+  for (let tick = 0; tick < 600; tick += 1) {
+    surged.spawnAtRate(profile.rate, decorated, 1, profile.meanHp);
+    plain.spawnAtRate(profile.rate, world.spawnSources, 1, profile.meanHp);
+  }
+  const extra = surged.spawnedTotal - plain.spawnedTotal;
+  assert.ok(Math.abs(extra - profile.bodyCap * SURGE_EXTRA_BODY_FRACTION * 10) <= 2, `extra bodies ${extra}`);
+  let heavy = 0;
+  for (let i = 0; i < surged.count; i++) if (surged.maxHpById[surged.idByIndex[i]] >= Math.round(profile.meanHp * 3)) heavy += 1;
+  assert.ok(heavy >= extra * 0.95, `heavy bodies ${heavy} of ${extra}`);
+  const copy = new EnemySwarm({ seed: 9, map: world });
+  copy.applyCorrection(surged.exportCorrection());
+  for (let tick = 0; tick < 120; tick += 1) {
+    surged.spawnAtRate(profile.rate, decorated, 1, profile.meanHp);
+    copy.spawnAtRate(profile.rate, decorated, 1, profile.meanHp);
+  }
+  assert.deepEqual(copy.exportCorrection(), surged.exportCorrection());
+}
+// The production authority exposes the surge in its swarm summary without extra state.
+{
+  const live = new EmbeddedAuthority({ ...TEST_FIELD_SESSION_CONFIG, test: null, mode: 'game', mapId: 'map_01', startingLives: 1e9 });
+  const start = surgeStartSeconds(live.map);
+  live.state.runTick = (start - SURGE_WARNING_SECONDS) * 60;
+  live.tick();
+  assert.equal(live.state.swarm.surge.phase, 'warning');
+  assert.equal(live.state.swarm.surge.riftIds.length, 3);
+  const restored = new EmbeddedAuthority({ ...TEST_FIELD_SESSION_CONFIG, test: null, mode: 'game', mapId: 'map_01', startingLives: 1e9 });
+  restored.applyCorrectionSnapshot(live.correctionSnapshot());
+  assert.deepEqual(restored.state.swarm.surge, live.state.swarm.surge);
+}
+console.log('rift surges are deterministic, contiguous, rotating, additive and correction-safe');
+
+// Horde pace stretches the threat clock: curve, hp mixture, rift unlocks and surges together.
+{
+  assert.equal(normalizePace(undefined), DEFAULT_PACE);
+  assert.equal(normalizePace('abc'), DEFAULT_PACE);
+  assert.equal(normalizePace(0.01), PACE_MIN);
+  assert.equal(normalizePace(9), PACE_MAX);
+  assert.equal(normalizePace(1.24), 1.2);
+  assert.equal(threatTickAt(3600, 0.8), 2880);
+  const config = { ...TEST_FIELD_SESSION_CONFIG, test: null, mode: 'game', autoStart: false, mapId: 'map_01', startingLives: 1e9 };
+  const paced = new EmbeddedAuthority(config);
+  paced.join({ clientId: 'p', payload: { label: 'p' } });
+  const host = paced.state.players[0];
+  paced.startSession({ clientId: 'p', playerId: host.id, sequence: 1, payload: { mapId: 'map_01', pace: 0.8 } }, host);
+  assert.equal(paced.state.pace, 0.8);
+  const reference = new EmbeddedAuthority(config);
+  reference.join({ clientId: 'p', payload: { label: 'p' } });
+  reference.startSession({ clientId: 'p', playerId: reference.state.players[0].id, sequence: 1, payload: { mapId: 'map_01', pace: 7 } }, reference.state.players[0]);
+  assert.equal(reference.state.pace, PACE_MAX, 'pace is clamped by the authority');
+  reference.state.pace = 1;
+  paced.state.runTick = 40 * 3600; reference.state.runTick = 32 * 3600;
+  const pacedSpawn = paced.spawnSettings(), referenceSpawn = reference.spawnSettings();
+  assert.ok(Math.abs(pacedSpawn.hpPerSecond - referenceSpawn.hpPerSecond) < 1e-9, 'pace 0.8 at 40 minutes equals pace 1 at 32');
+  assert.equal(pacedSpawn.sources.length, referenceSpawn.sources.length, 'rift unlocks follow the paced clock');
+  paced.state.runTick = Math.round((surgeStartSeconds(paced.map) - SURGE_WARNING_SECONDS) / 0.8 * 60);
+  assert.equal(paced.spawnSettings().surge.phase, 'warning', 'surges follow the paced clock');
+  paced.tick();
+  assert.equal(paced.state.swarm.pace, 0.8);
+  assert.ok(Math.abs(paced.state.swarm.threatSeconds - paced.state.runTick * 0.8 / 60) < 1e-9);
+  const restored = new EmbeddedAuthority(config);
+  restored.applyCorrectionSnapshot(paced.correctionSnapshot());
+  assert.equal(restored.state.pace, 0.8);
+  assert.equal(restored.state.swarm.surge.phase, 'warning');
+  const legacy = paced.correctionSnapshot(); delete legacy.state.pace;
+  const fallback = new EmbeddedAuthority(config); fallback.applyCorrectionSnapshot(legacy);
+  assert.equal(fallback.state.pace, DEFAULT_PACE, 'saves without a pace load at the designed pace');
+  paced.restartSession({ clientId: 'p', playerId: host.id, sequence: 2, payload: { mapId: 'map_01' } });
+  assert.equal(paced.state.pace, DEFAULT_PACE, 'a restart without a pace uses the designed pace');
+}
+console.log('horde pace stretches curve, rifts and surges together and survives corrections');
 
 const source = { x: 0, y: -1300, spreadX: 1, spreadY: 1 };
 const swarm = new EnemySwarm({ seed: 42, map });
@@ -48,10 +194,10 @@ const area = a.map.defenseAreas[0];
 const command = (payload) => ({ clientId: 'test', playerId: player.id, sequence: 1, payload });
 const x = area.shape.x, y = area.shape.y;
 a.placeTower(command({ definitionId: 'frame', x, y }), player);
-const credits = a.state.economyByPlayer[player.id].credits;
+const credits = a.state.teamEconomy.credits;
 a.placeTower(command({ definitionId: 'frame', x, y }), player);
 assert.equal(a.state.towers.length, 1);
-assert.equal(a.state.economyByPlayer[player.id].credits, credits);
+assert.equal(a.state.teamEconomy.credits, credits);
 assert.equal(towerPlacementClear(a.state.towers, x + 23, y), false);
 assert.equal(towerPlacementClear(a.state.towers, x + 24, y), true);
 console.log('overlap rejected by authority without spending credits');
@@ -59,12 +205,12 @@ console.log('overlap rejected by authority without spending credits');
 const tower = a.state.towers[0];
 const attack = createAttackSnapshot(TOWER_DEFINITIONS.frame, tower);
 const victim = a.swarm.spawnOne({ ...source, x: x + 50, y }, 3);
-const starting = a.state.economyByPlayer[player.id].credits;
+const starting = a.state.teamEconomy.credits;
 for (const amount of [1, 10]) {
   const hit = a.swarm.damage(victim.id, victim.generation, amount);
   a.recordAttackResult({ attack, hits: [hit], kills: hit.killed ? [hit] : [], controlTargets: [], createdFields: [] });
 }
-assert.equal(a.state.economyByPlayer[player.id].credits - starting, 3);
+assert.equal(a.state.teamEconomy.credits - starting, 3);
 assert.equal(a.state.stats.kills, 1);
 assert.equal(a.state.stats.hpPopped, 3);
 const packet = a.swarm.spawnOne(source, 1, 4);

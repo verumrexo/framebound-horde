@@ -34,22 +34,36 @@ server.on('upgrade', (request, socket) => {
 
 function attach(roomCode, role, socket) {
   let room = rooms.get(roomCode);
-  if (!room) rooms.set(roomCode, room = { host: null, guest: null });
-  if (room[role]) room[role].destroy();
-  room[role] = socket;
-  if (role === 'guest' && room.host) sendText(room.host, { type: 'peer_joined' });
-  socket.on('data', (chunk) => relayFrames(chunk, socket, room, role));
+  if (!room) rooms.set(roomCode, room = { host: null, guests: new Map() });
+  let peerId = 'relay-host';
+  if (role === 'host') {
+    if (room.host) room.host.destroy();
+    room.host = socket;
+    for (const guestId of room.guests.keys()) sendText(socket, { type: 'peer_joined', peerId: guestId });
+  } else {
+    const slot = [1, 2, 3].find((candidate) => !room.guests.has(`relay-guest-${candidate}`));
+    if (!slot) return socket.destroy();
+    peerId = `relay-guest-${slot}`;
+    room.guests.set(peerId, socket);
+    if (room.host) sendText(room.host, { type: 'peer_joined', peerId });
+  }
+  socket.on('data', (chunk) => relayFrames(chunk, socket, room, role, peerId));
   socket.on('close', () => {
-    if (room[role] !== socket) return;
-    room[role] = null;
-    const peer = role === 'host' ? room.guest : room.host;
-    if (peer) sendText(peer, { type: 'peer_left' });
-    if (!room.host && !room.guest) rooms.delete(roomCode);
+    if (role === 'host') {
+      if (room.host !== socket) return;
+      room.host = null;
+      for (const guest of room.guests.values()) sendText(guest, { type: 'peer_left', peerId: 'relay-host' });
+    } else {
+      if (room.guests.get(peerId) !== socket) return;
+      room.guests.delete(peerId);
+      if (room.host) sendText(room.host, { type: 'peer_left', peerId });
+    }
+    if (!room.host && room.guests.size === 0) rooms.delete(roomCode);
   });
   socket.on('error', () => socket.destroy());
 }
 
-function relayFrames(chunk, source, room, role) {
+function relayFrames(chunk, source, room, role, peerId) {
   source._relayBuffer = Buffer.concat([source._relayBuffer || Buffer.alloc(0), chunk]);
   let buffer = source._relayBuffer;
   while (buffer.length >= 2) {
@@ -67,8 +81,21 @@ function relayFrames(chunk, source, room, role) {
     if (opcode === 8) return source.end();
     if (opcode === 9) { source.write(wsFrame(10, payload)); continue; }
     if (opcode !== 1 && opcode !== 2) continue;
-    const peer = role === 'host' ? room.guest : room.host;
-    if (peer?.writable) peer.write(wsFrame(opcode, payload));
+    if (role === 'host') {
+      if (opcode === 1) {
+        try {
+          const control = JSON.parse(payload.toString('utf8'));
+          if (control?.type === 'drop_peer' && room.guests.has(control.peerId)) room.guests.get(control.peerId).destroy();
+        } catch {}
+        continue;
+      }
+      const targetId = `relay-guest-${payload[0]}`;
+      const guest = room.guests.get(targetId);
+      if (guest?.writable && payload.length > 1) guest.write(wsFrame(opcode, payload.subarray(1)));
+    } else if (room.host?.writable) {
+      const slot = Number(peerId.split('-').at(-1));
+      room.host.write(wsFrame(opcode, Buffer.concat([Buffer.from([slot]), payload])));
+    }
   }
   source._relayBuffer = buffer;
 }

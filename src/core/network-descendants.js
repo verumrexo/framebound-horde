@@ -39,9 +39,23 @@ export function networkSources(snapshot, areaId, id) {
   return snapshot.towers.filter((tower) => areas.has(tower.areaId) && (!id || tower.definitionId === id));
 }
 
-export function purchaseCost(snapshot, areaId, baseCost) {
+// New placements beyond a free allowance cost geometrically more, so tower count is a
+// priced decision instead of a free multiplier on damage. Upgrades of existing towers
+// are never escalated; the test field is exempt.
+export const FREE_PLACEMENTS = 30;
+export const PLACEMENT_ESCALATOR = 1.06;
+
+export function placementEscalation(snapshot) {
+  if (snapshot?.test) return 1;
+  // the next placement is number placed + 1; the first FREE_PLACEMENTS cost their catalog price
+  const placed = snapshot?.towers?.length || 0;
+  return PLACEMENT_ESCALATOR ** Math.max(0, placed + 1 - FREE_PLACEMENTS);
+}
+
+export function purchaseCost(snapshot, areaId, baseCost, { placement = false } = {}) {
   const fraction = Math.max(0.5, 0.98 ** reactorRank(snapshot, 'construction'));
-  return Math.max(1, Math.ceil(baseCost * fraction));
+  const escalation = placement ? placementEscalation(snapshot) : 1;
+  return Math.max(1, Math.ceil(baseCost * escalation * fraction - 1e-8));
 }
 
 export function saleRefund(snapshot, tower) {

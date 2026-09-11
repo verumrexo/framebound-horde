@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 23;
 export const AUTHORITY_TICK_RATE = 60;
 export const AUTHORITY_TICK_MS = 1000 / AUTHORITY_TICK_RATE;
 
@@ -6,9 +6,10 @@ export const COMMAND = Object.freeze({
   DEV_TOOLS: 'dev.tools',
   JOIN: 'session.join',
   LEAVE: 'session.leave',
+  DISCONNECT: 'session.disconnect',
+  PLAYER_RENAME: 'player.rename',
   SESSION_START: 'session.start',
   SESSION_RESTART: 'session.restart',
-  SESSION_CONTINUE_WITHOUT_PLAYER: 'session.continue_without_player',
   RESEARCH_PURCHASE: 'research.purchase',
   REACTOR_PURCHASE: 'reactor.purchase',
   TOWER_PLACE: 'tower.place',
@@ -34,11 +35,10 @@ export const EVENT = Object.freeze({
   SESSION_RESTARTED: 'session.restarted',
   PLAYER_JOINED: 'player.joined',
   PLAYER_LEFT: 'player.left',
+  PLAYER_DISCONNECTED: 'player.disconnected',
+  PLAYER_DEPARTED: 'player.departed',
   PLAYER_RECONNECTED: 'player.reconnected',
-  PLAYER_RECONNECT_WAIT_STARTED: 'player.reconnect_wait.started',
   PLAYER_BECAME_SPECTATOR: 'player.spectator',
-  HOST_MIGRATED: 'session.host.migrated',
-  BALANCED_INHERITANCE_COMPLETED: 'tower.inheritance.balanced',
   RESEARCH_PURCHASED: 'research.purchased',
   REACTOR_PURCHASED: 'reactor.purchased',
   TOWER_PLACED: 'tower.placed',

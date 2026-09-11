@@ -337,7 +337,9 @@ const COMMON_MAP = Object.freeze({
   spawnCurve: {
     basePerSecond: 2,
     linearPerMinute: 0.8,
-    growthPerMinute: 1.22
+    growthPerMinute: 1.22,
+    // the growth exponent eases after twenty minutes; see progression.js
+    taper: true
   }
 });
 

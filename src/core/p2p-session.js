@@ -15,12 +15,17 @@ const NETWORK_PRESENTATION_DELAY_TICKS = 3;
 const MAX_PLAYERS = 4;
 const MAX_INVALID_MESSAGES = 8;
 const RESYNC_COOLDOWN_MS = 2000;
+const CHAT_WINDOW_MS = 5000;
+const CHAT_WINDOW_LIMIT = 4;
+const PING_COOLDOWN_MS = 1000;
 
-const REMOTE_COMMANDS = new Set([
+export const REMOTE_COMMANDS = new Set([
   COMMAND.LEAVE,
   COMMAND.SESSION_START,
   COMMAND.SESSION_RESTART,
-  COMMAND.SESSION_CONTINUE_WITHOUT_PLAYER,
+  COMMAND.PLAYER_RENAME,
+  COMMAND.RESEARCH_PURCHASE,
+  COMMAND.REACTOR_PURCHASE,
   COMMAND.TOWER_PLACE,
   COMMAND.TOWER_EVOLVE,
   COMMAND.TOWER_SELL,
@@ -28,7 +33,9 @@ const REMOTE_COMMANDS = new Set([
   COMMAND.TOWER_STRIKE_POINT_SET,
   COMMAND.TOWER_FORCE_DIRECTION_SET,
   COMMAND.TOWER_CONTROL_GEOMETRY_SET,
-  COMMAND.TOWER_RELAY_TARGET_SET
+  COMMAND.TOWER_RELAY_TARGET_SET,
+  COMMAND.TOWER_ECHO_SOURCE_SET,
+  COMMAND.TOWER_SOCKET_SET
 ]);
 
 export class P2PHostSession {
@@ -48,6 +55,11 @@ export class P2PHostSession {
     this.roomCode = null;
     this.onStatus = null;
     this.onRosterChanged = null;
+    this.onSocial = null;
+    this.onPresence = null;
+    this.socialCounter = 0;
+    this.localSocialRate = { chat: [], pingAt: -Infinity };
+    this.presenceSequenceByPlayer = new Map();
   }
 
   connect() {
@@ -61,9 +73,12 @@ export class P2PHostSession {
 
   attachPeer(peerId, transport) {
     this.detachPeer(peerId, 'replaced', false);
+    const lanes = normalizeTransportBundle(transport);
     const peer = {
       id: peerId,
-      transport,
+      transport: lanes.gameplay,
+      socialTransport: lanes.social,
+      presenceTransport: lanes.presence,
       receiver: null,
       clientId: null,
       playerId: null,
@@ -71,14 +86,26 @@ export class P2PHostSession {
       pendingWelcome: false,
       ready: false,
       invalidMessages: 0,
-      lastResyncAt: -Infinity
+      lastResyncAt: -Infinity,
+      socialRate: { chat: [], pingAt: -Infinity },
+      incomingPresenceSequence: -1
     };
     peer.receiver = new PeerPacketReceiver({
       onControl: (message) => this.receivePeerControl(peer, message),
       onPacket: () => this.rejectPeer(peer, 'binary uploads are not accepted'),
       onError: (message) => this.rejectPeer(peer, message)
     });
-    peer.unsubscribeMessage = transport.onMessage((raw) => peer.receiver.receive(raw));
+    peer.unsubscribeMessage = peer.transport.onMessage((raw) => peer.receiver.receive(raw));
+    peer.socialReceiver = createControlReceiver(
+      (message) => this.receivePeerSocial(peer, message),
+      () => this.rejectPeer(peer, 'invalid social payload')
+    );
+    peer.presenceReceiver = createControlReceiver(
+      (message) => this.receivePeerPresence(peer, message),
+      () => {}
+    );
+    peer.unsubscribeSocial = peer.socialTransport?.onMessage((raw) => peer.socialReceiver.receive(raw));
+    peer.unsubscribePresence = peer.presenceTransport?.onMessage((raw) => peer.presenceReceiver.receive(raw));
     this.peers.set(peerId, peer);
     this.onStatus?.('peer_handshake', peerId);
     return peer;
@@ -89,7 +116,21 @@ export class P2PHostSession {
     if (!peer) return false;
     this.peers.delete(peerId);
     peer.unsubscribeMessage?.();
-    if (closeTransport) peer.transport.close(reason);
+    peer.unsubscribeSocial?.();
+    peer.unsubscribePresence?.();
+    if (closeTransport) closeTransportBundle(peer, reason);
+    if (peer.playerId) {
+      const idle = {
+        type: 'presence',
+        playerId: peer.playerId,
+        sequence: this.nextPresenceSequence(peer.playerId),
+        active: false
+      };
+      this.onPresence?.(idle);
+      for (const candidate of this.peers.values()) {
+        if (candidate.ready && candidate.presenceTransport) sendPeerControl(candidate.presenceTransport, 'presence', idle);
+      }
+    }
     if (peer.clientId && !this.queuePeerDeparture(peer.clientId)) this.pendingDepartures.add(peer.clientId);
     this.onStatus?.('peer_left', reason);
     this.onRosterChanged?.(this.authority.snapshot());
@@ -101,7 +142,7 @@ export class P2PHostSession {
     const joining = this.authority.pendingCommands.some((command) => command.clientId === clientId && command.type === COMMAND.JOIN);
     if (!player?.connected) return !joining;
     const sequence = (this.authority.lastSequenceByClient.get(clientId) || 0) + 1;
-    const command = this.canonicalCommand(clientId, player.id, sequence, COMMAND.LEAVE, {});
+    const command = this.canonicalCommand(clientId, player.id, sequence, COMMAND.DISCONNECT, {});
     if (!command || !this.authority.enqueue(command)) return false;
     this.broadcastCommand(command);
     return true;
@@ -168,6 +209,85 @@ export class P2PHostSession {
     }
     if (message.type === 'pong') return;
     this.rejectPeer(peer, 'unknown peer control message');
+  }
+
+  receivePeerSocial(peer, message) {
+    if (!peer.ready || message.type !== 'social_request') return;
+    this.acceptSocial(peer.playerId, message.kind, message, peer.socialRate);
+  }
+
+  receivePeerPresence(peer, message) {
+    if (!peer.ready || message.type !== 'presence') return;
+    if (!Number.isSafeInteger(message.sourceSequence) || message.sourceSequence <= peer.incomingPresenceSequence) return;
+    const presence = sanitizePresence(message, this.authority);
+    if (!presence) return;
+    peer.incomingPresenceSequence = message.sourceSequence;
+    const stamped = {
+      type: 'presence',
+      playerId: peer.playerId,
+      sequence: this.nextPresenceSequence(peer.playerId),
+      ...presence
+    };
+    this.onPresence?.(stamped);
+    for (const candidate of this.peers.values()) {
+      if (candidate.ready && candidate !== peer && candidate.presenceTransport) {
+        sendPeerControl(candidate.presenceTransport, 'presence', stamped);
+      }
+    }
+  }
+
+  acceptSocial(playerId, kind, payload, rate) {
+    const now = performance.now();
+    let message = null;
+    if (kind === 'chat') {
+      rate.chat = rate.chat.filter((at) => now - at < CHAT_WINDOW_MS);
+      if (rate.chat.length >= CHAT_WINDOW_LIMIT) return false;
+      const text = sanitizeChat(payload.text);
+      if (!text) return false;
+      rate.chat.push(now);
+      message = { kind, text };
+    } else if (kind === 'ping') {
+      if (now - rate.pingAt < PING_COOLDOWN_MS) return false;
+      const point = sanitizeWorldPoint(payload, this.authority);
+      if (!point) return false;
+      rate.pingAt = now;
+      message = { kind, ...point };
+    } else return false;
+    const stamped = { type: 'social', id: `social_${++this.socialCounter}`, playerId, ...message };
+    this.onSocial?.(stamped);
+    for (const peer of this.peers.values()) {
+      if (peer.ready && peer.socialTransport) sendPeerControl(peer.socialTransport, 'social', stamped);
+    }
+    return true;
+  }
+
+  sendChat(text) {
+    return Boolean(this.playerId) && this.acceptSocial(this.playerId, 'chat', { text }, this.localSocialRate);
+  }
+
+  sendPing(x, y) {
+    return Boolean(this.playerId) && this.acceptSocial(this.playerId, 'ping', { x, y }, this.localSocialRate);
+  }
+
+  sendPresence(payload) {
+    const presence = sanitizePresence(payload, this.authority);
+    if (!this.playerId || !presence) return false;
+    const stamped = {
+      type: 'presence',
+      playerId: this.playerId,
+      sequence: this.nextPresenceSequence(this.playerId),
+      ...presence
+    };
+    for (const peer of this.peers.values()) {
+      if (peer.ready && peer.presenceTransport) sendPeerControl(peer.presenceTransport, 'presence', stamped);
+    }
+    return true;
+  }
+
+  nextPresenceSequence(playerId) {
+    const sequence = (this.presenceSequenceByPlayer.get(playerId) || 0) + 1;
+    this.presenceSequenceByPlayer.set(playerId, sequence);
+    return sequence;
   }
 
   acceptPeerHello(peer, message) {
@@ -279,6 +399,7 @@ export class P2PHostSession {
         runTick,
         checksumRunTick,
         swarmChecksum: this.authority.state.swarm.checksum,
+        authorityChecksum: authoritativeChecksum(this.authority.state),
         phase: this.authority.state.phase
       });
     }
@@ -288,7 +409,7 @@ export class P2PHostSession {
     peer.invalidMessages += 1;
     sendPeerControl(peer.transport, 'error', { message: String(message).slice(0, 160) });
     if (close || peer.invalidMessages >= MAX_INVALID_MESSAGES) {
-      peer.transport.close('peer_rejected');
+      closeTransportBundle(peer, 'peer_rejected');
       this.detachPeer(peer.id, 'peer_rejected', false);
     }
   }
@@ -302,7 +423,7 @@ export class P2PHostSession {
     for (const event of events) {
       this.lastEventId = event.eventId;
       if (event.type === EVENT.PLAYER_JOINED && event.payload.player.clientId === this.clientId) this.playerId = event.payload.player.id;
-      if ([EVENT.PLAYER_JOINED, EVENT.PLAYER_RECONNECTED, EVENT.PLAYER_LEFT, EVENT.BALANCED_INHERITANCE_COMPLETED].includes(event.type)) {
+      if ([EVENT.PLAYER_JOINED, EVENT.PLAYER_RECONNECTED, EVENT.PLAYER_LEFT, EVENT.PLAYER_DISCONNECTED, EVENT.PLAYER_DEPARTED].includes(event.type)) {
         this.onRosterChanged?.(this.authority.snapshot());
       }
       // A map transition is a high-value boundary. Command replication normally
@@ -353,6 +474,8 @@ export class P2PGuestSession {
     this.lastEventId = null;
     this.latestSnapshot = authority.snapshot();
     this.transport = null;
+    this.socialTransport = null;
+    this.presenceTransport = null;
     this.receiver = null;
     this.unsubscribeMessage = null;
     this.connected = false;
@@ -372,6 +495,9 @@ export class P2PGuestSession {
     this.onStatus = null;
     this.onReady = null;
     this.onResumeToken = null;
+    this.onSocial = null;
+    this.onPresence = null;
+    this.presenceSequence = 0;
   }
 
   connect() {
@@ -380,7 +506,10 @@ export class P2PGuestSession {
 
   attachTransport(transport) {
     this.detachTransport('replaced');
-    this.transport = transport;
+    const lanes = normalizeTransportBundle(transport);
+    this.transport = lanes.gameplay;
+    this.socialTransport = lanes.social;
+    this.presenceTransport = lanes.presence;
     this.connected = true;
     this.lastHostMessageAt = performance.now();
     this.receiver = new PeerPacketReceiver({
@@ -388,8 +517,16 @@ export class P2PGuestSession {
       onPacket: (kind, payload) => this.receivePacket(kind, payload),
       onError: (message) => this.fail(message)
     });
-    this.unsubscribeMessage = transport.onMessage((raw) => this.receiver.receive(raw));
-    const sent = sendPeerControl(transport, 'hello', {
+    this.unsubscribeMessage = this.transport.onMessage((raw) => this.receiver.receive(raw));
+    this.socialReceiver = createControlReceiver((message) => {
+      if (message.type === 'social' && validIdentity(message.playerId)) this.onSocial?.(message);
+    }, () => this.fail('host social payload is invalid'));
+    this.presenceReceiver = createControlReceiver((message) => {
+      if (message.type === 'presence' && validIdentity(message.playerId)) this.onPresence?.(message);
+    }, () => {});
+    this.unsubscribeSocial = this.socialTransport?.onMessage((raw) => this.socialReceiver.receive(raw));
+    this.unsubscribePresence = this.presenceTransport?.onMessage((raw) => this.presenceReceiver.receive(raw));
+    const sent = sendPeerControl(this.transport, 'hello', {
       protocolVersion: PROTOCOL_VERSION,
       clientId: this.clientId,
       label: this.label,
@@ -401,8 +538,12 @@ export class P2PGuestSession {
 
   detachTransport(reason = 'disconnected') {
     this.unsubscribeMessage?.();
+    this.unsubscribeSocial?.();
+    this.unsubscribePresence?.();
     this.unsubscribeMessage = null;
     this.transport = null;
+    this.socialTransport = null;
+    this.presenceTransport = null;
     this.receiver = null;
     this.connected = false;
     this.synced = false;
@@ -426,6 +567,27 @@ export class P2PGuestSession {
     });
     if (sent) this.sequence = sequence;
     return sent;
+  }
+
+  sendChat(text) {
+    const sanitized = sanitizeChat(text);
+    return Boolean(sanitized && this.socialTransport && this.synced)
+      && sendPeerControl(this.socialTransport, 'social_request', { kind: 'chat', text: sanitized });
+  }
+
+  sendPing(x, y) {
+    const point = sanitizeWorldPoint({ x, y }, this.authority);
+    return Boolean(point && this.socialTransport && this.synced)
+      && sendPeerControl(this.socialTransport, 'social_request', { kind: 'ping', ...point });
+  }
+
+  sendPresence(payload) {
+    const presence = sanitizePresence(payload, this.authority);
+    return Boolean(presence && this.presenceTransport && this.synced)
+      && sendPeerControl(this.presenceTransport, 'presence', {
+        sourceSequence: ++this.presenceSequence,
+        ...presence
+      });
   }
 
   receiveControl(message) {
@@ -515,12 +677,22 @@ export class P2PGuestSession {
     const localRunTick = this.authority.state.runTick;
     const localChecksumTick = localRunTick - (localRunTick % AUTHORITY_TICK_RATE);
     if (localChecksumTick !== sync.checksumRunTick || !sync.swarmChecksum) return;
-    const key = `${sync.checksumRunTick}:${sync.swarmChecksum}`;
-    if (this.authority.state.swarm.checksum === sync.swarmChecksum) {
+    const swarmMatches = this.authority.state.swarm.checksum === sync.swarmChecksum;
+    const authorityComparable = localRunTick === sync.runTick && Boolean(sync.authorityChecksum);
+    if (swarmMatches && !authorityComparable) {
       this.mismatchCount = 0;
       this.lastMismatchKey = null;
       return;
     }
+    const authorityMatches = !authorityComparable || authoritativeChecksum(this.authority.state) === sync.authorityChecksum;
+    if (swarmMatches && authorityMatches) {
+      this.mismatchCount = 0;
+      this.lastMismatchKey = null;
+      return;
+    }
+    const key = swarmMatches
+      ? 'authority'
+      : `${sync.checksumRunTick}:${sync.swarmChecksum}`;
     this.mismatchCount = this.lastMismatchKey === key ? this.mismatchCount + 1 : 1;
     this.lastMismatchKey = key;
     if (this.mismatchCount >= 2) this.requestResync('checksum_mismatch');
@@ -586,6 +758,80 @@ function validIdentity(value) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeTransportBundle(value) {
+  if (value?.gameplay) return value;
+  return { gameplay: value, social: null, presence: null };
+}
+
+function closeTransportBundle(peer, reason) {
+  const transports = new Set([peer.transport, peer.socialTransport, peer.presenceTransport].filter(Boolean));
+  for (const transport of transports) transport.close(reason);
+}
+
+function createControlReceiver(onControl, onError) {
+  return new PeerPacketReceiver({ onControl, onPacket: onError, onError });
+}
+
+function sanitizeChat(value) {
+  return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+function sanitizeWorldPoint(value, authority) {
+  if (!Number.isFinite(value?.x) || !Number.isFinite(value?.y)) return null;
+  const bounds = authority.map?.bounds;
+  if (!bounds) return null;
+  const x = Math.round(value.x);
+  const y = Math.round(value.y);
+  if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return null;
+  return { x, y };
+}
+
+function sanitizePresence(value, authority) {
+  if (value?.active === false) return { active: false };
+  const point = sanitizeWorldPoint(value, authority);
+  if (!point) return null;
+  const activity = ['looking', 'placing', 'inspecting'].includes(value.activity) ? value.activity : 'looking';
+  const towerId = typeof value.towerId === 'string'
+    && authority.state.towers.some((tower) => tower.id === value.towerId) ? value.towerId : null;
+  const definitionId = typeof value.definitionId === 'string'
+    && authority.towerDefinitions[value.definitionId] ? value.definitionId : null;
+  return {
+    active: true,
+    ...point,
+    activity,
+    towerId,
+    definitionId,
+    valid: value.valid === true
+  };
+}
+
+function authoritativeChecksum(state) {
+  const value = JSON.stringify({
+    phase: state.phase,
+    runTick: state.runTick,
+    rosterLocked: state.rosterLocked,
+    hostPlayerId: state.hostPlayerId,
+    players: state.players,
+    teamEconomy: state.teamEconomy,
+    contributionByPlayer: state.contributionByPlayer,
+    base: state.base,
+    stats: state.stats,
+    towers: state.towers,
+    projectiles: state.projectiles,
+    attackFields: state.attackFields,
+    forceFields: state.forceFields,
+    research: state.research,
+    relayNetwork: state.relayNetwork,
+    supportCounters: state.supportCounters
+  });
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function createResumeToken() {

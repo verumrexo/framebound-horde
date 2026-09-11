@@ -17,6 +17,7 @@ const DEFAULT_OPTIONS = Object.freeze({
   rates: DEFAULT_RATES,
   forms: Object.keys(TOWER_DEFINITIONS),
   sources: ['test_top'],
+  enemyHp: 1,
   targetingMode: 'closest',
   warmupSeconds: 15,
   settleSeconds: 4,
@@ -59,7 +60,9 @@ function parseArguments(argv) {
     else if (argument === '--csv') options.format = 'csv';
     else if (argument === '--quiet') options.quiet = true;
     else if (argument === '--help' || argument === '-h') options.help = true;
-    else if (argument.startsWith('--rates=')) {
+    else if (argument.startsWith('--hp=')) {
+      options.enemyHp = Math.round(finiteNumber(argument.slice('--hp='.length), 'enemy hp', { minimum: 1, maximum: 1000000 }));
+    } else if (argument.startsWith('--rates=')) {
       options.rates = commaList(argument.slice('--rates='.length)).map((rate) => finiteNumber(rate, 'spawn rate', { minimum: 0, maximum: 100000 }));
     } else if (argument.startsWith('--forms=')) {
       const forms = commaList(argument.slice('--forms='.length));
@@ -97,6 +100,7 @@ function printHelp() {
     'usage // npm run balance:kps -- [options]',
     '',
     '--rates=10,100,1000,10000   total enemies spawned per second',
+    '--hp=1                      hp per enemy; above 1 the table reports hp removed per second',
     '--forms=all                  comma-separated tower form ids',
     '--sources=top                test source ids, with or without test_ prefix',
     '--target=closest             player targeting mode',
@@ -138,7 +142,7 @@ function benchmarkSeed(runIndex) {
   return (TEST_FIELD_SESSION_CONFIG.seed + Math.imul(runIndex, 0x9e3779b1)) >>> 0;
 }
 
-function scenarioConfig({ rate, runIndex, sources }) {
+function scenarioConfig({ rate, runIndex, sources, enemyHp = 1 }) {
   return {
     ...TEST_FIELD_SESSION_CONFIG,
     sessionId: `balance_${rate}_${runIndex}`,
@@ -147,7 +151,7 @@ function scenarioConfig({ rate, runIndex, sources }) {
     test: {
       ...TEST_FIELD_SESSION_CONFIG.test,
       spawnRatePerSecond: rate,
-      enemyHp: 1,
+      enemyHp,
       invincibleBase: true,
       paused: false,
       timeScale: 1,
@@ -180,7 +184,7 @@ function scenarioTiming(rate, options) {
 }
 
 function warmScenario(rate, runIndex, options) {
-  const authority = new EmbeddedAuthority(scenarioConfig({ rate, runIndex, sources: options.sources }));
+  const authority = new EmbeddedAuthority(scenarioConfig({ rate, runIndex, sources: options.sources, enemyHp: options.enemyHp }));
   disablePresentationEvents(authority);
   runTicks(authority, options.warmupSeconds);
   return authority.correctionSnapshot();
@@ -230,13 +234,14 @@ function correctionWithTower(warmCorrection, formId, areaId, targetingMode) {
 
 function measureTower(warmCorrection, formId, rate, runIndex, options, areaId) {
   const timing = scenarioTiming(rate, options);
-  const authority = new EmbeddedAuthority(scenarioConfig({ rate, runIndex, sources: options.sources }));
+  const authority = new EmbeddedAuthority(scenarioConfig({ rate, runIndex, sources: options.sources, enemyHp: options.enemyHp }));
   disablePresentationEvents(authority);
   authority.applyCorrectionSnapshot(correctionWithTower(warmCorrection, formId, areaId, options.targetingMode));
   runTicks(authority, timing.settleSeconds);
 
   const start = {
     kills: authority.state.stats.kills,
+    hpPopped: authority.state.stats.hpPopped || 0,
     hits: authority.state.stats.hits,
     shotsFired: authority.state.stats.shotsFired,
     shotsResolved: authority.state.stats.shotsResolved,
@@ -258,6 +263,7 @@ function measureTower(warmCorrection, formId, rate, runIndex, options, areaId) {
     run: runIndex + 1,
     kills,
     kps: kills / timing.measureSeconds,
+    hpPerSecond: ((end.stats.hpPopped || 0) - start.hpPopped) / timing.measureSeconds,
     hits: end.stats.hits - start.hits,
     shotsFired,
     shotsResolved,
@@ -368,6 +374,7 @@ function aggregateMeasurements(measurements, options) {
       const average = (key) => samples.reduce((total, sample) => total + sample[key], 0) / samples.length;
       rates[rate] = {
         kps: average('kps'),
+        hpPerSecond: average('hpPerSecond'),
         minimumKps: Math.min(...samples.map((sample) => sample.kps)),
         maximumKps: Math.max(...samples.map((sample) => sample.kps)),
         killsPerShot: average('killsPerShot'),
@@ -397,16 +404,17 @@ function fixed(value) {
 }
 
 function printTable(report) {
+  const fat = (report.config.enemyHp || 1) !== 1;
   const headers = ['tower', 'cost', ...report.config.rates.map((rate) => `${rate}/s`)];
   const rows = report.towers.map((tower) => [
     tower.formId,
     String(tower.cost),
-    ...report.config.rates.map((rate) => fixed(tower.rates[rate].kps))
+    ...report.config.rates.map((rate) => fixed(fat ? tower.rates[rate].hpPerSecond : tower.rates[rate].kps))
   ]);
   const widths = headers.map((header, column) => Math.max(header.length, ...rows.map((row) => row[column].length)));
   const line = (cells) => `| ${cells.map((cell, column) => cell.padEnd(widths[column])).join(' | ')} |`;
   process.stdout.write([
-    'practical kps // actual fixed-tick combat',
+    (report.config.enemyHp || 1) !== 1 ? `hp removed per second // ${report.config.enemyHp} hp enemies // actual fixed-tick combat` : 'practical kps // actual fixed-tick combat',
     `scenario // test_field at ${report.config.position.x},${report.config.position.y} // ${report.config.targetingMode} // ${report.config.sources.join(',')}`,
     `timing // ${report.config.rates.map((rate) => {
       const timing = report.config.timingByRate[rate];
@@ -463,6 +471,7 @@ async function main() {
     const report = {
       config: {
         rates: options.rates,
+        enemyHp: options.enemyHp,
         forms: options.forms,
         sources: options.sources,
         targetingMode: options.targetingMode,

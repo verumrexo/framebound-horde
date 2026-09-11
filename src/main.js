@@ -13,6 +13,7 @@ import { towerBuildQuote } from './core/tower-catalog.js';
 import { NETWORK_DESCENDANT_IDS, controlSource, isRelayForm, networkSources, purchaseCost, saleRefund, socketPoint } from './core/network-descendants.js';
 import { defenseAreaBounds, defenseAreaField, findDefenseAreaAt, getMapDefinition, playableMaps } from './core/world-config.js';
 import { loadSoloRun, saveSoloRun } from './core/persistence.js';
+import { DEFAULT_PACE, PACE_MAX, PACE_MIN, PACE_STEP, normalizePace } from './core/progression.js';
 import { P2PGuestSession, P2PHostSession } from './core/p2p-session.js';
 import { PeerConnectionCoordinator, RelayConnectionCoordinator, SIGNALING_URL, relayUrlForPage, sanitizeRoomCode } from './core/p2p-transport.js';
 
@@ -1143,10 +1144,27 @@ const multiplayerState = {
   codeInput: '',
   status: 'peer link idle',
   detail: '',
-  expiresAt: 0
+  expiresAt: 0,
+  playerName: loadPlayerName(),
+  editingName: false
 };
+const multiplayerSocial = {
+  messages: [],
+  presenceByPlayer: new Map(),
+  presenceSequenceByPlayer: new Map(),
+  pings: [],
+  chatOpen: false,
+  chatInput: '',
+  rosterExpanded: false,
+  pingArmed: false,
+  lastPresenceSentAt: -Infinity,
+  lastPresenceSignature: '',
+  idleSent: true
+};
+const PLAYER_COLORS = [COLOR.cyan, COLOR.mint, COLOR.amber, COLOR.green];
 let dragging = false;
 let pointer = { x: logicalWidth * 0.5, y: logicalHeight * 0.5 };
+let lastPointerMotionAt = -Infinity;
 let pointerDown = null;
 let dragDistance = 0;
 let placementArmed = false;
@@ -1212,11 +1230,39 @@ function loadGameplayPreferences() {
   try {
     const saved = JSON.parse(localStorage.getItem('framebound_horde_preferences') || 'null');
     return {
-      autoSelectPlacedFrame: saved?.autoSelectPlacedFrame !== false
+      autoSelectPlacedFrame: saved?.autoSelectPlacedFrame !== false,
+      pace: normalizePace(saved?.pace ?? DEFAULT_PACE)
     };
   } catch {
-    return { autoSelectPlacedFrame: true };
+    return { autoSelectPlacedFrame: true, pace: DEFAULT_PACE };
   }
+}
+
+function loadPlayerName() {
+  try {
+    return sanitizePlayerName(localStorage.getItem('framebound_horde_player_name')) || 'pilot';
+  } catch {
+    return 'pilot';
+  }
+}
+
+function sanitizePlayerName(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9 _-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 20);
+}
+
+function savePlayerName(value) {
+  const name = sanitizePlayerName(value) || 'pilot';
+  multiplayerState.playerName = name;
+  try { localStorage.setItem('framebound_horde_player_name', name); } catch {}
+  if (session?.networkRole && session.playerId) session.send(COMMAND.PLAYER_RENAME, { label: name });
+}
+
+function playerColor(playerOrId) {
+  const player = typeof playerOrId === 'string'
+    ? sessionSnapshot?.players.find((candidate) => candidate.id === playerOrId)
+    : playerOrId;
+  const index = Number(String(player?.colorId || 'player_0').split('_').at(-1)) || 0;
+  return PLAYER_COLORS[index % PLAYER_COLORS.length];
 }
 
 function saveGameplayPreferences() {
@@ -1296,7 +1342,7 @@ function createHostNetworkBundle() {
   const bundleAuthority = createNetworkAuthority('host');
   const bundleSession = new P2PHostSession(bundleAuthority, {
     clientId: localPeerClientId(),
-    label: 'host'
+    label: multiplayerState.playerName
   });
   bundleSession.connect();
   bundleSession.advance(20);
@@ -1314,7 +1360,7 @@ function createGuestNetworkBundle(code) {
   const clientId = localPeerClientId();
   const bundleSession = new P2PGuestSession(bundleAuthority, {
     clientId,
-    label: `pilot ${clientId.slice(-3)}`,
+    label: multiplayerState.playerName,
     resumeToken: loadResumeToken(code)
   });
   bundleSession.roomCode = code;
@@ -1343,6 +1389,45 @@ function updateMultiplayerStatus(phase, status, detail = '') {
   setStatus(multiplayerState.status);
 }
 
+function resetMultiplayerSocial() {
+  multiplayerSocial.messages.length = 0;
+  multiplayerSocial.presenceByPlayer.clear();
+  multiplayerSocial.presenceSequenceByPlayer.clear();
+  multiplayerSocial.pings.length = 0;
+  multiplayerSocial.chatOpen = false;
+  multiplayerSocial.chatInput = '';
+  multiplayerSocial.rosterExpanded = false;
+  multiplayerSocial.pingArmed = false;
+  multiplayerSocial.lastPresenceSignature = '';
+  multiplayerSocial.idleSent = true;
+}
+
+function addSystemMessage(text) {
+  addChatMessage({ kind: 'system', text: String(text || '').toLowerCase() });
+}
+
+function addChatMessage(message) {
+  multiplayerSocial.messages.push({ ...message, receivedAt: performance.now() });
+  if (multiplayerSocial.messages.length > 50) multiplayerSocial.messages.splice(0, multiplayerSocial.messages.length - 50);
+}
+
+function receiveSocialMessage(message) {
+  if (message.kind === 'chat') addChatMessage(message);
+  else if (message.kind === 'ping') multiplayerSocial.pings.push({ ...message, receivedAt: performance.now() });
+}
+
+function receivePresenceMessage(message) {
+  const sequence = Number.isSafeInteger(message.sequence) ? message.sequence : -1;
+  const previous = multiplayerSocial.presenceSequenceByPlayer.get(message.playerId) || -1;
+  if (sequence <= previous) return;
+  multiplayerSocial.presenceSequenceByPlayer.set(message.playerId, sequence);
+  if (!message.active) {
+    multiplayerSocial.presenceByPlayer.delete(message.playerId);
+    return;
+  }
+  multiplayerSocial.presenceByPlayer.set(message.playerId, { ...message, receivedAt: performance.now() });
+}
+
 function bindPeerCoordinator(bundle, role, code = null) {
   const relayMode = new URLSearchParams(window.location.search).get('relay') === '1';
   const coordinator = relayMode
@@ -1351,6 +1436,8 @@ function bindPeerCoordinator(bundle, role, code = null) {
   peerCoordinator = coordinator;
   bundle.coordinator = coordinator;
   const networkSession = bundle.session;
+  networkSession.onSocial = receiveSocialMessage;
+  networkSession.onPresence = receivePresenceMessage;
 
   networkSession.onStatus = (status, detail) => {
     if (status === 'peer_ready') {
@@ -1420,6 +1507,7 @@ function bindPeerCoordinator(bundle, role, code = null) {
   };
   coordinator.onClosed = ({ reason }) => {
     if (multiplayerClosing) return;
+    if (reason === 'host_left') addSystemMessage('host left // room ended');
     updateMultiplayerStatus('error', reason === 'host_left' ? 'host left // migration is not in this beta' : `peer session closed // ${reason}`);
     frontEndScreen = 'coop';
   };
@@ -1432,6 +1520,7 @@ function bindPeerCoordinator(bundle, role, code = null) {
 function beginHostingCoop() {
   if (gameRestorePending) return setStatus('loading solo save');
   cancelMultiplayer(false);
+  resetMultiplayerSocial();
   const bundle = createHostNetworkBundle();
   switchGameBundle(bundle);
   multiplayerState.role = 'host';
@@ -1457,6 +1546,7 @@ function beginJoiningCoop() {
   const code = sanitizeRoomCode(multiplayerState.codeInput);
   if (!code) return updateMultiplayerStatus('join_entry', 'need all six code characters');
   cancelMultiplayer(false);
+  resetMultiplayerSocial();
   const bundle = createGuestNetworkBundle(code);
   switchGameBundle(bundle);
   multiplayerState.role = 'guest';
@@ -1488,8 +1578,10 @@ function cancelMultiplayer(returnToMenu = true) {
     codeInput: '',
     status: 'peer link idle',
     detail: '',
-    expiresAt: 0
+    expiresAt: 0,
+    editingName: false
   });
+  resetMultiplayerSocial();
   if (returnToMenu) {
     gameHasEnteredGameplay = Boolean(sessionSnapshot?.runTick > 0);
     frontEndScreen = 'main';
@@ -1729,6 +1821,7 @@ canvas.addEventListener('pointermove', (event) => {
   if (!event.isPrimary) return;
   const previous = pointer;
   pointer = canvasPoint(event);
+  lastPointerMotionAt = performance.now();
   if (uiDrag) {
     handleUiDrag(pointer);
     return;
@@ -1776,7 +1869,14 @@ canvas.addEventListener('pointerup', (event) => {
     && Math.hypot(pointer.x - pointerDown.x, pointer.y - pointerDown.y) <= 2;
   cancelPointerGesture();
   if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-  if (clicked && pointer.y > HUD_TOP_HEIGHT && pointer.y < hudBottomY) handleWorldClick(pointer);
+  if (clicked && pointer.y > HUD_TOP_HEIGHT && pointer.y < hudBottomY) {
+    if (multiplayerSocial.pingArmed && session.networkRole) {
+      const world = unproject(pointer.x, pointer.y);
+      session.sendPing?.(world.x, world.y);
+      multiplayerSocial.pingArmed = false;
+      setStatus('ping sent');
+    } else handleWorldClick(pointer);
+  }
 });
 
 function cancelPointerGesture() {
@@ -1819,11 +1919,37 @@ addEventListener('keydown', (event) => {
   if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
   if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
   const key = event.key.toLowerCase();
+  if (multiplayerState.editingName) {
+    if (event.key === 'Escape') multiplayerState.editingName = false;
+    else if (event.key === 'Enter') {
+      savePlayerName(multiplayerState.playerName);
+      multiplayerState.editingName = false;
+    } else if (event.key === 'Backspace') multiplayerState.playerName = multiplayerState.playerName.slice(0, -1);
+    else if (/^[a-z0-9 _-]$/i.test(event.key) && multiplayerState.playerName.length < 20) multiplayerState.playerName += event.key.toLowerCase();
+    event.preventDefault();
+    return;
+  }
+  if (multiplayerSocial.chatOpen) {
+    if (event.key === 'Escape') multiplayerSocial.chatOpen = false;
+    else if (event.key === 'Enter') {
+      if (multiplayerSocial.chatInput.trim()) session.sendChat?.(multiplayerSocial.chatInput);
+      multiplayerSocial.chatInput = '';
+      multiplayerSocial.chatOpen = false;
+    } else if (event.key === 'Backspace') multiplayerSocial.chatInput = multiplayerSocial.chatInput.slice(0, -1);
+    else if (event.key.length === 1 && multiplayerSocial.chatInput.length < 160) multiplayerSocial.chatInput += event.key;
+    event.preventDefault();
+    return;
+  }
   if (event.key === 'F2' && frontEndScreen === 'game') {
     event.preventDefault(); cancelPointerGesture(); devToolsOpen = !devToolsOpen; return;
   }
   if (devToolsOpen) {
     if (event.key === 'Escape') { event.preventDefault(); devToolsOpen = false; }
+    return;
+  }
+  if (frontEndScreen === 'game' && session.networkRole && event.key === 'Tab' && towerMenuMode !== 'research' && !buildCatalogOpen) {
+    event.preventDefault();
+    multiplayerSocial.rosterExpanded = true;
     return;
   }
   if (event.key === '?' && (frontEndScreen === 'game' || frontEndScreen === 'escape')) {
@@ -1881,6 +2007,10 @@ addEventListener('keydown', (event) => {
       if (map) selectRunMap(map.id);
     } else if (event.key === 'Enter') {
       deploySelectedMap();
+    } else if (event.key === '[' || event.key === '-') {
+      adjustRunPace(-1);
+    } else if (event.key === ']' || event.key === '=' || event.key === '+') {
+      adjustRunPace(1);
     }
     return;
   }
@@ -1912,14 +2042,6 @@ addEventListener('keydown', (event) => {
       setStatus(`${BUILD_CATALOG_PAGES[buildCatalogPageId].label} catalog`);
     } else if ((sessionMode === 'game' && key === 'b') || (sessionMode === 'test' && key === 'u')) closeBuildCatalog();
     else if (entry) selectBulkPlacementDefinition(entry.definitionId);
-    return;
-  }
-  const inspectedTower = session.networkRole && selectedTowerId
-    ? sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId && tower.ownerId !== session.playerId)
-    : null;
-  if (inspectedTower && ['1', '2', '3', '0', 'q', 'e', 'a'].includes(key)) {
-    const owner = sessionSnapshot.players.find((player) => player.id === inspectedTower.ownerId);
-    setStatus(`owned by ${owner?.label || 'another pilot'} // inspect only`);
     return;
   }
   if (selectedTowerId && towerMenuMode && (sessionMode === 'game' || ['arsenal','reactor'].includes(sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId)?.definitionId) || isRelayForm(sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId)?.definitionId) || ['relay', 'strike', 'control'].includes(towerMenuMode))) {
@@ -1993,7 +2115,13 @@ addEventListener('keydown', (event) => {
       return;
     }
   }
-  if (key === 't') {
+  if (session.networkRole && event.key === 'Enter' && frontEndScreen === 'game') {
+    event.preventDefault();
+    multiplayerSocial.chatOpen = true;
+  } else if (session.networkRole && key === 'p' && frontEndScreen === 'game') {
+    const world = unproject(pointer.x, pointer.y);
+    if (pointer.y > HUD_TOP_HEIGHT && pointer.y < hudBottomY) session.sendPing?.(world.x, world.y);
+  } else if (key === 't') {
     if (sessionMode === 'test') activateSession('game');
     else enterTestField();
   } else if (key === 'k') {
@@ -2050,6 +2178,10 @@ addEventListener('keydown', (event) => {
   } else if (key === 'r' && sessionSnapshot.phase === 'defeated' && !session.networkRole) {
     session.send(COMMAND.SESSION_RESTART);
   }
+});
+
+addEventListener('keyup', (event) => {
+  if (event.key === 'Tab') multiplayerSocial.rosterExpanded = false;
 });
 
 addEventListener('paste', (event) => {
@@ -2139,6 +2271,20 @@ function openCoopMapSelection() {
   openMapSelection('coop');
 }
 
+// Horde pace for the next deployment: a time stretch on the threat clock.
+function selectedRunPace() {
+  return normalizePace(gameplayPreferences.pace ?? DEFAULT_PACE);
+}
+
+function adjustRunPace(direction) {
+  const next = normalizePace(selectedRunPace() + direction * PACE_STEP);
+  if (next === selectedRunPace()) return;
+  gameplayPreferences.pace = next;
+  saveGameplayPreferences();
+  menuConfirm = null;
+  setStatus(`horde pace x${next.toFixed(1)} // ${next < 1 ? 'slower curve, later surges' : next > 1 ? 'faster curve, earlier surges' : 'designed pace'}`);
+}
+
 function selectRunMap(mapId) {
   const map = playableMaps().find((candidate) => candidate.id === mapId);
   if (!map) return;
@@ -2171,13 +2317,14 @@ function deploySelectedMap() {
     setStatus('deploy again // wipes the live run');
     return;
   }
-  if (sessionSnapshot.phase === 'lobby') session.send(COMMAND.SESSION_START, { mapId: map.id });
-  else session.send(COMMAND.SESSION_RESTART, { mapId: map.id });
+  const pace = selectedRunPace();
+  if (sessionSnapshot.phase === 'lobby') session.send(COMMAND.SESSION_START, { mapId: map.id, pace });
+  else session.send(COMMAND.SESSION_RESTART, { mapId: map.id, pace });
   gameHasEnteredGameplay = true;
   frontEndScreen = 'game';
   menuConfirm = null;
   clearTransientUi();
-  setStatus(`${map.label} // deploying`);
+  setStatus(`${map.label} // pace x${pace.toFixed(1)} // deploying`);
 }
 
 function openEscapeMenu() {
@@ -2234,7 +2381,7 @@ function enterTestField() {
 
 function armFramePlacement() {
   const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === TOWER_DEFINITION_ID);
-  const economy = sessionSnapshot.economyByPlayer[session.playerId];
+  const economy = sessionSnapshot.teamEconomy;
   if ((sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < (definition?.cost ?? Infinity)) {
     placementArmed = false;
     bulkPlacementDefinitionId = null;
@@ -2284,13 +2431,13 @@ function selectBulkPlacementDefinition(definitionId) {
     return;
   }
   const quote = towerBuildQuote(sessionSnapshot.towerCatalog, definitionId);
-  const economy = sessionSnapshot.economyByPlayer[session.playerId];
+  const economy = sessionSnapshot.teamEconomy;
   if (!definition || !quote) {
     setStatus('tower build path is unavailable');
     return;
   }
-  if ((sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < Math.min(...currentMap.defenseAreas.map((area) => purchaseCost(sessionSnapshot, area.id, quote.cost)))) {
-    setStatus(`need ${compactMetric(quote.cost)} credits for ${definition.label}`);
+  if ((sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < Math.min(...currentMap.defenseAreas.map((area) => purchaseCost(sessionSnapshot, area.id, quote.cost, { placement: true })))) {
+    setStatus(`need ${compactMetric(purchaseCost(sessionSnapshot, null, quote.cost, { placement: true }))} credits for ${definition.label}`);
     return;
   }
   bulkPlacementDefinitionId = definitionId;
@@ -2298,7 +2445,7 @@ function selectBulkPlacementDefinition(definitionId) {
   buildCatalogOpen = false;
   selectedTowerId = null;
   towerMenuMode = null;
-  setStatus(`${definition.label} ${compactMetric(quote.cost)} // place many // right click ends`);
+  setStatus(`${definition.label} ${compactMetric(purchaseCost(sessionSnapshot, null, quote.cost, { placement: true }))} // place many // right click ends`);
 }
 
 function switchTestTowerForm(definitionId) {
@@ -2532,6 +2679,7 @@ function drawTower(tower, override = null) {
   const footprint = Math.max(6, Math.min(54, nearest-2));
   const artScale = Math.min(scale, footprint / (2*Math.SQRT2*extent) / camera.scale);
   for (const [x,y,w,h,color] of rectangles) shapes.rect(p.x+(x-p.x)*artScale,p.y+(y-p.y)*artScale,w*artScale,h*artScale,color);
+  if (session.networkRole && tower.ownerId) shapes.rect(p.x - 1, p.y + Math.max(5, extent * artScale) + 2, 3, 2, playerColor(tower.ownerId));
   if (tower.definitionId === 'hardpoint') {
     const point = socketPoint(sessionSnapshot, currentMap, tower);
     if (point) {
@@ -3625,16 +3773,16 @@ function drawBuildState(snapshot) {
   const placementDefinition = snapshot.towerCatalog.find((candidate) => candidate.id === placementDefinitionId);
   const quote = towerBuildQuote(snapshot.towerCatalog, placementDefinitionId);
   const world = unproject(pointer.x, pointer.y);
-  const economy = snapshot.economyByPlayer[session.playerId];
+  const economy = snapshot.teamEconomy;
   const socketHost = snapshot.towers.find((tower) => {
     const point = socketPoint(snapshot, currentMap, tower);
     return point && Math.hypot(point.x - world.x, point.y - world.y) <= 10;
   });
   const areaId = socketHost?.areaId || findDefenseAreaAt(currentMap, world.x, world.y);
-  const price = quote ? purchaseCost(snapshot, areaId, quote.cost) : Infinity;
+  const price = quote ? purchaseCost(snapshot, areaId, quote.cost, { placement: true }) : Infinity;
   const snappedPoint = socketHost ? socketPoint(snapshot, currentMap, socketHost) : world;
   const clear = towerPlacementClear(snapshot.towers, snappedPoint.x, snappedPoint.y);
-  const canPlace = clear && Boolean(areaId) && (!socketHost || (socketHost.ownerId === session.playerId && placementDefinitionId !== 'hardpoint' && !snapshot.towers.some((tower) => tower.socketHostId === socketHost.id))) && (sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) >= price;
+  const canPlace = clear && Boolean(areaId) && (!socketHost || (placementDefinitionId !== 'hardpoint' && !snapshot.towers.some((tower) => tower.socketHostId === socketHost.id))) && (sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) >= price;
   drawWorldRing(snappedPoint.x, snappedPoint.y, MIN_TOWER_SPACING / 2, clear ? COLOR.dimMint : COLOR.red);
   bitmapText.draw(clear ? `${compactMetric(price)} cr` : 'too close', pointer.x + 12, pointer.y + 12, canPlace ? COLOR.amber : COLOR.red, 1);
   if (placementDefinition) drawWorldRing(world.x, world.y, towerRingRange(null, placementDefinition), canPlace ? COLOR.dimMint : COLOR.red);
@@ -3644,21 +3792,66 @@ function drawBuildState(snapshot) {
   );
 }
 
+// The threat clock runs at the run's pace; countdowns are shown in real seconds.
+function threatSecondsOf(snapshot) {
+  return snapshot.swarm?.threatSeconds ?? snapshot.runTick / AUTHORITY_TICK_RATE;
+}
+function realSecondsUntil(snapshot, threatSeconds) {
+  return Math.max(0, threatSeconds - threatSecondsOf(snapshot)) / (snapshot.pace || 1);
+}
+
+// Compass label for the hot arc so the HUD can say where a surge is coming from.
+function surgeDirectionLabel(riftIds) {
+  const sources = currentMap.spawnSources.filter((source) => riftIds.includes(source.id));
+  if (!sources.length) return '';
+  let dx = 0;
+  let dy = 0;
+  for (const source of sources) {
+    const length = Math.hypot(source.x - currentMap.base.x, source.y - currentMap.base.y) || 1;
+    dx += (source.x - currentMap.base.x) / length;
+    dy += (source.y - currentMap.base.y) / length;
+  }
+  const angle = Math.atan2(dy, dx);
+  const labels = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
+  return labels[Math.round(((angle / (Math.PI * 2)) * 8 + 8) % 8) % 8];
+}
+
+// Surge readout for the hud and status line: null while idle.
+function surgeStatus(snapshot) {
+  const surge = snapshot.swarm?.surge;
+  if (!surge || surge.phase === 'idle') return null;
+  const direction = surgeDirectionLabel(surge.riftIds);
+  if (surge.phase === 'warning') {
+    return { phase: 'warning', direction, seconds: Math.ceil(realSecondsUntil(snapshot, surge.activeAtSeconds)), hpMultiplier: surge.hpMultiplier };
+  }
+  return { phase: 'active', direction, seconds: Math.ceil(realSecondsUntil(snapshot, surge.endsAtSeconds)), hpMultiplier: surge.hpMultiplier };
+}
+
 function drawTestFieldWorld(snapshot) {
   if (sessionMode !== 'test') {
+    const surge = snapshot.swarm?.surge;
+    const hotRifts = new Set(surge && surge.phase !== 'idle' ? surge.riftIds : []);
     for (const source of currentMap.spawnSources) {
-      const remaining = source.unlockSeconds - snapshot.runTick / AUTHORITY_TICK_RATE;
-      if (remaining > 10) continue;
+      const remaining = source.unlockSeconds > threatSecondsOf(snapshot) ? realSecondsUntil(snapshot, source.unlockSeconds) : source.unlockSeconds - threatSecondsOf(snapshot);
+      const hot = hotRifts.has(source.id);
+      if (remaining > 10 && !hot) continue;
       const p = project(source.x, source.y);
       if (p.x < -30 || p.x > logicalWidth + 30 || p.y < HUD_TOP_HEIGHT || p.y > hudBottomY) continue;
-      const color = remaining > 0 ? COLOR.amber : COLOR.red;
-      const pulse = Math.floor(snapshot.runTick / 8) % 4;
+      const color = hot ? COLOR.amber : remaining > 0 ? COLOR.amber : COLOR.red;
+      const pulse = Math.floor(snapshot.runTick / (hot ? 5 : 8)) % 4;
       for (const side of [-1, 1]) {
         shapes.rect(p.x + side * (8 + pulse), p.y - 12, 2, 24, color);
         shapes.rect(p.x + side * 8 - 3, p.y - 14, 7, 2, color);
         shapes.rect(p.x + side * 8 - 3, p.y + 12, 7, 2, color);
       }
       shapes.rect(p.x - 2, p.y - 7 + pulse * 3, 4, 5, COLOR.amber);
+      if (hot) {
+        // hot rifts get a second bracket so the surge arc reads at a glance
+        for (const side of [-1, 1]) shapes.rect(p.x + side * (16 + pulse), p.y - 16, 2, 32, COLOR.amber);
+        const status = surgeStatus(snapshot);
+        bitmapText.draw(status?.phase === 'warning' ? `surge ${status.seconds}s` : 'surge // hot', p.x - 30, p.y + 19, COLOR.amber, 1);
+        continue;
+      }
       bitmapText.draw(remaining > 0 ? `rift ${Math.ceil(remaining)}s` : 'rift // live', p.x - 30, p.y + 19, color, 1);
     }
     return;
@@ -3744,7 +3937,7 @@ function drawBuildCatalog(snapshot) {
   if (!buildCatalogOpen) return;
   const page = BUILD_CATALOG_PAGES[buildCatalogPageId];
   if (!page) return;
-  const economy = snapshot.economyByPlayer[session.playerId] || { credits: 0 };
+  const economy = snapshot.teamEconomy || { credits: 0 };
   const width = Math.min(410, logicalWidth - 12);
   const height = 120;
   const x = Math.round((logicalWidth - width) * 0.5);
@@ -3768,8 +3961,9 @@ function drawBuildCatalog(snapshot) {
       const definition = snapshot.towerCatalog.find((candidate) => candidate.id === entry.definitionId);
       const quote = towerBuildQuote(snapshot.towerCatalog, entry.definitionId);
       if (!definition || !quote) return;
-      const affordable = sessionMode === 'test' || snapshot.dev?.infiniteMoney || economy.credits >= quote.cost;
-      const pricedLabel = `${entry.key} ${definition.label} ${compactMetric(quote.cost)}`;
+      const price = purchaseCost(snapshot, null, quote.cost, { placement: true });
+      const affordable = sessionMode === 'test' || snapshot.dev?.infiniteMoney || economy.credits >= price;
+      const pricedLabel = `${entry.key} ${definition.label} ${compactMetric(price)}`;
       const label = sessionMode === 'test'
         ? `${entry.key} ${definition.label}`
         : pricedLabel.length * 6 <= buttonWidth - 8
@@ -3867,15 +4061,25 @@ function clippedUiText(value, width) {
   return String(value || '').slice(0, Math.max(0, Math.floor(width / 6)));
 }
 
+function drawPlayerNameEditor(x, y, width) {
+  const label = multiplayerState.editingName
+    ? `name ${multiplayerState.playerName}_`
+    : `name ${multiplayerState.playerName} // edit`;
+  drawButton('coop_player_name', label, x, y, width, multiplayerState.editingName, COLOR.cyan, () => {
+    multiplayerState.editingName = true;
+  }, 15);
+}
+
 function drawCoopRoster(snapshot, x, y, width) {
-  const players = (snapshot.players || []).filter((player) => player.connected || !player.eliminated);
+  const players = (snapshot.players || []).slice(0, 4);
   for (let index = 0; index < Math.min(4, players.length); index += 1) {
     const player = players[index];
     const role = player.id === snapshot.hostPlayerId ? 'host' : player.spectator ? 'spectator' : 'peer';
-    const state = player.connected ? 'linked' : 'reconnect';
+    const state = player.connectionState === 'reconnecting' ? 'reconnect' : player.connectionState === 'departed' ? 'departed' : player.connected ? 'linked' : 'offline';
     const local = player.id === session.playerId ? ' // you' : '';
     const label = `${index + 1} ${player.label} // ${role} // ${state}${local}`;
-    bitmapText.draw(clippedUiText(label, width), x, y + index * 10, player.connected ? COLOR.ink : COLOR.red, 1);
+    shapes.rect(x, y + index * 10 + 3, 4, 4, playerColor(player));
+    bitmapText.draw(clippedUiText(label, width - 8), x + 8, y + index * 10, player.connected ? playerColor(player) : COLOR.red, 1);
   }
 }
 
@@ -3915,6 +4119,7 @@ function drawCoopMenu(snapshot) {
     drawMenuButton('coop_join_back', 'back // esc', buttonX, y + 122, buttonWidth, COLOR.cyan, () => cancelMultiplayer(true));
     bitmapText.draw('type or paste the code your host sends', x + 18, y + 148, COLOR.ink, 1);
     bitmapText.draw('signaling may need a few seconds to wake', x + 18, y + 160, COLOR.dimMint, 1);
+    drawPlayerNameEditor(x + width - 160, y + 176, 142);
     return;
   }
 
@@ -3937,6 +4142,7 @@ function drawCoopMenu(snapshot) {
 
   const roomCode = multiplayerState.roomCode || multiplayerState.codeInput;
   if (roomCode) bitmapText.draw(`room ${roomCode.toLowerCase()}`, x + 18, y + 61, COLOR.amber, 2);
+  drawPlayerNameEditor(x + width - 160, y + 66, 142);
   drawCoopRoster(snapshot, x + 18, y + 88, width - 36);
   if (snapshot.phase !== 'lobby') {
     drawMenuButton('coop_resume', snapshot.phase === 'defeated' ? 'view ended run' : 'return to run', buttonX, y + 132, buttonWidth, COLOR.mint, resumeSession, true);
@@ -3991,7 +4197,7 @@ function drawMapCard(map, index, x, y, width, height) {
 function drawMapSelection(snapshot) {
   const maps = playableMaps();
   const width = Math.min(430, logicalWidth - 12);
-  const height = Math.min(140 + maps.length * 23, logicalHeight - 12);
+  const height = Math.min(172 + maps.length * 23, logicalHeight - 12);
   const x = Math.round((logicalWidth - width) * 0.5);
   const y = Math.round((logicalHeight - height) * 0.5);
   drawTechPanel(x, y, width, height, COLOR.amber);
@@ -4002,14 +4208,33 @@ function drawMapSelection(snapshot) {
     : snapshot.phase === 'running' ? 'saved run held // deployment wipes it' : 'choose a flow // fresh seed per run';
   bitmapText.draw(warning, x + 16, y + 27, snapshot.phase === 'running' ? COLOR.red : COLOR.dimMint, 1);
 
-  const mapRowHeight=height>=210?23:17, mapRowTop=height>=210?40:35;
+  const mapRowHeight=height>=242?23:17, mapRowTop=height>=242?40:35;
   maps.forEach((map,index) => {
     const selected=map.id===selectedRunMapId;
     drawMenuButton(`map_${map.id}`,`${index+1} ${map.label}`,x+16,y+mapRowTop+index*mapRowHeight,width-32,selected?COLOR.mint:COLOR.cyan,()=>selectRunMap(map.id),selected);
   });
   const selected=maps.find((map)=>map.id===selectedRunMapId);
   const descriptionY = mapRowTop + maps.length * mapRowHeight + 4;
-  if(descriptionY < height - 50) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+descriptionY,COLOR.ink,1);
+  if(descriptionY < height - 78) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+descriptionY,COLOR.ink,1);
+
+  // horde pace row: [-] pace x1.0 [+], with a small tick bar across the allowed range
+  const pace = selectedRunPace();
+  const paceY = y + height - 66;
+  const paceButton = 18;
+  drawMenuButton('pace_down', '-', x + 16, paceY, paceButton, pace > PACE_MIN ? COLOR.cyan : COLOR.dimMint, () => adjustRunPace(-1), false);
+  drawMenuButton('pace_up', '+', x + 16 + paceButton + 4 + 92 + 4, paceY, paceButton, pace < PACE_MAX ? COLOR.cyan : COLOR.dimMint, () => adjustRunPace(1), false);
+  const paceColor = pace === DEFAULT_PACE ? COLOR.mint : pace < DEFAULT_PACE ? COLOR.cyan : COLOR.amber;
+  bitmapText.draw(`pace x${pace.toFixed(1)}`, x + 16 + paceButton + 8, paceY + 4, paceColor, 1);
+  const barX = x + 16 + paceButton * 2 + 108;
+  const barWidth = Math.max(40, width - (barX - x) - 16);
+  const steps = Math.round((PACE_MAX - PACE_MIN) / PACE_STEP);
+  for (let step = 0; step <= steps; step += 1) {
+    const stepPace = normalizePace(PACE_MIN + step * PACE_STEP);
+    const tickX = barX + Math.round(step / steps * (barWidth - 3));
+    const on = stepPace <= pace + 1e-9;
+    shapes.rect(tickX, paceY + (stepPace === DEFAULT_PACE ? 2 : 5), 3, stepPace === DEFAULT_PACE ? 12 : 6, on ? paceColor : COLOR.dimMint);
+  }
+  bitmapText.draw(pace < DEFAULT_PACE ? 'slower horde' : pace > DEFAULT_PACE ? 'faster horde' : 'designed pace', barX, paceY + 14, COLOR.dimMint, 1);
 
   const buttonY = y + height - 38;
   const backWidth = 76;
@@ -4025,7 +4250,7 @@ function drawMapSelection(snapshot) {
     deploySelectedMap,
     true
   );
-  bitmapText.draw(`1-${maps.length} select // enter deploys`, x + 17, y + height - 16, COLOR.ink, 1);
+  bitmapText.draw(`1-${maps.length} select // [ ] pace // enter deploys`, x + 17, y + height - 16, COLOR.ink, 1);
 }
 
 function resetTestFieldFromMenu() {
@@ -4119,18 +4344,15 @@ function drawEscapeMenu(snapshot) {
   if (!compact) bitmapText.draw(`${runLabel} // ${seconds}s // ${compactMetric(snapshot.swarm.activeEnemies)} hostiles`, x + 18, y + 43, COLOR.ink, 1);
   drawMenuButton('escape_resume', 'resume // esc', buttonX, rowY(0), buttonWidth, COLOR.mint, resumeSession, true);
   if (networkActive) {
-    const canContinue = snapshot.phase === 'reconnect_wait' && snapshot.hostPlayerId === session.playerId;
     drawMenuButton(
       'escape_coop_status',
-      canContinue ? 'continue without pilot' : `coop status // ${multiplayerState.roomCode?.toLowerCase() || 'linked'}`,
+      `coop status // ${multiplayerState.roomCode?.toLowerCase() || 'linked'}`,
       buttonX,
       rowY(1),
       buttonWidth,
-      canContinue ? COLOR.amber : COLOR.green,
-      canContinue
-        ? () => session.send(COMMAND.SESSION_CONTINUE_WITHOUT_PLAYER)
-        : () => { frontEndScreen = 'coop'; },
-      canContinue
+      COLOR.green,
+      () => { frontEndScreen = 'coop'; },
+      true
     );
   } else if (sessionMode === 'game') {
     drawMenuButton('escape_restart', 'new run // choose map', buttonX, rowY(1), buttonWidth, COLOR.amber, () => openMapSelection('escape'));
@@ -4142,7 +4364,7 @@ function drawEscapeMenu(snapshot) {
   drawMenuButton('escape_main', 'main menu', buttonX, rowY(4), buttonWidth, COLOR.cyan, returnToMainMenu);
   if (networkActive) {
     drawMenuButton('escape_leave_coop', 'leave coop', buttonX, rowY(5), buttonWidth, COLOR.red, () => cancelMultiplayer(true));
-    bitmapText.draw('leave // reconnect or split holdings', x + 18, y + height - 14, COLOR.dimMint, 1);
+    bitmapText.draw('leaving marks your seat departed', x + 18, y + height - 14, COLOR.dimMint, 1);
   } else {
     bitmapText.draw('no pause means no cheese. sorry.', x + 18, y + height - 14, COLOR.dimMint, 1);
   }
@@ -4264,7 +4486,6 @@ function stationItems(snapshot, tower) {
     rank: reactorRank(snapshot,category.id), cost: reactorQuote(snapshot,category.id)?.cost ?? null }));
 }
 function purchaseStationItem(tower, item) {
-  if (tower.ownerId !== session.playerId) return setStatus('only the station owner can buy');
   if (item.owned) return setStatus('already researched');
   if (item.locked) return setStatus('unlock parent research first');
   if (item.cost === null) return setStatus('upgrade capped');
@@ -4345,8 +4566,8 @@ function drawArsenalTree(snapshot,tower) {
   // The tree above already draws a connector line to the prerequisite node; no need to restate it here.
   const lines=wrapResearchText(selected.description,Math.floor((width-24)/6));
   lines.slice(0,3).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+12+i*9,COLOR.ink,1));
-  const wallet=snapshot.economyByPlayer[session.playerId]?.credits||0;
-  const available=!selected.owned&&!selected.locked&&(snapshot.dev?.infiniteMoney||wallet>=selected.cost)&&tower.ownerId===session.playerId;
+  const wallet=snapshot.teamEconomy?.credits||0;
+  const available=!selected.owned&&!selected.locked&&(snapshot.dev?.infiniteMoney||wallet>=selected.cost);
   const label=selected.owned?'owned':selected.locked?'unlock parent first':`buy // ${compactMetric(selected.cost)} cr // enter`;
   drawMenuButton('tree_buy',label,x+12,y+height-42,width-24,available?COLOR.mint:COLOR.red,()=>{if(available)purchaseStationItem(tower,selected);},available);
   drawMenuButton('tree_back','back // esc',x+12,y+height-21,width-24,COLOR.cyan,()=>towerMenuMode='actions');
@@ -4376,7 +4597,7 @@ function drawReactorGrid(snapshot, tower) {
   const items = stationItems(snapshot, tower);
   if (!items.some((item) => item.id === researchSelection)) researchSelection = items[0]?.id ?? null;
   const selected = items.find((item) => item.id === researchSelection) || items[0];
-  const wallet = snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0;
+  const wallet = snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.teamEconomy?.credits || 0;
   drawTechPanel(x, y, width, height, COLOR.amber);
   bitmapText.draw('reactor // global ranks', x + 12, y + 10, COLOR.amber, 2);
   bitmapText.draw(`credits ${snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(wallet)}`, x + 12, y + 30, COLOR.ink, 1);
@@ -4397,7 +4618,7 @@ function drawReactorGrid(snapshot, tower) {
   bitmapText.draw(clippedUiText(selected.label, width - 24), x + 12, detailY, COLOR.amber, 1);
   const lines = wrapResearchText(selected.description, Math.floor((width - 24) / 6));
   lines.slice(0, 1).forEach((line, i) => bitmapText.draw(line, x + 12, detailY + 11 + i * 9, COLOR.ink, 1));
-  const available = selected.cost !== null && (snapshot.dev?.infiniteMoney || wallet >= selected.cost) && tower.ownerId === session.playerId;
+  const available = selected.cost !== null && (snapshot.dev?.infiniteMoney || wallet >= selected.cost);
   const label = selected.cost === null ? 'rank capped' : `rank ${selected.rank} -> ${selected.rank + 1} // ${compactMetric(selected.cost)} cr // enter`;
   drawMenuButton('reactor_buy', label, x + 12, y + height - 42, width - 24, available ? COLOR.mint : COLOR.red, () => { if (available) purchaseStationItem(tower, selected); }, available);
   drawMenuButton('reactor_back', 'back // esc', x + 12, y + height - 21, width - 24, COLOR.cyan, () => towerMenuMode = 'actions');
@@ -4418,7 +4639,7 @@ function drawStatsPanel(snapshot) {
   const mints = snapshot.towers.filter((tower) => tower.definitionId === 'mint');
   const forges = snapshot.towers.filter((tower) => tower.definitionId === 'forge');
   const constructionDiscount = Math.round((1 - Math.max(0.5, 0.98 ** reactorRank(snapshot, 'construction'))) * 100);
-  const economy = snapshot.economyByPlayer[session.playerId];
+  const economy = snapshot.teamEconomy;
   const lines = [
     { text: 'reactor ranks', color: COLOR.amber },
     ...(reactorLines.length ? reactorLines : ['no ranks purchased']).map((text) => ({ text, color: COLOR.ink })),
@@ -4472,7 +4693,7 @@ function drawResearchStation(snapshot, tower) {
       researchSelection=item.id; researchDetailPage=0;
     },selected?.id===item.id);
     if (RESEARCH_ICON_KIND[item.id]) drawResearchIcon(RESEARCH_ICON_KIND[item.id],x+width-108,y+53+i*20,COLOR.mint);
-    const wallet = (snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0);
+    const wallet = (snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.teamEconomy?.credits || 0);
     bitmapText.draw(cost, x + width - 18 - cost.length * 6, y + 53 + i * 20, item.cost !== null && wallet >= item.cost ? COLOR.amber : COLOR.red, 1);
   }
   if (selected) {
@@ -4484,10 +4705,10 @@ function drawResearchStation(snapshot, tower) {
     lines.slice(researchDetailPage*lineCount,(researchDetailPage+1)*lineCount).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+i*9,COLOR.ink,1));
     if(detailPages>1) drawButton('research_more','details >',x+width-76,y+height-64,64,true,COLOR.cyan,()=>researchDetailPage++);
     else bitmapText.draw(tower.definitionId==='arsenal'?researchScope(selected.id):`rank ${selected.rank} -> ${selected.rank+1}`,x+12,y+height-64,COLOR.ink,1);
-    const wallet=(snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0);
+    const wallet=(snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.teamEconomy?.credits || 0);
     bitmapText.draw(`credits ${snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(wallet)} // cost ${selected.cost===null?'capped':selected.cost.toLocaleString('en-US')}`,x+12,y+height-52,COLOR.amber,1);
-    const canBuy=tower.ownerId===session.playerId && !selected.owned && !selected.locked && selected.cost!==null && wallet>=selected.cost;
-    drawMenuButton('research_buy',canBuy?(selected.cost===0?'already researched':'buy selected // enter'):tower.ownerId!==session.playerId?'inspect only':selected.owned?'already researched':selected.locked?'unlock parent research first':selected.cost===null?'maximum rank reached':'need more credits',x+12,y+height-41,width-24,canBuy?COLOR.mint:COLOR.red,()=>{
+    const canBuy=!selected.owned && !selected.locked && selected.cost!==null && wallet>=selected.cost;
+    drawMenuButton('research_buy',canBuy?(selected.cost===0?'already researched':'buy selected // enter'):selected.owned?'already researched':selected.locked?'unlock parent research first':selected.cost===null?'maximum rank reached':'need more credits',x+12,y+height-41,width-24,canBuy?COLOR.mint:COLOR.red,()=>{
       if(canBuy) purchaseStationItem(tower,selected);
     },canBuy);
   } else bitmapText.draw('all research complete',x+12,y+70,COLOR.mint,1);
@@ -4515,7 +4736,7 @@ function towerActionView(snapshot, tower) {
   const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
   if (!definition) return null;
   const owner = snapshot.players.find((player) => player.id === tower.ownerId);
-  const inspectOnly = Boolean(session.networkRole && tower.ownerId !== session.playerId);
+  const inspectOnly = false;
   const actions = [];
   const panel = { x: 0, y: 0 };
   const addAction = (id, label, x, y, width, active, color, action) => {
@@ -4523,10 +4744,8 @@ function towerActionView(snapshot, tower) {
   };
   const station = ['arsenal', 'reactor'].includes(definition.id);
   if (station) {
-    if (!inspectOnly) {
-      addAction('station_open', '1 open upgrades', 5, 20, 170, true, COLOR.mint, () => openResearchStation(tower));
-      addAction('station_sell', `2 sell // ${compactMetric(saleRefund(snapshot, tower))}`, 5, 36, 170, true, COLOR.red, sellSelectedTower);
-    }
+    addAction('station_open', '1 open upgrades', 5, 20, 170, true, COLOR.mint, () => openResearchStation(tower));
+    addAction('station_sell', `2 sell // ${compactMetric(saleRefund(snapshot, tower))}`, 5, 36, 170, true, COLOR.red, sellSelectedTower);
     return { title: definition.label, investment: compactMetric(tower.totalInvestment), metric: 'research is never refunded',
       width: 180, height: 66, accent: COLOR.amber, actions, inspectOnly, owner: owner?.label || 'pilot', station: true };
   }
@@ -4717,7 +4936,7 @@ function wrappedDescription(lines, maximumCharacters, maximumLines) {
 }
 
 function drawUpgradeChoice(snapshot, tower, definition, shortcut, x, y, width, height) {
-  const economy = snapshot.economyByPlayer[session.playerId];
+  const economy = snapshot.teamEconomy;
   const cost = purchaseCost(snapshot, tower.areaId, definition.evolutionCost || 0);
   const affordable = (sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) >= cost;
   const accent = affordable ? towerAccent(definition.id) : COLOR.red;
@@ -4834,7 +5053,7 @@ function drawTowerMenu(snapshot, tower) {
 }
 
 function killTelemetry(mode, snapshot) {
-  const economy = snapshot.economyByPlayer[session.playerId] || { totalEarned: 0 };
+  const economy = snapshot.teamEconomy || { totalEarned: 0 };
   const totalEarned = Math.max(0, Math.floor(economy.totalEarned || 0));
   let telemetry = telemetryByMode.get(mode);
   if (!telemetry
@@ -4892,7 +5111,7 @@ function formatRunTimer(runTick) {
 
 function drawTopHud(fps, snapshot, telemetry) {
   if (sessionMode === 'game') return drawGameTopHud(fps, snapshot, telemetry);
-  const economy = snapshot.economyByPlayer[session.playerId] || { credits: snapshot.prototypeBalance.startingCredits };
+  const economy = snapshot.teamEconomy || { credits: snapshot.prototypeBalance.startingCredits };
   shapes.rect(0, 0, logicalWidth, HUD_TOP_HEIGHT, COLOR.black);
   shapes.rect(0, HUD_TOP_HEIGHT - 1, logicalWidth, 1, COLOR.dimMint);
   shapes.rect(0, HUD_TOP_HEIGHT - 1, Math.min(132, logicalWidth), 1, sessionMode === 'test' ? COLOR.amber : COLOR.mint);
@@ -4932,8 +5151,8 @@ function drawTopHud(fps, snapshot, telemetry) {
 
 function drawGameTopHud(fps, snapshot, telemetry) {
   const layout = pixelHudLayout(logicalWidth);
-  const economy = snapshot.economyByPlayer[session.playerId] || { credits: snapshot.prototypeBalance.startingCredits };
-  const elapsed = snapshot.runTick / AUTHORITY_TICK_RATE;
+  const economy = snapshot.teamEconomy || { credits: snapshot.prototypeBalance.startingCredits };
+  const elapsed = threatSecondsOf(snapshot);
   const rift = currentMap.spawnSources.find((source) => source.unlockSeconds > elapsed);
   shapes.rect(0, 0, logicalWidth, HUD_TOP_HEIGHT, COLOR.black);
   shapes.rect(0, HUD_TOP_HEIGHT - 1, logicalWidth, 1, COLOR.dimMint);
@@ -4947,8 +5166,17 @@ function drawGameTopHud(fps, snapshot, telemetry) {
   const metrics = [
     { label: 'lives', value: snapshot.dev?.infiniteHealth ? 'inf' : String(snapshot.base.lives).padStart(3, '0'), color: COLOR.ink, minValueChars: 3 },
     { label: 'credits', value: snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(economy.credits), color: COLOR.amber, minValueChars: 6 },
-    { label: rift ? 'next rift' : 'rifts live', value: rift ? `${Math.ceil(rift.unlockSeconds - elapsed)}s` : String(snapshot.swarm.activeSpawnPoints), color: COLOR.cyan, minValueChars: 4 }
+    { label: rift ? 'next rift' : 'rifts live', value: rift ? `${Math.ceil(realSecondsUntil(snapshot, rift.unlockSeconds))}s` : String(snapshot.swarm.activeSpawnPoints), color: COLOR.cyan, minValueChars: 4 }
   ];
+  const surge = surgeStatus(snapshot);
+  if (surge) {
+    metrics[2] = {
+      label: surge.phase === 'warning' ? `surge ${surge.direction}` : `surge ${surge.direction} hot`,
+      value: `${surge.seconds}s`,
+      color: surge.phase === 'warning' ? COLOR.amber : COLOR.red,
+      minValueChars: 4
+    };
+  }
   for (const metric of metrics) {
     bitmapText.draw(metric.label, x, 4, COLOR.uiMuted, 1);
     bitmapText.draw(metric.value, x, 15, metric.color, layout.valueScale);
@@ -4960,7 +5188,8 @@ function drawGameTopHud(fps, snapshot, telemetry) {
     { lines: [`time ${formatRunTimer(snapshot.runTick)}`, `horde ${compactMetric(snapshot.swarm.activeEnemies)}`], minChars: [13, 12] },
     { lines: [`gold ${compactMetric(telemetry.goldPerSecond)}/s`, `spawn ${Math.round(snapshot.swarm.spawnRatePerSecond)}/s`], minChars: [13, 13] },
     ...(session.networkRole ? [{ lines: [`p2p ${connected}/4`, session.networkRole], minChars: [7, 7] }] : []),
-    { lines: [`fps ${fps}`, `rifts ${snapshot.swarm.activeSpawnPoints}`], minChars: [7, 8] }
+    { lines: [`fps ${fps}`, `rifts ${snapshot.swarm.activeSpawnPoints}`], minChars: [7, 8] },
+    ...((snapshot.pace || DEFAULT_PACE) !== DEFAULT_PACE ? [{ lines: [`pace x${snapshot.pace.toFixed(1)}`, snapshot.pace < DEFAULT_PACE ? 'slower' : 'faster'], minChars: [9, 6] }] : [])
   ];
   for (const column of fitPixelTelemetry(columns, x + 4, logicalWidth - 8)) {
     bitmapText.draw(column.lines[0], column.x, 5, COLOR.ink, 1);
@@ -4987,7 +5216,6 @@ function drawGameHud(snapshot, telemetry) {
       } else armFramePlacement();
     });
   const canTarget = Boolean(selectedTower
-    && (!session.networkRole || selectedTower.ownerId === session.playerId)
     && (definition?.targetingModes?.length || (input && input !== 'none')));
   button(layout.left[1], 'target', definition?.control ? input === 'none' ? 'passive' : 'a control' : 'q/e target',
     canTarget, COLOR.cyan, () => {
@@ -5135,11 +5363,16 @@ function combatStatus(snapshot) {
   const selectedDefinition = snapshot.towerCatalog.find((definition) => definition.id === selectedTower?.definitionId);
   const bulkDefinition = snapshot.towerCatalog.find((definition) => definition.id === bulkPlacementDefinitionId);
   const targetLabel = selectedTower?.targetingMode?.replaceAll('_', ' ') || 'closest';
-  const elapsedSeconds = snapshot.runTick / AUTHORITY_TICK_RATE;
+  const elapsedSeconds = threatSecondsOf(snapshot);
   const nextRift = currentMap.spawnSources.find((source) => source.unlockSeconds > elapsedSeconds);
-  const riftStatus = nextRift
-    ? `next rift ${Math.ceil(nextRift.unlockSeconds - elapsedSeconds)}s`
-    : `${snapshot.swarm.activeSpawnPoints} rifts live`;
+  const surge = surgeStatus(snapshot);
+  const riftStatus = surge
+    ? surge.phase === 'warning'
+      ? `surge // ${surge.direction} in ${surge.seconds}s // x${surge.hpMultiplier} hp`
+      : `surge // ${surge.direction} hot ${surge.seconds}s // x${surge.hpMultiplier} hp`
+    : nextRift
+      ? `next rift ${Math.ceil(realSecondsUntil(snapshot, nextRift.unlockSeconds))}s`
+      : `${snapshot.swarm.activeSpawnPoints} rifts live`;
   const rebootTicks = Math.max(0, (selectedTower?.controlReadyTick || 0) - snapshot.runTick);
   const countsControlHits = ['stasis_zone', 'recall_gate', 'breaker_wave'].includes(selectedDefinition?.control?.type);
   const controlWork = countsControlHits
@@ -5193,7 +5426,8 @@ function drawHud(fps, snapshot) {
     drawTechPanel(panelX, panelY, width, height, COLOR.red);
     bitmapText.draw('base lost', panelX + 16, panelY + 10, COLOR.red, 2);
     const seconds = Math.floor(snapshot.runTick / AUTHORITY_TICK_RATE);
-    bitmapText.draw(`survived ${Math.floor(seconds / 60)}m ${seconds % 60}s`, panelX + 16, panelY + 34, COLOR.ink, 1);
+    const pace = snapshot.pace || DEFAULT_PACE;
+    bitmapText.draw(`survived ${Math.floor(seconds / 60)}m ${seconds % 60}s${pace === DEFAULT_PACE ? '' : ` // pace x${pace.toFixed(1)}`}`, panelX + 16, panelY + 34, COLOR.ink, 1);
     bitmapText.draw(`${compactMetric(snapshot.stats.kills)} kills // ${snapshot.towers.length} towers`, panelX + 16, panelY + 48, COLOR.amber, 1);
     if (session.networkRole) {
       drawMenuButton('defeat_coop', 'room status', panelX + 16, panelY + 68, width - 32, COLOR.cyan, () => { frontEndScreen = 'coop'; });
@@ -5204,32 +5438,155 @@ function drawHud(fps, snapshot) {
       drawMenuButton('defeat_map', 'choose another map', panelX + 16, panelY + 89, width - 32, COLOR.cyan, () => openMapSelection('main'));
     }
     drawMenuButton('defeat_menu', 'main menu', panelX + 16, panelY + 110, width - 32, COLOR.cyan, returnToMainMenu);
-  } else if (snapshot.phase === 'reconnect_wait' && snapshot.disconnectWait) {
-    const panelWidth = Math.min(236, logicalWidth - 16);
-    const panelHeight = 70;
-    const panelX = Math.round((logicalWidth - panelWidth) * 0.5);
-    const panelY = Math.round((logicalHeight - panelHeight) * 0.5);
-    const seconds = Math.max(0, Math.ceil((snapshot.disconnectWait.deadlineTick - snapshot.tick) / AUTHORITY_TICK_RATE));
-    const departed = snapshot.players.find((player) => player.id === snapshot.disconnectWait.playerId);
-    const canContinue = session.networkRole === 'host' && snapshot.hostPlayerId === session.playerId;
-    drawTechPanel(panelX, panelY, panelWidth, panelHeight, COLOR.amber);
-    bitmapText.draw('pilot link lost', panelX + 14, panelY + 9, COLOR.amber, 2);
-    bitmapText.draw(`${departed?.label || 'pilot'} // ${seconds}s remaining`, panelX + 14, panelY + 31, COLOR.ink, 1);
-    if (canContinue) {
-      drawMenuButton(
-        'reconnect_continue',
-        'continue // split holdings',
-        panelX + 14,
-        panelY + 45,
-        panelWidth - 28,
-        COLOR.red,
-        () => session.send(COMMAND.SESSION_CONTINUE_WITHOUT_PLAYER)
-      );
-    } else {
-      bitmapText.draw('host decides // simulation held', panelX + 14, panelY + 49, COLOR.dimMint, 1);
-    }
   }
 
+}
+
+function currentPresencePayload(now) {
+  const inWorld = frontEndScreen === 'game' && pointer.y > HUD_TOP_HEIGHT && pointer.y < hudBottomY && document.hasFocus();
+  const interacting = placementArmed || Boolean(selectedTowerId) || Boolean(controlDrag);
+  if (!session.networkRole || !inWorld || (!interacting && now - lastPointerMotionAt > 300)) return { active: false };
+  const world = unproject(pointer.x, pointer.y);
+  const definitionId = placementArmed ? (bulkPlacementDefinitionId || 'frame') : null;
+  const areaId = definitionId ? findDefenseAreaAt(currentMap, world.x, world.y) : null;
+  const clear = definitionId ? towerPlacementClear(sessionSnapshot.towers, world.x, world.y) : false;
+  return {
+    active: true,
+    x: Math.round(world.x),
+    y: Math.round(world.y),
+    activity: definitionId ? 'placing' : selectedTowerId ? 'inspecting' : 'looking',
+    towerId: selectedTowerId,
+    definitionId,
+    valid: Boolean(areaId && clear)
+  };
+}
+
+function updatePresence(now) {
+  if (!session.networkRole || !session.sendPresence) return;
+  const payload = currentPresencePayload(now);
+  const signature = JSON.stringify(payload);
+  if (!payload.active) {
+    if (!multiplayerSocial.idleSent) session.sendPresence(payload);
+    multiplayerSocial.idleSent = true;
+    multiplayerSocial.lastPresenceSignature = signature;
+    return;
+  }
+  multiplayerSocial.idleSent = false;
+  if (now - multiplayerSocial.lastPresenceSentAt < 1000 / 12) return;
+  if (signature === multiplayerSocial.lastPresenceSignature && now - multiplayerSocial.lastPresenceSentAt < 1000) return;
+  if (session.sendPresence(payload)) {
+    multiplayerSocial.lastPresenceSentAt = now;
+    multiplayerSocial.lastPresenceSignature = signature;
+  }
+}
+
+function drawRemotePresence(now) {
+  for (const [playerId, presence] of multiplayerSocial.presenceByPlayer) {
+    if (playerId === session.playerId || now - presence.receivedAt > 1500) {
+      if (now - presence.receivedAt > 1500) multiplayerSocial.presenceByPlayer.delete(playerId);
+      continue;
+    }
+    const player = sessionSnapshot.players.find((candidate) => candidate.id === playerId);
+    if (!player || player.connectionState !== 'connected') continue;
+    const color = playerColor(player);
+    const p = project(presence.x, presence.y);
+    if (p.y <= HUD_TOP_HEIGHT || p.y >= hudBottomY) continue;
+    if (presence.activity === 'placing' && presence.definitionId) {
+      const ghost = { definitionId: presence.definitionId, x: presence.x, y: presence.y };
+      drawTower(ghost, presence.valid ? color : COLOR.red);
+      shapes.rect(p.x - 8, p.y - 8, 17, 1, presence.valid ? color : COLOR.red);
+      shapes.rect(p.x - 8, p.y + 8, 17, 1, presence.valid ? color : COLOR.red);
+    }
+    if (presence.towerId) {
+      const tower = sessionSnapshot.towers.find((candidate) => candidate.id === presence.towerId);
+      if (tower) {
+        const selected = project(tower.x, tower.y);
+        shapes.rect(selected.x - 9, selected.y - 9, 19, 1, color);
+        shapes.rect(selected.x - 9, selected.y + 9, 19, 1, color);
+        shapes.rect(selected.x - 9, selected.y - 8, 1, 17, color);
+        shapes.rect(selected.x + 9, selected.y - 8, 1, 17, color);
+      }
+    }
+    shapes.rect(p.x - 4, p.y, 3, 1, color);
+    shapes.rect(p.x + 2, p.y, 3, 1, color);
+    shapes.rect(p.x, p.y - 4, 1, 3, color);
+    shapes.rect(p.x, p.y + 2, 1, 3, color);
+    bitmapText.draw(clippedUiText(player.label, 72), p.x + 7, p.y - 4, color, 1);
+  }
+  multiplayerSocial.pings = multiplayerSocial.pings.filter((ping) => now - ping.receivedAt < 3000);
+  for (const ping of multiplayerSocial.pings) {
+    const p = project(ping.x, ping.y);
+    const color = playerColor(ping.playerId);
+    const phase = Math.floor((now - ping.receivedAt) / 150) % 4;
+    const radius = 8 + phase * 3;
+    shapes.rect(p.x - radius, p.y - radius, radius * 2 + 1, 1, color);
+    shapes.rect(p.x - radius, p.y + radius, radius * 2 + 1, 1, color);
+    shapes.rect(p.x - radius, p.y - radius + 1, 1, radius * 2 - 1, color);
+    shapes.rect(p.x + radius, p.y - radius + 1, 1, radius * 2 - 1, color);
+  }
+}
+
+function playerActivity(player) {
+  if (player.id === session.playerId) return placementArmed ? 'placing' : selectedTowerId ? 'inspecting' : 'active';
+  return multiplayerSocial.presenceByPlayer.get(player.id)?.activity || 'idle';
+}
+
+function drawGameplayRoster(snapshot) {
+  if (!session.networkRole) return;
+  const players = snapshot.players.slice(0, 4);
+  const width = 132;
+  const x = logicalWidth - width - 6;
+  const y = HUD_TOP_HEIGHT + 5;
+  for (let index = 0; index < players.length; index += 1) {
+    const player = players[index];
+    const rowY = y + index * 12;
+    const color = playerColor(player);
+    const state = player.connectionState === 'reconnecting' ? 'reconnect' : player.connectionState === 'departed' ? 'departed' : player.spectator ? 'spectator' : playerActivity(player);
+    shapes.rect(x, rowY, width, 10, COLOR.black);
+    shapes.rect(x + 2, rowY + 3, 4, 4, color);
+    bitmapText.draw(clippedUiText(`${player.label} // ${state}`, width - 12), x + 10, rowY + 1, player.connectionState === 'connected' ? color : COLOR.red, 1);
+    registerHitbox(`roster_${player.id}`, x, rowY, width, 10, { action: () => { multiplayerSocial.rosterExpanded = !multiplayerSocial.rosterExpanded; } });
+  }
+  drawButton('coop_ping', multiplayerSocial.pingArmed ? 'ping // click world' : 'p ping', x + width - 82, y + players.length * 12 + 1, 82,
+    multiplayerSocial.pingArmed, COLOR.amber, () => { multiplayerSocial.pingArmed = !multiplayerSocial.pingArmed; }, 13);
+  if (!multiplayerSocial.rosterExpanded) return;
+  const panelWidth = Math.min(310, logicalWidth - 16);
+  const panelHeight = 28 + players.length * 30;
+  const panelX = logicalWidth - panelWidth - 8;
+  const panelY = y + players.length * 12 + 18;
+  drawTechPanel(panelX, panelY, panelWidth, panelHeight, COLOR.cyan);
+  bitmapText.draw(`team credits ${compactMetric(snapshot.teamEconomy?.credits || 0)} // tab`, panelX + 8, panelY + 7, COLOR.amber, 1);
+  for (let index = 0; index < players.length; index += 1) {
+    const player = players[index];
+    const contribution = snapshot.contributionByPlayer?.[player.id] || {};
+    const rowY = panelY + 23 + index * 30;
+    bitmapText.draw(clippedUiText(player.label, 90), panelX + 8, rowY, playerColor(player), 1);
+    bitmapText.draw(`hp ${compactMetric(contribution.hpPopped || 0)} // kills ${compactMetric(contribution.kills || 0)} // spent ${compactMetric(contribution.creditsSpent || 0)}`, panelX + 78, rowY, COLOR.ink, 1);
+    bitmapText.draw(`towers ${contribution.towersCreated || 0} // support ${compactMetric(contribution.supportCredits || 0)} // control ${compactMetric(contribution.controlApplications || 0)}`, panelX + 78, rowY + 11, COLOR.uiMuted, 1);
+  }
+}
+
+function drawChat(snapshot, now) {
+  if (!session.networkRole) return;
+  const visible = multiplayerSocial.chatOpen
+    ? multiplayerSocial.messages.slice(-6)
+    : multiplayerSocial.messages.filter((message) => now - message.receivedAt < 5000).slice(-2);
+  const width = Math.min(320, logicalWidth - 16);
+  const x = 8;
+  const lineHeight = 11;
+  const height = Math.max(0, visible.length * lineHeight) + (multiplayerSocial.chatOpen ? 22 : 0);
+  const y = hudBottomY - height - 8;
+  if (height) shapes.rect(x - 3, y - 3, width + 6, height + 6, COLOR.black);
+  for (let index = 0; index < visible.length; index += 1) {
+    const message = visible[index];
+    const player = snapshot.players.find((candidate) => candidate.id === message.playerId);
+    const prefix = message.kind === 'system' ? '// ' : `${player?.label || 'pilot'}: `;
+    bitmapText.draw(clippedUiText(prefix + message.text, width), x, y + index * lineHeight, message.kind === 'system' ? COLOR.uiMuted : playerColor(player), 1);
+  }
+  if (multiplayerSocial.chatOpen) {
+    const inputY = y + visible.length * lineHeight + 5;
+    bitmapText.draw(clippedUiText(`> ${multiplayerSocial.chatInput}_`, width), x, inputY, COLOR.ink, 1);
+  }
 }
 
 function drawCursor() {
@@ -5375,7 +5732,7 @@ function syncDiagnostics(snapshot = sessionSnapshot) {
   canvas.dataset.shotInvariant = String(diagnostics.shotInvariant);
   canvas.dataset.collisionMode = diagnostics.collisionMode;
   canvas.dataset.towerForms = JSON.stringify(towerForms);
-  canvas.dataset.credits = String(snapshot.economyByPlayer[session.playerId]?.credits ?? snapshot.prototypeBalance.startingCredits);
+  canvas.dataset.credits = String(snapshot.teamEconomy?.credits ?? snapshot.prototypeBalance.startingCredits);
   canvas.dataset.autoSelectPlacedFrame = String(gameplayPreferences.autoSelectPlacedFrame);
   canvas.dataset.bulkPlacementDefinitionId = bulkPlacementDefinitionId || 'none';
   canvas.dataset.buildCatalogOpen = String(buildCatalogOpen);
@@ -5413,7 +5770,7 @@ function frame(now) {
       setStatus(keepBulkPlacement
         ? `${event.payload.tower.definitionId} placed // click next // right click ends`
         : autoSelect ? 'frame selected // 1 upgrade // 2 sell' : 'frame placed // press 1 for another');
-    } else if (event.type === EVENT.TOWER_EVOLVED && event.payload.tower.ownerId === session.playerId) {
+    } else if (event.type === EVENT.TOWER_EVOLVED && (event.payload.actorPlayerId || event.payload.tower.ownerId) === session.playerId) {
       selectedTowerId = event.payload.tower.id;
       const evolved = sessionSnapshot.towerCatalog.find((definition) => definition.id === event.payload.tower.definitionId);
       towerMenuMode = sessionMode === 'test'
@@ -5427,9 +5784,11 @@ function frame(now) {
               : 'actions';
       if (['arsenal','reactor'].includes(event.payload.tower.definitionId)) openResearchStation(event.payload.tower);
       setStatus(`${event.payload.tower.definitionId} online`);
-    } else if (event.type === EVENT.TOWER_SOLD && event.payload.ownerId === session.playerId) {
-      selectedTowerId = null;
-      towerMenuMode = null;
+    } else if (event.type === EVENT.TOWER_SOLD) {
+      if (selectedTowerId === event.payload.towerId) {
+        selectedTowerId = null;
+        towerMenuMode = null;
+      }
       setStatus(`sold // refund ${compactMetric(event.payload.refund)}`);
     } else if (event.type === EVENT.TOWER_TARGETING_CHANGED && event.payload.towerId === selectedTowerId) {
       setStatus(`target ${event.payload.mode.replace('_', ' ')}`);
@@ -5446,8 +5805,7 @@ function frame(now) {
     } else if (event.type === EVENT.RELAY_NETWORK_COMPLETED) {
       if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) startRelayCollapse(event);
       if (event.payload.retired.some((record) => record.towerId === selectedTowerId)) { selectedTowerId = null; towerMenuMode = null; }
-      const mine = event.payload.retired.filter((record) => record.ownerId === session.playerId);
-      const refund = mine.reduce((sum, record) => sum + (record.refund || 0), 0);
+      const refund = event.payload.retired.reduce((sum, record) => sum + (record.refund || 0), 0);
       setStatus(`relay network complete // ${event.payload.retired.length} connector-s uploaded${refund > 0 ? ` // +${compactMetric(refund)} cr` : ''}`);
       void saveGameBundle();
     } else if (event.type === EVENT.TOWER_RELAY_TARGET_CHANGED && event.payload.towerId === selectedTowerId) {
@@ -5477,12 +5835,20 @@ function frame(now) {
       }
       setStatus(`${currentMap.label} // good luck`);
       void saveGameBundle();
-    } else if (event.type === EVENT.PLAYER_RECONNECT_WAIT_STARTED) {
-      setStatus('pilot disconnected // run held for reconnect');
+    } else if (event.type === EVENT.PLAYER_JOINED) {
+      addSystemMessage(`${event.payload.player.label} joined`);
+    } else if (event.type === EVENT.PLAYER_DISCONNECTED) {
+      const player = sessionSnapshot.players.find((candidate) => candidate.id === event.payload.playerId);
+      addSystemMessage(`${player?.label || 'pilot'} disconnected`);
+      multiplayerSocial.presenceByPlayer.delete(event.payload.playerId);
+      setStatus('pilot disconnected // run continues');
     } else if (event.type === EVENT.PLAYER_RECONNECTED) {
+      addSystemMessage(`${event.payload.player.label} reconnected`);
       setStatus(`${event.payload.player.label} reconnected`);
-    } else if (event.type === EVENT.BALANCED_INHERITANCE_COMPLETED) {
-      setStatus('departed pilot holdings redistributed');
+    } else if (event.type === EVENT.PLAYER_DEPARTED) {
+      const player = sessionSnapshot.players.find((candidate) => candidate.id === event.payload.playerId);
+      addSystemMessage(`${player?.label || 'pilot'} departed`);
+      setStatus('pilot departed // towers remain shared');
     } else if (event.type === EVENT.ATTACK_RESOLVED) {
       if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) addAttackFlash(event);
     } else if (event.type === EVENT.KILLS_RECORDED) {
@@ -5496,6 +5862,7 @@ function frame(now) {
       setStatus(event.payload.reason);
     }
   }
+  updatePresence(now);
   frameCounter += 1;
   if (now - fpsWindow >= 500) {
     fps = Math.round(frameCounter * 1000 / (now - fpsWindow));
@@ -5548,6 +5915,7 @@ function frame(now) {
       for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, wall.y - 3, 12, 1, COLOR.amber);
     }
     drawBuildState(sessionSnapshot);
+    drawRemotePresence(now);
     drawHud(fps, sessionSnapshot);
   } else {
     projectilePresentation.clear();
@@ -5571,6 +5939,8 @@ function frame(now) {
     bitmapText.draw(enabled.length ? `dev // ${enabled.join(' / ')} // f2` : 'f2 dev tools', 8, HUD_TOP_HEIGHT + 5, enabled.length ? COLOR.amber : COLOR.dimMint, 1);
     if (devToolsOpen) drawDevTools(sessionSnapshot);
     if (showStatsPanel) drawStatsPanel(sessionSnapshot);
+    drawGameplayRoster(sessionSnapshot);
+    drawChat(sessionSnapshot, now);
   }
   drawCursor();
   shapes.flush();
