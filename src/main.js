@@ -1,8 +1,15 @@
+import { drawSweep, drawLaserPulse, sweepPose } from './render/laser-effects.js';
+import { compactMetric } from './core/format.js';
+import { RESEARCH_NODES, researchNode, arsenalChoices, hasResearch, reactorRank, reactorQuote, REACTOR_CATEGORIES } from './core/research.js';
+import { towerPlacementClear, MIN_TOWER_SPACING } from './core/placement.js';
+import { drawTowerSprite } from './render/tower-sprites.js';
 import { EmbeddedAuthority, EmbeddedClient } from './core/embedded-session.js';
 import { AUTHORITY_TICK_RATE, COMMAND, EVENT, PROTOCOL_VERSION } from './core/protocol.js';
 import { PROTOTYPE_SESSION_CONFIG, TEST_FIELD_SESSION_CONFIG } from './core/session-config.js';
 import { strikeImpactPoints, supportsStrikePoint } from './core/strike-pattern.js';
+import { normalizeControlGeometry } from './core/control-system.js';
 import { towerBuildQuote } from './core/tower-catalog.js';
+import { NETWORK_DESCENDANT_IDS, controlSource, isRelayForm, purchaseCost, saleRefund, socketPoint } from './core/network-descendants.js';
 import { defenseAreaBounds, defenseAreaField, findDefenseAreaAt, getMapDefinition, playableMaps } from './core/world-config.js';
 import { loadSoloRun, saveSoloRun } from './core/persistence.js';
 import { P2PGuestSession, P2PHostSession } from './core/p2p-session.js';
@@ -11,10 +18,16 @@ import { PeerConnectionCoordinator, SIGNALING_URL, sanitizeRoomCode } from './co
 let logicalWidth = 640;
 let logicalHeight = 360;
 let displayPixelScale = 1;
+let renderScale = 1;
 const HUD_TOP_HEIGHT = 23;
 let hudBottomY = logicalHeight - 31;
 const TOWER_DEFINITION_ID = 'frame';
 const BUILD_CATALOG_PAGES = Object.freeze({
+  network: Object.freeze({ label: 'network iii', rows: Object.freeze([
+    NETWORK_DESCENDANT_IDS.slice(0, 3).map((definitionId, i) => ({ key: String(i + 1), definitionId })),
+    NETWORK_DESCENDANT_IDS.slice(3, 6).map((definitionId, i) => ({ key: String(i + 4), definitionId })),
+    NETWORK_DESCENDANT_IDS.slice(6, 9).map((definitionId, i) => ({ key: String(i + 7), definitionId }))
+  ]) }),
   core: Object.freeze({
     label: 'core',
     rows: Object.freeze([
@@ -69,7 +82,7 @@ const BUILD_CATALOG_PAGES = Object.freeze({
       ]),
       Object.freeze([
         Object.freeze({ key: '4', definitionId: 'singularity' }),
-        Object.freeze({ key: '5', definitionId: 'orbit' }),
+        Object.freeze({ key: '5', definitionId: 'bond' }),
         Object.freeze({ key: '6', definitionId: 'braid' })
       ]),
       Object.freeze([
@@ -119,12 +132,13 @@ function fitCanvas() {
   logicalWidth = nextWidth;
   logicalHeight = nextHeight;
   hudBottomY = logicalHeight - (sessionMode === 'test' ? 91 : 31);
-  canvas.width = logicalWidth;
-  canvas.height = logicalHeight;
+  renderScale = displayPixelScale * Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.round(logicalWidth * renderScale);
+  canvas.height = Math.round(logicalHeight * renderScale);
   canvas.style.width = `${logicalWidth * displayPixelScale}px`;
   canvas.style.height = `${logicalHeight * displayPixelScale}px`;
-  if (gl) gl.viewport(0, 0, logicalWidth, logicalHeight);
-  window.__hordeDiagnostics = { ...(window.__hordeDiagnostics || {}), cssIntegerScale: displayPixelScale };
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+  window.__hordeDiagnostics = { ...(window.__hordeDiagnostics || {}), nativeRenderScale: renderScale };
 }
 
 fitCanvas();
@@ -135,7 +149,7 @@ addEventListener('resize', () => {
 
 gl = canvas.getContext('webgl2', {
   alpha: false,
-  antialias: false,
+  antialias: true,
   depth: false,
   desynchronized: false,
   failIfMajorPerformanceCaveat: true,
@@ -159,7 +173,7 @@ gl.disable(gl.BLEND);
 gl.disable(gl.DEPTH_TEST);
 gl.disable(gl.DITHER);
 gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
-gl.viewport(0, 0, logicalWidth, logicalHeight);
+gl.viewport(0, 0, canvas.width, canvas.height);
 
 function compileShader(type, source) {
   const shader = gl.createShader(type);
@@ -200,6 +214,7 @@ void main() { gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0); }
 const BACKGROUND_FRAGMENT = `#version 300 es
 precision highp float;
 uniform vec2 u_resolution;
+uniform float u_renderScale;
 uniform vec2 u_camera;
 uniform float u_viewScale;
 out vec4 outColor;
@@ -211,7 +226,7 @@ float hash21(vec2 p) {
 }
 
 void main() {
-  vec2 screen = vec2(gl_FragCoord.x, u_resolution.y - gl_FragCoord.y);
+  vec2 screen = vec2(gl_FragCoord.x / u_renderScale, u_resolution.y - gl_FragCoord.y / u_renderScale);
   vec2 world = (screen - u_resolution * 0.5) * u_viewScale + u_camera;
   vec3 color = vec3(${COLOR.black.slice(0, 3).join(',')});
 
@@ -238,6 +253,7 @@ layout(location=2) in vec4 a_shape1;
 layout(location=3) in vec4 a_shape2;
 layout(location=4) in vec4 a_style;
 uniform vec2 u_resolution;
+uniform float u_renderScale;
 uniform vec2 u_camera;
 uniform float u_viewScale;
 flat out vec4 v_shape0;
@@ -250,7 +266,7 @@ const vec2 corners[6] = vec2[6](
 );
 void main() {
   vec2 world = mix(a_bounds.xy, a_bounds.zw, corners[gl_VertexID]);
-  vec2 screen = round((world - u_camera) / u_viewScale + u_resolution * 0.5);
+  vec2 screen = ((world - u_camera) / u_viewScale + u_resolution * 0.5);
   vec2 clip = vec2(screen.x / u_resolution.x * 2.0 - 1.0, 1.0 - screen.y / u_resolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   v_shape0 = a_shape0;
@@ -262,7 +278,9 @@ void main() {
 
 const NEBULA_FRAGMENT = `#version 300 es
 precision highp float;
+uniform vec3 u_researchWave;
 uniform vec2 u_resolution;
+uniform float u_renderScale;
 uniform vec2 u_camera;
 uniform float u_viewScale;
 flat in vec4 v_shape0;
@@ -278,7 +296,7 @@ float hash21(vec2 p) {
 }
 
 void main() {
-  vec2 screen = vec2(gl_FragCoord.x, u_resolution.y - gl_FragCoord.y);
+  vec2 screen = vec2(gl_FragCoord.x / u_renderScale, u_resolution.y - gl_FragCoord.y / u_renderScale);
   vec2 world = (screen - u_resolution * 0.5) * u_viewScale + u_camera;
   vec2 delta = world - v_shape0.xy;
   vec2 local = vec2(
@@ -321,6 +339,24 @@ void main() {
     if (edgeScar > 0.68) color = vec3(0.20, 0.62, 0.36);
     if (edgeScar > 0.955) color = vec3(0.333, 1.0, 0.761);
   }
+  if (v_style.z > 0.5) {
+    color = mix(color, vec3(color.r * 0.65, color.g * 1.15, color.g * 1.5), 0.45);
+    // World-aligned buried traces: sparse, static and confined to the interior.
+    // Suppress detail at far zoom instead of turning small fields into bright noise.
+    vec2 circuit = mod(world + vec2(8000.0), 96.0);
+    vec2 cell = floor((world + vec2(8000.0)) / 96.0);
+    float traceWidth = min(u_viewScale, 3.0);
+    bool trace = (circuit.y < traceWidth && circuit.x < 48.0)
+      || (abs(circuit.x - 48.0) < traceWidth && circuit.y < 24.0);
+    if (edgeDepth > u_viewScale * 3.0 && u_viewScale <= 5.0
+        && hash21(cell) > 0.65 && trace) {
+      color = vec3(0.025, 0.095, 0.085);
+      float arrival = distance(world, u_researchWave.xy) / 1800.0;
+      float age = u_researchWave.z - arrival;
+      if (u_researchWave.z >= 0.0 && age >= 0.0 && age < 0.18)
+        color = vec3(0.045, 0.17, 0.145);
+    }
+  }
   outColor = vec4(color, 1.0);
 }
 `;
@@ -330,21 +366,25 @@ precision highp float;
 layout(location=0) in vec4 a_state;
 layout(location=1) in float a_status;
 layout(location=2) in float a_units;
+layout(location=3) in float a_hp;
 uniform vec2 u_resolution;
+uniform float u_renderScale;
 uniform vec2 u_camera;
 uniform float u_viewScale;
 uniform float u_tickAlpha;
 flat out float v_status;
 flat out float v_units;
+flat out float v_hp;
 void main() {
   vec2 world = a_state.xy + a_state.zw * (u_tickAlpha / ${AUTHORITY_TICK_RATE.toFixed(1)});
-  vec2 screen = round((world - u_camera) / u_viewScale + u_resolution * 0.5);
+  vec2 screen = ((world - u_camera) / u_viewScale + u_resolution * 0.5);
   vec2 clip = vec2(screen.x / u_resolution.x * 2.0 - 1.0, 1.0 - screen.y / u_resolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   float baseSize = floor(clamp(13.0 / u_viewScale, 3.0, 6.0) + 0.5);
-  gl_PointSize = baseSize + (a_units > 1.5 ? 3.0 : 0.0);
+  gl_PointSize = (baseSize + (a_units > 1.5 ? 3.0 : 0.0)) * u_renderScale;
   v_status = a_status;
   v_units = a_units;
+  v_hp = a_hp;
 }
 `;
 
@@ -352,6 +392,7 @@ const SWARM_RENDER_FRAGMENT = `#version 300 es
 precision highp float;
 flat in float v_status;
 flat in float v_units;
+flat in float v_hp;
 out vec4 outColor;
 void main() {
   vec2 point = gl_PointCoord;
@@ -370,11 +411,22 @@ void main() {
   bool statusPixel = v_status > 0.5 && center.x < 0.15 && center.y < 0.15;
   if (!body && !statusPixel) discard;
   if (statusPixel) {
-    if (v_status > 3.5) outColor = vec4(${COLOR.mint.join(',')});
+    if (v_status > 4.5) outColor = vec4(${COLOR.green.join(',')});
+    else if (v_status > 3.5) outColor = vec4(${COLOR.mint.join(',')});
     else if (v_status > 2.5) outColor = vec4(${COLOR.amber.join(',')});
     else outColor = vec4(${COLOR.cyan.join(',')});
   } else {
-    outColor = vec4(${COLOR.red.join(',')});
+    if (v_hp < 1.5) outColor = vec4(${COLOR.red.join(',')});
+    else if (v_hp < 2.5) outColor = vec4(1.0, 0.48, 0.12, 1.0);
+    else if (v_hp < 3.5) outColor = vec4(1.0, 0.86, 0.18, 1.0);
+    else if (v_hp < 4.5) outColor = vec4(0.64, 0.40, 1.0, 1.0);
+    else if (v_hp < 5.5) outColor = vec4(1.0, 0.30, 0.75, 1.0);
+    else {
+      float tier = mod(floor(log2(v_hp)), 3.0);
+      vec3 shell = tier < 0.5 ? vec3(1.0, 0.58, 0.18) : tier < 1.5 ? vec3(0.74, 0.48, 1.0) : vec3(1.0, 0.38, 0.70);
+      bool stripe = abs(point.y - 0.5) < 0.10;
+      outColor = vec4(stripe ? vec3(1.0) : shell, 1.0);
+    }
   }
 }
 `;
@@ -384,9 +436,10 @@ precision highp float;
 layout(location=0) in vec2 a_position;
 layout(location=1) in vec4 a_color;
 uniform vec2 u_resolution;
+uniform float u_renderScale;
 out vec4 v_color;
 void main() {
-  vec2 snapped = floor(a_position + 0.5);
+  vec2 snapped = a_position;
   gl_Position = vec4(snapped.x / u_resolution.x * 2.0 - 1.0, 1.0 - snapped.y / u_resolution.y * 2.0, 0.0, 1.0);
   v_color = a_color;
 }
@@ -405,10 +458,11 @@ layout(location=0) in vec2 a_position;
 layout(location=1) in vec2 a_uv;
 layout(location=2) in vec4 a_color;
 uniform vec2 u_resolution;
+uniform float u_renderScale;
 out vec2 v_uv;
 out vec4 v_color;
 void main() {
-  vec2 snapped = floor(a_position + 0.5);
+  vec2 snapped = a_position;
   gl_Position = vec4(snapped.x / u_resolution.x * 2.0 - 1.0, 1.0 - snapped.y / u_resolution.y * 2.0, 0.0, 1.0);
   v_uv = a_uv;
   v_color = a_color;
@@ -438,6 +492,8 @@ class EnemyRenderer {
     this.stateBuffer = gl.createBuffer();
     this.statusBuffer = gl.createBuffer();
     this.unitsBuffer = gl.createBuffer();
+    this.hpBuffer = gl.createBuffer();
+    this.hpData = new Float32Array(this.capacity);
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.stateBuffer);
@@ -452,6 +508,10 @@ class EnemyRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, this.capacity * 4, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 4, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.hpBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.capacity * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 4, 0);
     gl.bindVertexArray(null);
   }
 
@@ -464,6 +524,9 @@ class EnemyRenderer {
     gl.bufferData(gl.ARRAY_BUFFER, this.capacity * 4, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.unitsBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.capacity * 4, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.hpBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.capacity * 4, gl.DYNAMIC_DRAW);
+    this.hpData = new Float32Array(this.capacity);
     this.lastTick = -1;
   }
 
@@ -476,6 +539,9 @@ class EnemyRenderer {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, frame.status.subarray(0, frame.count));
     gl.bindBuffer(gl.ARRAY_BUFFER, this.unitsBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, frame.units.subarray(0, frame.count));
+    for (let i = 0; i < frame.count; i++) this.hpData[i] = Math.ceil(frame.hpById[frame.idByIndex[i]]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.hpBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.hpData.subarray(0, frame.count));
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     this.lastTick = frame.tick;
     this.lastCount = frame.count;
@@ -486,6 +552,7 @@ class EnemyRenderer {
     this.upload(frame);
     gl.useProgram(this.program);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
+    gl.uniform1f(gl.getUniformLocation(this.program, 'u_renderScale'), renderScale);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_camera'), camera.x, camera.y);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_viewScale'), camera.scale);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_tickAlpha'), frame.alpha);
@@ -544,6 +611,7 @@ class ShapeBatch {
     const vertices = new Float32Array(this.data);
     gl.useProgram(this.program);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
+    gl.uniform1f(gl.getUniformLocation(this.program, 'u_renderScale'), renderScale);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
@@ -598,6 +666,7 @@ const GLYPHS = Object.freeze({
   '-':glyph('00000','00000','00000','11111','00000','00000','00000'),
   '.':glyph('00000','00000','00000','00000','00000','00110','00110'),
   '+':glyph('00000','00100','00100','11111','00100','00100','00000'),
+  '=':glyph('00000','00000','11111','00000','11111','00000','00000'),
   '%':glyph('11001','11010','00100','01000','10110','00110','00000'),
   '?':glyph('01110','10001','00001','00110','00100','00000','00100'),
   ' ':glyph('00000','00000','00000','00000','00000','00000','00000')
@@ -685,6 +754,7 @@ class BitmapText {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.program);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
+    gl.uniform1f(gl.getUniformLocation(this.program, 'u_renderScale'), renderScale);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.uniform1i(gl.getUniformLocation(this.program, 'u_atlas'), 0);
@@ -716,8 +786,9 @@ class NebulaRenderer {
     gl.bindVertexArray(null);
   }
 
-  setMap(map) {
-    if (this.mapId === map.id) return;
+  setMap(map, linkedAreas) {
+    const key = `${map.id}:${[...linkedAreas].sort().join(',')}`;
+    if (this.mapId === key) return;
     const data = [];
     for (const area of map.defenseAreas) {
       const bounds = defenseAreaBounds(area, 12);
@@ -726,21 +797,32 @@ class NebulaRenderer {
       data.push(shape.x, shape.y, shape.radiusX, shape.radiusY);
       data.push(shape.cosRotation, shape.sinRotation, shape.amplitude2, shape.amplitude3);
       data.push(shape.amplitude5, shape.notchDepth, shape.notchX, shape.notchY);
-      data.push(shape.styleSeed, shape.family, 0, 0);
+      data.push(shape.styleSeed, shape.family, linkedAreas.has(area.id) ? 1 : 0, 0);
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
-    this.mapId = map.id;
+    this.mapId = key;
     this.count = map.defenseAreas.length;
   }
 
   draw(map, viewCamera) {
-    this.setMap(map);
+    const linkedAreas = new Set();
+    for (const tower of sessionSnapshot?.towers || []) {
+      if (isRelayForm(tower.definitionId) && tower.relayTargetAreaId) {
+        linkedAreas.add(tower.areaId); linkedAreas.add(tower.relayTargetAreaId);
+      }
+    }
+    this.setMap(map, linkedAreas);
     if (!this.count) return;
     gl.useProgram(this.program);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
+    gl.uniform1f(gl.getUniformLocation(this.program, 'u_renderScale'), renderScale);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_camera'), viewCamera.x, viewCamera.y);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_viewScale'), viewCamera.scale);
+    const waveAge = researchWave && researchWave.mapId === map.id && !reducedNetworkMotion.matches
+      ? (performance.now() - researchWave.startedAt) / 1000 : -1;
+    gl.uniform3f(gl.getUniformLocation(this.program, 'u_researchWave'),
+      researchWave?.x || 0, researchWave?.y || 0, waveAge >= 0 && waveAge < 4 ? waveAge : -1);
     gl.bindVertexArray(this.vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, this.count);
     gl.bindVertexArray(null);
@@ -749,6 +831,12 @@ class NebulaRenderer {
 
 const backgroundProgram = createProgram(FULLSCREEN_VERTEX, BACKGROUND_FRAGMENT);
 const nebulaRenderer = new NebulaRenderer();
+// Presentation only: one wave, replaced by the next purchase; never queued.
+let researchWave = null;
+let devToolsOpen = false;
+const quietNetwork = [0.025, 0.12, 0.105, 1];
+const quietPulse = [0.06, 0.25, 0.21, 1];
+const reducedNetworkMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const enemyRenderer = new EnemyRenderer(PROTOTYPE_SESSION_CONFIG.swarm.initialCapacity);
 const shapes = new ShapeBatch();
 const bitmapText = new BitmapText();
@@ -802,39 +890,20 @@ let saveInFlight = false;
 let saveQueued = false;
 
 function allowedZoomLevels() {
-  if (sessionMode === 'test') return zoomLevels;
-  const bounds = currentMap.cameraBounds || currentMap.bounds;
-  const maximumSafeScale = Math.max(1, Math.floor(Math.min(
-    (bounds.right - bounds.left) / Math.max(1, logicalWidth),
-    (bounds.bottom - bounds.top) / Math.max(1, logicalHeight)
-  )));
-  return [...new Set([
-    ...zoomLevels.filter((scale) => scale <= maximumSafeScale),
-    maximumSafeScale
-  ])].sort((left, right) => left - right);
+  return zoomLevels;
 }
 
 function clampCameraToMap() {
-  if (sessionMode === 'test') {
-    const allowed = allowedZoomLevels();
-    camera.scale = allowed.reduce((closest, scale) => Math.abs(scale - camera.scale) < Math.abs(closest - camera.scale) ? scale : closest, allowed[0]);
-    camera.x = Math.round(Math.max(currentMap.bounds.left, Math.min(currentMap.bounds.right, camera.x)) / camera.scale) * camera.scale;
-    camera.y = Math.round(Math.max(currentMap.bounds.top, Math.min(currentMap.bounds.bottom, camera.y)) / camera.scale) * camera.scale;
-    return;
-  }
-  const allowed = allowedZoomLevels();
-  if (!allowed.includes(camera.scale)) camera.scale = allowed.at(-1);
-  const bounds = currentMap.cameraBounds || currentMap.bounds;
+  if (!zoomLevels.includes(camera.scale)) camera.scale = zoomLevels.at(-1);
+  const bounds = currentMap.bounds;
   const halfWidth = logicalWidth * camera.scale * 0.5;
-  const halfHeight = logicalHeight * camera.scale * 0.5;
   const minimumX = bounds.left + halfWidth;
   const maximumX = bounds.right - halfWidth;
-  const minimumY = bounds.top + halfHeight;
-  const maximumY = bounds.bottom - halfHeight;
-  camera.x = minimumX <= maximumX ? Math.max(minimumX, Math.min(maximumX, camera.x)) : (bounds.left + bounds.right) * 0.5;
-  camera.y = minimumY <= maximumY ? Math.max(minimumY, Math.min(maximumY, camera.y)) : (bounds.top + bounds.bottom) * 0.5;
-  camera.x = Math.round(camera.x / camera.scale) * camera.scale;
-  camera.y = Math.round(camera.y / camera.scale) * camera.scale;
+  camera.x = minimumX <= maximumX ? Math.max(minimumX, Math.min(maximumX, camera.x)) : (bounds.left + bounds.right) / 2;
+  const minimumY = bounds.top + (logicalHeight * 0.5 - HUD_TOP_HEIGHT) * camera.scale;
+  // The lower edge of the playable viewport must never show space below the wall.
+  const maximumY = bounds.bottom - (hudBottomY - logicalHeight * 0.5) * camera.scale;
+  camera.y = Math.min(maximumY, Math.max(minimumY, camera.y));
 }
 
 function loadTestPreferences() {
@@ -942,7 +1011,7 @@ function createHostNetworkBundle() {
     mode: 'game',
     authority: bundleAuthority,
     session: bundleSession,
-    map: getMapDefinition(bundleAuthority.state.mapId),
+    map: getMapDefinition(bundleAuthority.state.mapId, bundleAuthority.state.seed),
     networkRole: 'host'
   };
 }
@@ -961,7 +1030,7 @@ function createGuestNetworkBundle(code) {
     mode: 'game',
     authority: bundleAuthority,
     session: bundleSession,
-    map: getMapDefinition(bundleAuthority.state.mapId),
+    map: getMapDefinition(bundleAuthority.state.mapId, bundleAuthority.state.seed),
     networkRole: 'guest'
   };
 }
@@ -999,10 +1068,10 @@ function bindPeerCoordinator(bundle, role, code = null) {
 
   if (role === 'guest') {
     networkSession.onReady = (snapshot, { firstSync = true } = {}) => {
-      bundle.map = getMapDefinition(snapshot.mapId);
+      bundle.map = getMapDefinition(snapshot.mapId, snapshot.seed);
       if (session === networkSession) {
         sessionSnapshot = snapshot;
-        if (firstSync || currentMap.id !== snapshot.mapId) adoptActiveMap(snapshot.mapId);
+        if (firstSync || currentMap.id !== snapshot.mapId || (currentMap.randomRifts && currentMap.layoutSeed !== snapshot.seed)) adoptActiveMap(snapshot.mapId);
       }
       if (!firstSync) {
         setStatus('host correction applied');
@@ -1144,7 +1213,7 @@ async function copyRoomCode() {
 
 function createSessionBundle(mode) {
   const config = mode === 'test' ? TEST_FIELD_SESSION_CONFIG : PROTOTYPE_SESSION_CONFIG;
-  const bundleAuthority = new EmbeddedAuthority(config);
+  const bundleAuthority = new EmbeddedAuthority(mode === 'game' ? { ...config, seed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] } : config);
   const bundleSession = new EmbeddedClient(bundleAuthority, {
     clientId: mode === 'test' ? 'client_test_1' : 'client_local_1',
     label: 'host'
@@ -1184,7 +1253,7 @@ async function restoreGameBundle(bundle) {
     bundle.authority.applyCorrectionSnapshot(saved.correction);
     bundle.session.sequence = bundle.authority.lastSequenceByClient.get(bundle.session.clientId) || bundle.session.sequence;
     bundle.session.latestSnapshot = bundle.authority.snapshot();
-    bundle.map = getMapDefinition(bundle.authority.state.mapId);
+    bundle.map = getMapDefinition(bundle.authority.state.mapId, bundle.authority.state.seed);
     if (sessionMode === 'game' && session === bundle.session) {
       sessionSnapshot = bundle.session.latestSnapshot;
       currentMap = bundle.map;
@@ -1229,6 +1298,10 @@ async function saveGameBundle() {
 
 window.__saveHordeRun = saveGameBundle;
 addEventListener('pagehide', () => { void saveGameBundle(); });
+// Mobile browsers may suspend a page without dispatching pagehide.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') void saveGameBundle();
+});
 
 function activateSession(mode) {
   cameraByMode.set(sessionMode, { ...camera, mapId: currentMap.id });
@@ -1237,7 +1310,9 @@ function activateSession(mode) {
   authority = bundle.authority;
   session = bundle.session;
   sessionSnapshot = session.snapshot();
-  currentMap = getMapDefinition(sessionSnapshot.mapId);
+  currentMap = getMapDefinition(sessionSnapshot.mapId, sessionSnapshot.seed);
+  researchWave = null;
+  devToolsOpen = false;
   bundle.map = currentMap;
   const savedCamera = cameraByMode.get(mode);
   Object.assign(camera, savedCamera?.mapId === currentMap.id ? savedCamera : currentMap.camera);
@@ -1316,7 +1391,7 @@ function handleUiDrag(point, final = false) {
 }
 
 canvas.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || !event.isPrimary) return;
   pointer = canvasPoint(event);
   const hitbox = hitboxAt(pointer);
   if (hitbox) {
@@ -1335,11 +1410,11 @@ canvas.addEventListener('pointerdown', (event) => {
     }
     return;
   }
-  if (buildCatalogOpen) return;
-  if (frontEndScreen !== 'game') return;
+  if (buildCatalogOpen || devToolsOpen) return;
+  if (frontEndScreen !== 'game' || sessionSnapshot.phase === 'defeated' || towerMenuMode === 'research') return;
   if (towerMenuMode === 'control' && selectedTowerId) {
     const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-    const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+    const definition = weaponView(sessionSnapshot, tower);
     if (tower && definition?.control?.input === 'line') {
       const world = unproject(pointer.x, pointer.y);
       controlDrag = { towerId: tower.id, start: world, current: world };
@@ -1355,6 +1430,7 @@ canvas.addEventListener('pointerdown', (event) => {
 });
 
 canvas.addEventListener('pointermove', (event) => {
+  if (!event.isPrimary) return;
   const previous = pointer;
   pointer = canvasPoint(event);
   if (uiDrag) {
@@ -1375,6 +1451,7 @@ canvas.addEventListener('pointermove', (event) => {
 });
 
 canvas.addEventListener('pointerup', (event) => {
+  if (!event.isPrimary || event.button !== 0) return;
   if (uiDrag) {
     pointer = canvasPoint(event);
     handleUiDrag(pointer, true);
@@ -1398,13 +1475,27 @@ canvas.addEventListener('pointerup', (event) => {
     return;
   }
   if (!dragging) return;
-  dragging = false;
-  canvas.releasePointerCapture(event.pointerId);
-  if (dragDistance <= 2 && pointerDown && pointer.y > HUD_TOP_HEIGHT && pointer.y < hudBottomY) handleWorldClick(pointer);
-  pointerDown = null;
+  pointer = canvasPoint(event);
+  const clicked = dragDistance <= 2 && pointerDown
+    && Math.hypot(pointer.x - pointerDown.x, pointer.y - pointerDown.y) <= 2;
+  cancelPointerGesture();
+  if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  if (clicked && pointer.y > HUD_TOP_HEIGHT && pointer.y < hudBottomY) handleWorldClick(pointer);
 });
 
+function cancelPointerGesture() {
+  dragging = false;
+  pointerDown = null;
+  dragDistance = 0;
+  uiDrag = null;
+  controlDrag = null;
+}
+canvas.addEventListener('pointercancel', cancelPointerGesture);
+canvas.addEventListener('lostpointercapture', cancelPointerGesture);
+addEventListener('blur', cancelPointerGesture);
+
 canvas.addEventListener('contextmenu', (event) => {
+  cancelPointerGesture();
   event.preventDefault();
   if (frontEndScreen !== 'game') return;
   placementArmed = false;
@@ -1418,29 +1509,42 @@ canvas.addEventListener('contextmenu', (event) => {
 
 canvas.addEventListener('wheel', (event) => {
   event.preventDefault();
-  if (frontEndScreen !== 'game') return;
+  if (frontEndScreen !== 'game' || devToolsOpen) return;
   const levels = allowedZoomLevels();
   const current = levels.reduce((closestIndex, scale, index) => (
     Math.abs(scale - camera.scale) < Math.abs(levels[closestIndex] - camera.scale) ? index : closestIndex
   ), 0);
   const nextIndex = Math.max(0, Math.min(levels.length - 1, current + Math.sign(event.deltaY)));
   camera.scale = levels[nextIndex];
-  camera.x = Math.round(camera.x / camera.scale) * camera.scale;
-  camera.y = Math.round(camera.y / camera.scale) * camera.scale;
   clampCameraToMap();
 }, { passive: false });
 
 addEventListener('keydown', (event) => {
-  if (event.repeat) return;
+  if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
   const key = event.key.toLowerCase();
+  if (event.key === 'F2' && frontEndScreen === 'game') {
+    event.preventDefault(); cancelPointerGesture(); devToolsOpen = !devToolsOpen; return;
+  }
+  if (devToolsOpen) {
+    if (event.key === 'Escape') { event.preventDefault(); devToolsOpen = false; }
+    return;
+  }
+  if (event.key === '?' && (frontEndScreen === 'game' || frontEndScreen === 'escape')) {
+    cancelPointerGesture();
+    frontEndScreen = 'escape';
+    escapeMenuPage = escapeMenuPage === 'help' ? 'main' : 'help';
+    return;
+  }
   if (event.key === 'Escape') {
+    cancelPointerGesture();
+    if (frontEndScreen === 'game' && towerMenuMode === 'research') { towerMenuMode = 'actions'; return; }
     if (frontEndScreen === 'game' && towerMenuMode === 'control') {
       towerMenuMode = sessionMode === 'game' ? 'actions' : null;
       controlDrag = null;
       setStatus('control edit cancelled');
     } else if (frontEndScreen === 'game' && buildCatalogOpen) closeBuildCatalog();
     else if (frontEndScreen === 'game') openEscapeMenu();
-    else if (frontEndScreen === 'escape' && escapeMenuPage === 'options') closeEscapeOptions();
+    else if (frontEndScreen === 'escape' && escapeMenuPage !== 'main') closeEscapeOptions();
     else if (frontEndScreen === 'escape') resumeSession();
     else if (frontEndScreen === 'map_select') closeMapSelection();
     else if (frontEndScreen === 'coop') cancelMultiplayer(true);
@@ -1475,7 +1579,7 @@ addEventListener('keydown', (event) => {
     return;
   }
   if (frontEndScreen === 'map_select') {
-    if (['1', '2', '3'].includes(event.key)) {
+    if (/^[1-9]$/.test(event.key)) {
       const map = playableMaps()[Number(event.key) - 1];
       if (map) selectRunMap(map.id);
     } else if (event.key === 'Enter') {
@@ -1488,6 +1592,17 @@ addEventListener('keydown', (event) => {
       event.preventDefault();
       toggleAutoSelectPlacedFrame();
     }
+    return;
+  }
+  if (towerMenuMode === 'research') {
+    const tower=sessionSnapshot.towers.find((item)=>item.id===selectedTowerId);
+    if (!tower) { towerMenuMode=null; return; }
+    const items=stationItems(sessionSnapshot,tower);
+    const perPage=Math.min(288,logicalHeight-16)<240?1:3;
+    const visible=items.slice(researchPage*perPage,(researchPage+1)*perPage);
+    if(event.key==='Tab') { event.preventDefault(); researchPage=(researchPage+1)%Math.max(1,Math.ceil(items.length/perPage)); researchDetailPage=0; }
+    else if(['1','2','3'].includes(event.key)) { researchSelection=visible[Number(event.key)-1]?.id ?? researchSelection; researchDetailPage=0; }
+    else if(event.key==='Enter') { const item=items.find((item)=>item.id===researchSelection); if(item) purchaseStationItem(tower,item); }
     return;
   }
   if (buildCatalogOpen) {
@@ -1510,13 +1625,14 @@ addEventListener('keydown', (event) => {
     setStatus(`owned by ${owner?.label || 'another pilot'} // inspect only`);
     return;
   }
-  if (selectedTowerId && towerMenuMode && (sessionMode === 'game' || ['relay', 'strike', 'control'].includes(towerMenuMode))) {
+  if (selectedTowerId && towerMenuMode && (sessionMode === 'game' || ['arsenal','reactor'].includes(sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId)?.definitionId) || isRelayForm(sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId)?.definitionId) || ['relay', 'strike', 'control'].includes(towerMenuMode))) {
     const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
     const towerDefinition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
     if (towerMenuMode === 'actions' && event.key === '1') {
       event.preventDefault();
-      if (tower?.definitionId === 'relay') openRelayTargetMenu(sessionSnapshot, tower);
-      else if (tower) openUpgradeMenu(sessionSnapshot, tower);
+      if (['arsenal','reactor'].includes(tower?.definitionId)) openResearchStation(tower);
+      else if (towerDefinition?.evolutionChoices?.length) openUpgradeMenu(sessionSnapshot, tower);
+      else if (isRelayForm(tower?.definitionId)) openRelayTargetMenu(sessionSnapshot, tower);
       return;
     }
     if (towerMenuMode === 'actions' && event.key === '2') {
@@ -1526,7 +1642,8 @@ addEventListener('keydown', (event) => {
     }
     if (towerMenuMode === 'actions' && event.key === '3') {
       event.preventDefault();
-      if (towerDefinition?.control?.input && towerDefinition.control.input !== 'none') openControlGeometryMenu(sessionSnapshot, tower);
+      if (isRelayForm(tower?.definitionId)) openRelayTargetMenu(sessionSnapshot, tower);
+      else if (towerDefinition?.control?.input && towerDefinition.control.input !== 'none') openControlGeometryMenu(sessionSnapshot, tower);
       else openStrikeTargetMenu(sessionSnapshot, tower);
       return;
     }
@@ -1615,6 +1732,8 @@ addEventListener('keydown', (event) => {
     setStatus(placementArmed ? 'place support frame // 8 max' : 'support placement off');
   } else if (sessionMode === 'test' && key === 'u') {
     openBuildCatalog('assault');
+  } else if (sessionMode === 'test' && key === 'n') {
+    openBuildCatalog('network');
   } else if (sessionMode === 'game' && key === 'b') {
     openBuildCatalog('core');
   } else if (event.key === '1') {
@@ -1625,7 +1744,7 @@ addEventListener('keydown', (event) => {
     cycleSelectedTargeting(key === 'q' ? -1 : 1);
   } else if (key === 'a' && selectedTowerId) {
     const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-    const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+    const definition = weaponView(sessionSnapshot, tower);
     if (definition?.control?.input && definition.control.input !== 'none') openControlGeometryMenu(sessionSnapshot, tower);
     else openStrikeTargetMenu(sessionSnapshot, tower);
   } else if (key === 'r' && sessionSnapshot.phase === 'defeated' && !session.networkRole) {
@@ -1656,7 +1775,7 @@ function clearTransientUi() {
 }
 
 function adoptActiveMap(mapId) {
-  const map = getMapDefinition(mapId);
+  const map = getMapDefinition(mapId, sessionSnapshot.seed);
   currentMap = map;
   const bundle = sessions.get(sessionMode);
   if (bundle) bundle.map = map;
@@ -1816,10 +1935,10 @@ function enterTestField() {
 function armFramePlacement() {
   const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === TOWER_DEFINITION_ID);
   const economy = sessionSnapshot.economyByPlayer[session.playerId];
-  if ((economy?.credits || 0) < (definition?.cost ?? Infinity)) {
+  if ((sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < (definition?.cost ?? Infinity)) {
     placementArmed = false;
     bulkPlacementDefinitionId = null;
-    setStatus(`need ${definition?.cost || 100} credits`);
+    setStatus(`need ${compactMetric(definition?.cost || 100)} credits`);
     return;
   }
   placementArmed = true;
@@ -1870,8 +1989,8 @@ function selectBulkPlacementDefinition(definitionId) {
     setStatus('tower build path is unavailable');
     return;
   }
-  if ((economy?.credits || 0) < quote.cost) {
-    setStatus(`need ${quote.cost} credits for ${definition.label}`);
+  if ((sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < Math.min(...currentMap.defenseAreas.map((area) => purchaseCost(sessionSnapshot, area.id, quote.cost)))) {
+    setStatus(`need ${compactMetric(quote.cost)} credits for ${definition.label}`);
     return;
   }
   bulkPlacementDefinitionId = definitionId;
@@ -1879,7 +1998,7 @@ function selectBulkPlacementDefinition(definitionId) {
   buildCatalogOpen = false;
   selectedTowerId = null;
   towerMenuMode = null;
-  setStatus(`${definition.label} ${quote.cost} // place many // right click ends`);
+  setStatus(`${definition.label} ${compactMetric(quote.cost)} // place many // right click ends`);
 }
 
 function switchTestTowerForm(definitionId) {
@@ -1907,15 +2026,16 @@ function cycleSelectedTargeting(direction) {
   const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
   const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
   if (!tower || !definition?.targetingModes?.length) return;
-  const current = Math.max(0, definition.targetingModes.indexOf(tower.targetingMode));
-  const next = (current + direction + definition.targetingModes.length) % definition.targetingModes.length;
-  session.send(COMMAND.TOWER_TARGETING_SET, { towerId: tower.id, mode: definition.targetingModes[next] });
+  const modes=[...definition.targetingModes,...(hasResearch(sessionSnapshot,16)?['execution']:[]),...(hasResearch(sessionSnapshot,36)?['highest_hp']:[])];
+  const current=Math.max(0,modes.indexOf(tower.targetingMode));
+  const next=(current+direction+modes.length)%modes.length;
+  session.send(COMMAND.TOWER_TARGETING_SET,{towerId:tower.id,mode:modes[next]});
 }
 
 function project(x, y) {
   return {
-    x: Math.round((x - camera.x) / camera.scale + logicalWidth * 0.5),
-    y: Math.round((y - camera.y) / camera.scale + logicalHeight * 0.5)
+    x: (x - camera.x) / camera.scale + logicalWidth * 0.5,
+    y: (y - camera.y) / camera.scale + logicalHeight * 0.5
   };
 }
 
@@ -1933,7 +2053,7 @@ function setStatus(message, duration = 1800) {
 
 function selectedControlContext() {
   const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-  const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+  const definition = weaponView(sessionSnapshot, tower);
   return { tower, definition, control: definition?.control || null };
 }
 
@@ -1954,12 +2074,35 @@ function sendSelectedControlGeometry(geometry) {
       return;
     }
   }
-  session.send(COMMAND.TOWER_CONTROL_GEOMETRY_SET, { towerId: tower.id, geometry });
+  const normalized = normalizeControlGeometry(definition, tower, geometry, currentMap);
+  if (!normalized) {
+    setStatus(control.type === 'crosswind' ? 'choose a side // no upstream push' : 'control geometry outside map');
+    return;
+  }
+  session.send(COMMAND.TOWER_CONTROL_GEOMETRY_SET, { towerId: tower.id, geometry: normalized });
   setStatus('control geometry sent // reboot 1s');
 }
 
 function handleWorldClick(screenPoint) {
+  if (devToolsOpen) return;
   const world = unproject(screenPoint.x, screenPoint.y);
+  if (['echo', 'socket'].includes(towerMenuMode) && selectedTowerId) {
+    const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
+    if (!tower) return;
+    if (towerMenuMode === 'echo') {
+      const source = sessionSnapshot.towers.find((candidate) => Math.hypot(candidate.x - world.x, candidate.y - world.y) <= 18 && controlSource(sessionSnapshot, tower, candidate.id));
+      if (!source) { setStatus('click a connected control turret'); return; }
+      session.send(COMMAND.TOWER_ECHO_SOURCE_SET, { towerId: tower.id, sourceTowerId: source.id });
+    } else {
+      const target = defenseAreaCenterById(tower.relayTargetAreaId);
+      if (!target) { setStatus('link a nebula first'); return; }
+      const dx = target.x - tower.x, dy = target.y - tower.y;
+      const fraction = Math.max(0, Math.min(1, ((world.x - tower.x) * dx + (world.y - tower.y) * dy) / (dx * dx + dy * dy || 1)));
+      session.send(COMMAND.TOWER_SOCKET_SET, { towerId: tower.id, fraction });
+    }
+    towerMenuMode = 'actions';
+    return;
+  }
   if (towerMenuMode === 'control' && selectedTowerId) {
     const { tower, definition, control } = selectedControlContext();
     const range = tower?.effectiveRange || definition?.range || 0;
@@ -1982,7 +2125,7 @@ function handleWorldClick(screenPoint) {
   }
   if (towerMenuMode === 'strike' && selectedTowerId) {
     const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-    const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+    const definition = weaponView(sessionSnapshot, tower);
     const range = tower?.effectiveRange || definition?.range || 0;
     if (!tower || !supportsStrikePoint(definition?.attack)) {
       towerMenuMode = sessionMode === 'game' ? 'actions' : null;
@@ -2014,7 +2157,10 @@ function handleWorldClick(screenPoint) {
       setStatus('all 8 support slots are used');
       return;
     }
-    if (!findDefenseAreaAt(currentMap, world.x, world.y)) {
+    if (!findDefenseAreaAt(currentMap, world.x, world.y) && !sessionSnapshot.towers.some((tower) => {
+      const point = socketPoint(sessionSnapshot, currentMap, tower);
+      return point && Math.hypot(point.x - world.x, point.y - world.y) <= 10;
+    })) {
       setStatus('build inside nebula');
       return;
     }
@@ -2025,7 +2171,7 @@ function handleWorldClick(screenPoint) {
     if (bulkPlacementDefinitionId) {
       selectedTowerId = null;
       towerMenuMode = null;
-      setStatus(`${definition?.label || definitionId} ${quote?.cost || 0} // click next // right click ends`);
+      setStatus(`${definition?.label || definitionId} ${compactMetric(quote?.cost || 0)} // click next // right click ends`);
     } else {
       placementArmed = false;
       selectedTowerId = null;
@@ -2044,13 +2190,15 @@ function handleWorldClick(screenPoint) {
     }
   }
   selectedTowerId = nearest?.id || null;
-  towerMenuMode = nearest && sessionMode === 'game' ? 'actions' : null;
+  towerMenuMode = nearest && (sessionMode === 'game' || isRelayForm(nearest.definitionId)) ? 'actions' : null;
+  if (nearest && ['arsenal','reactor'].includes(nearest.definitionId)) openResearchStation(nearest);
   setStatus(nearest ? `${nearest.definitionId} selected` : 'selection cleared');
 }
 
 function drawBackground() {
   gl.useProgram(backgroundProgram);
   gl.uniform2f(gl.getUniformLocation(backgroundProgram, 'u_resolution'), logicalWidth, logicalHeight);
+  gl.uniform1f(gl.getUniformLocation(backgroundProgram, 'u_renderScale'), renderScale);
   gl.uniform2f(gl.getUniformLocation(backgroundProgram, 'u_camera'), camera.x, camera.y);
   gl.uniform1f(gl.getUniformLocation(backgroundProgram, 'u_viewScale'), camera.scale);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -2059,481 +2207,42 @@ function drawBackground() {
 
 function drawTower(tower, override = null) {
   const p = project(tower.x, tower.y);
-  const accent = override?.accent || COLOR.mint;
-  const core = override?.core || COLOR.cyan;
-  if (!['prism', 'sweeper'].includes(tower.definitionId)) shapes.rect(p.x - 4, p.y - 4, 9, 9, COLOR.black);
-
-  if (tower.definitionId === 'assault') {
-    shapes.rect(p.x - 4, p.y - 3, 9, 7, COLOR.black);
-    shapes.rect(p.x - 3, p.y - 3, 7, 1, override?.accent || COLOR.amber);
-    shapes.rect(p.x - 3, p.y + 3, 7, 1, override?.accent || COLOR.amber);
-    shapes.rect(p.x - 3, p.y - 2, 1, 5, accent);
-    shapes.rect(p.x + 3, p.y - 2, 1, 5, accent);
-    shapes.rect(p.x - 3, p.y - 7, 2, 5, override?.core || COLOR.mint);
-    shapes.rect(p.x + 2, p.y - 7, 2, 5, override?.core || COLOR.mint);
-    shapes.rect(p.x - 2, p.y - 1, 1, 3, core);
-    shapes.rect(p.x + 2, p.y - 1, 1, 3, core);
-    return;
-  }
-
-  if (tower.definitionId === 'barrage') {
-    shapes.rect(p.x - 6, p.y - 4, 13, 9, COLOR.black);
-    shapes.rect(p.x - 5, p.y - 3, 11, 1, COLOR.amber);
-    shapes.rect(p.x - 5, p.y + 3, 11, 1, COLOR.amber);
-    shapes.rect(p.x - 5, p.y - 2, 1, 5, COLOR.mint);
-    shapes.rect(p.x + 5, p.y - 2, 1, 5, COLOR.mint);
-    for (const barrelX of [-5, -2, 1, 4]) shapes.rect(p.x + barrelX, p.y - 8, 1, 5, COLOR.amber);
-    shapes.rect(p.x - 3, p.y - 1, 7, 3, COLOR.cyan);
-    shapes.rect(p.x - 1, p.y, 3, 1, COLOR.mint);
-    return;
-  }
-
-  if (tower.definitionId === 'broadside') {
-    const familyAccent = override?.accent || COLOR.amber;
-    const familyCore = override?.core || COLOR.mint;
-    shapes.rect(p.x - 9, p.y - 5, 19, 11, COLOR.black);
-    shapes.rect(p.x - 8, p.y - 4, 17, 1, familyAccent);
-    shapes.rect(p.x - 8, p.y + 4, 17, 1, familyAccent);
-    shapes.rect(p.x - 8, p.y - 3, 2, 7, familyCore);
-    shapes.rect(p.x + 7, p.y - 3, 2, 7, familyCore);
-    for (const barrelX of [-7, -5, -3, -1, 1, 3, 5, 7]) {
-      shapes.rect(p.x + barrelX, p.y - 11, 1, 7, familyAccent);
-      shapes.rect(p.x + barrelX, p.y - 12, 1, 1, familyCore);
+  const tick = sessionSnapshot?.runTick || 0;
+  const control = tower.definitionId === 'bond'
+    ? tower.effectiveControl || sessionSnapshot?.towerCatalog.find((item) => item.id === 'bond')?.control
+    : null;
+  const period = Math.max(1, Math.round((control?.periodSeconds || 6) * AUTHORITY_TICK_RATE));
+  const pulseTick = tick % period;
+  const scale = 3 / camera.scale;
+  const rectangles = [];
+  const body = { rect: (...args) => rectangles.push(args) };
+  drawTowerSprite(body, COLOR, p, tower, override, {
+    runTick: tick,
+    sweepPhase: (() => {
+      if (tower.definitionId !== 'sweeper') return null;
+      const field = sessionSnapshot?.attackFields.find((f) => f.kind === 'sweep_line' && f.attack.sourceTowerId === tower.id);
+      const pose = field ? sweepPose(field, tick) : null;
+      return pose ? (field.sweepDirection < 0 ? 1-pose.phase : pose.phase) : null;
+    })(),
+    controlActive: pulseTick < Math.round((control?.durationSeconds || 2) * AUTHORITY_TICK_RATE)
+      && tick - pulseTick >= (tower.controlReadyTick || 0)
+  });
+  const extent = Math.max(1, ...rectangles.flatMap(([x,y,w,h]) => [Math.abs(x-p.x),Math.abs(y-p.y),Math.abs(x+w-p.x),Math.abs(y+h-p.y)]));
+  const nearest = Math.min(56, ...(sessionSnapshot?.towers || []).filter((other) => other.id !== tower.id).map((other) => Math.hypot(other.x-tower.x,other.y-tower.y)));
+  const footprint = Math.max(6, Math.min(54, nearest-2));
+  const artScale = Math.min(scale, footprint / (2*Math.SQRT2*extent) / camera.scale);
+  for (const [x,y,w,h,color] of rectangles) shapes.rect(p.x+(x-p.x)*artScale,p.y+(y-p.y)*artScale,w*artScale,h*artScale,color);
+  if (tower.definitionId === 'hardpoint') {
+    const point = socketPoint(sessionSnapshot, currentMap, tower);
+    if (point) {
+      const socket = project(point.x, point.y);
+      drawDashedLink(p, socket, COLOR.dimMint);
+      shapes.rect(socket.x - 5, socket.y - 5, 11, 1, COLOR.amber);
+      shapes.rect(socket.x - 5, socket.y + 5, 11, 1, COLOR.amber);
+      shapes.rect(socket.x - 5, socket.y - 4, 1, 9, COLOR.amber);
+      shapes.rect(socket.x + 5, socket.y - 4, 1, 9, COLOR.amber);
     }
-    shapes.rect(p.x - 5, p.y - 2, 11, 5, COLOR.black);
-    shapes.rect(p.x - 4, p.y - 1, 9, 3, override?.core || COLOR.cyan);
-    shapes.rect(p.x - 1, p.y, 3, 1, familyCore);
-    return;
   }
-
-  if (tower.definitionId === 'flechette') {
-    const familyAccent = override?.accent || COLOR.amber;
-    const familyCore = override?.core || COLOR.cyan;
-    shapes.rect(p.x - 6, p.y - 5, 13, 11, COLOR.black);
-    shapes.rect(p.x - 5, p.y - 4, 11, 1, familyAccent);
-    shapes.rect(p.x - 5, p.y + 4, 11, 1, familyAccent);
-    for (const needleX of [-5, -2, 2, 5]) {
-      const tipOffset = needleX < 0 ? -1 : 1;
-      shapes.line(p.x + needleX, p.y - 3, p.x + needleX + tipOffset, p.y - 12, 1, familyCore);
-      shapes.rect(p.x + needleX + tipOffset, p.y - 13, 1, 2, override?.core || COLOR.mint);
-    }
-    shapes.rect(p.x - 3, p.y - 2, 7, 5, COLOR.black);
-    shapes.rect(p.x - 2, p.y - 1, 5, 3, familyAccent);
-    shapes.rect(p.x, p.y, 1, 1, familyCore);
-    shapes.rect(p.x - 7, p.y + 2, 2, 4, familyCore);
-    shapes.rect(p.x + 6, p.y + 2, 2, 4, familyCore);
-    return;
-  }
-
-  if (tower.definitionId === 'cyclone') {
-    const familyAccent = override?.accent || COLOR.amber;
-    const familyCore = override?.core || COLOR.mint;
-    shapes.rect(p.x - 6, p.y - 6, 13, 13, COLOR.black);
-    shapes.line(p.x, p.y - 9, p.x + 7, p.y - 2, 2, familyAccent);
-    shapes.line(p.x + 7, p.y - 2, p.x, p.y + 8, 2, familyCore);
-    shapes.line(p.x, p.y + 8, p.x - 7, p.y + 1, 2, familyAccent);
-    shapes.line(p.x - 7, p.y + 1, p.x, p.y - 9, 2, familyCore);
-    shapes.rect(p.x - 4, p.y - 4, 9, 9, COLOR.black);
-    shapes.rect(p.x - 3, p.y - 3, 7, 1, familyAccent);
-    shapes.rect(p.x - 3, p.y + 3, 7, 1, familyAccent);
-    shapes.rect(p.x - 1, p.y - 11, 1, 7, familyCore);
-    shapes.rect(p.x + 2, p.y - 11, 1, 7, familyCore);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, override?.core || COLOR.cyan);
-    return;
-  }
-
-  if (tower.definitionId === 'rocket') {
-    shapes.rect(p.x - 5, p.y - 7, 11, 13, COLOR.black);
-    shapes.rect(p.x - 4, p.y - 3, 9, 7, COLOR.amber);
-    shapes.rect(p.x - 3, p.y - 2, 7, 5, COLOR.black);
-    shapes.rect(p.x - 1, p.y - 8, 3, 9, COLOR.amber);
-    shapes.rect(p.x, p.y - 10, 1, 2, COLOR.mint);
-    shapes.rect(p.x - 4, p.y + 4, 3, 2, COLOR.amber);
-    shapes.rect(p.x + 2, p.y + 4, 3, 2, COLOR.amber);
-    shapes.rect(p.x, p.y + 1, 1, 3, COLOR.red);
-    return;
-  }
-
-  if (tower.definitionId === 'warhead') {
-    const familyAccent = override?.accent || COLOR.amber;
-    const familyCore = override?.core || COLOR.mint;
-    shapes.rect(p.x - 7, p.y - 10, 15, 18, COLOR.black);
-    shapes.rect(p.x - 3, p.y - 12, 7, 17, familyAccent);
-    shapes.rect(p.x - 2, p.y - 14, 5, 3, override?.accent || COLOR.red);
-    shapes.rect(p.x - 1, p.y - 15, 3, 2, familyCore);
-    shapes.rect(p.x - 5, p.y - 4, 3, 9, familyAccent);
-    shapes.rect(p.x + 3, p.y - 4, 3, 9, familyAccent);
-    shapes.rect(p.x - 7, p.y + 3, 3, 5, override?.accent || COLOR.red);
-    shapes.rect(p.x + 5, p.y + 3, 3, 5, override?.accent || COLOR.red);
-    shapes.rect(p.x - 2, p.y - 6, 5, 7, COLOR.black);
-    shapes.rect(p.x - 1, p.y - 5, 3, 5, override?.core || COLOR.red);
-    shapes.rect(p.x, p.y - 4, 1, 3, familyCore);
-    return;
-  }
-
-  if (tower.definitionId === 'cluster') {
-    const familyAccent = override?.accent || COLOR.amber;
-    const familyCore = override?.core || COLOR.mint;
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
-    for (const [nodeX, nodeY] of [[0, -9], [7, -5], [7, 4], [0, 8], [-7, 4], [-7, -5]]) {
-      shapes.rect(p.x + nodeX - 2, p.y + nodeY - 2, 5, 5, COLOR.black);
-      shapes.rect(p.x + nodeX - 1, p.y + nodeY - 1, 3, 3, familyAccent);
-      shapes.rect(p.x + nodeX, p.y + nodeY, 1, 1, familyCore);
-    }
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, familyAccent);
-    shapes.rect(p.x - 4, p.y - 4, 9, 9, COLOR.black);
-    shapes.rect(p.x - 2, p.y - 2, 5, 5, override?.core || COLOR.red);
-    shapes.rect(p.x, p.y - 1, 1, 3, familyCore);
-    return;
-  }
-
-  if (tower.definitionId === 'salvo') {
-    const familyAccent = override?.accent || COLOR.amber;
-    const familyCore = override?.core || COLOR.mint;
-    shapes.rect(p.x - 8, p.y - 8, 17, 15, COLOR.black);
-    for (const missileX of [-6, 0, 6]) {
-      shapes.rect(p.x + missileX - 2, p.y - 9, 5, 13, COLOR.black);
-      shapes.rect(p.x + missileX - 1, p.y - 10, 3, 11, familyAccent);
-      shapes.rect(p.x + missileX, p.y - 12, 1, 2, familyCore);
-      shapes.rect(p.x + missileX - 2, p.y + 1, 2, 4, override?.accent || COLOR.red);
-      shapes.rect(p.x + missileX + 1, p.y + 1, 2, 4, override?.accent || COLOR.red);
-    }
-    shapes.rect(p.x - 7, p.y + 5, 15, 2, familyAccent);
-    shapes.rect(p.x - 2, p.y + 3, 5, 3, COLOR.black);
-    shapes.rect(p.x - 1, p.y + 3, 3, 2, override?.core || COLOR.cyan);
-    return;
-  }
-
-  if (tower.definitionId === 'laser') {
-    shapes.rect(p.x - 4, p.y - 8, 9, 15, COLOR.black);
-    shapes.rect(p.x - 3, p.y - 3, 7, 7, COLOR.cyan);
-    shapes.rect(p.x - 2, p.y - 2, 5, 5, COLOR.black);
-    shapes.rect(p.x, p.y - 10, 1, 9, COLOR.mint);
-    shapes.rect(p.x - 1, p.y - 7, 3, 2, COLOR.cyan);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.amber);
-    shapes.rect(p.x - 5, p.y + 4, 3, 2, COLOR.cyan);
-    shapes.rect(p.x + 3, p.y + 4, 3, 2, COLOR.cyan);
-    return;
-  }
-
-  if (tower.definitionId === 'cutter') {
-    const familyAccent = override?.accent || COLOR.cyan;
-    const familyCore = override?.core || COLOR.mint;
-    shapes.rect(p.x - 10, p.y - 7, 21, 15, COLOR.black);
-    shapes.rect(p.x - 9, p.y - 6, 5, 12, familyAccent);
-    shapes.rect(p.x + 5, p.y - 6, 5, 12, familyAccent);
-    shapes.rect(p.x - 8, p.y - 4, 3, 8, COLOR.black);
-    shapes.rect(p.x + 6, p.y - 4, 3, 8, COLOR.black);
-    shapes.rect(p.x - 5, p.y - 2, 11, 5, familyCore);
-    shapes.rect(p.x - 4, p.y - 1, 9, 3, COLOR.black);
-    shapes.rect(p.x - 2, p.y, 5, 1, override?.accent || COLOR.amber);
-    shapes.rect(p.x - 4, p.y - 11, 9, 9, COLOR.black);
-    shapes.rect(p.x - 3, p.y - 10, 7, 7, familyAccent);
-    shapes.rect(p.x - 1, p.y - 10, 3, 8, familyCore);
-    return;
-  }
-
-  if (tower.definitionId === 'prism') {
-    const familyAccent = override?.accent || COLOR.cyan;
-    const familyCore = override?.core || COLOR.mint;
-    const hotCore = override?.core || COLOR.amber;
-    shapes.triangle(
-      { x: p.x, y: p.y - 11 },
-      { x: p.x + 7, y: p.y + 2 },
-      { x: p.x, y: p.y + 5 },
-      familyAccent
-    );
-    shapes.triangle(
-      { x: p.x, y: p.y - 11 },
-      { x: p.x, y: p.y + 5 },
-      { x: p.x - 7, y: p.y + 2 },
-      familyCore
-    );
-    shapes.line(p.x, p.y - 7, p.x - 9, p.y - 10, 2, familyAccent);
-    shapes.line(p.x, p.y - 8, p.x, p.y - 13, 2, familyCore);
-    shapes.line(p.x, p.y - 7, p.x + 9, p.y - 10, 2, familyAccent);
-    for (const emitterX of [-9, 0, 9]) shapes.rect(p.x + emitterX - 1, p.y - (emitterX === 0 ? 15 : 12), 3, 3, hotCore);
-    shapes.triangle(
-      { x: p.x, y: p.y - 7 },
-      { x: p.x + 3, y: p.y },
-      { x: p.x, y: p.y + 3 },
-      hotCore
-    );
-    shapes.triangle(
-      { x: p.x, y: p.y - 7 },
-      { x: p.x, y: p.y + 3 },
-      { x: p.x - 3, y: p.y },
-      override?.accent || COLOR.mint
-    );
-    shapes.rect(p.x - 8, p.y + 5, 17, 2, familyAccent);
-    shapes.rect(p.x - 5, p.y + 7, 11, 1, familyCore);
-    shapes.rect(p.x - 1, p.y + 4, 3, 4, hotCore);
-    return;
-  }
-
-  if (tower.definitionId === 'sweeper') {
-    const familyAccent = override?.accent || COLOR.cyan;
-    const familyCore = override?.core || COLOR.mint;
-    const hotCore = override?.core || COLOR.amber;
-    shapes.triangle(
-      { x: p.x - 8, y: p.y + 2 },
-      { x: p.x, y: p.y - 8 },
-      { x: p.x, y: p.y + 3 },
-      familyAccent
-    );
-    shapes.triangle(
-      { x: p.x, y: p.y - 8 },
-      { x: p.x + 8, y: p.y + 2 },
-      { x: p.x, y: p.y + 3 },
-      familyCore
-    );
-    shapes.line(p.x - 7, p.y + 2, p.x + 7, p.y + 2, 2, hotCore);
-    shapes.line(p.x, p.y - 5, p.x + 10, p.y - 11, 2, familyCore);
-    shapes.rect(p.x + 9, p.y - 13, 3, 3, hotCore);
-    shapes.rect(p.x - 3, p.y + 3, 7, 3, familyAccent);
-    shapes.rect(p.x - 1, p.y + 3, 3, 3, hotCore);
-    shapes.rect(p.x - 8, p.y + 6, 17, 2, familyAccent);
-    shapes.rect(p.x - 5, p.y + 8, 11, 1, familyCore);
-    return;
-  }
-
-  if (tower.definitionId === 'anchor') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
-    shapes.rect(p.x - 4, p.y - 4, 9, 1, COLOR.cyan);
-    shapes.rect(p.x - 4, p.y + 4, 9, 1, COLOR.cyan);
-    shapes.rect(p.x - 4, p.y - 3, 1, 7, COLOR.cyan);
-    shapes.rect(p.x + 4, p.y - 3, 1, 7, COLOR.cyan);
-    shapes.rect(p.x - 1, p.y - 8, 3, 5, COLOR.mint);
-    shapes.rect(p.x - 1, p.y + 4, 3, 4, COLOR.mint);
-    shapes.rect(p.x - 7, p.y - 1, 4, 3, COLOR.mint);
-    shapes.rect(p.x + 4, p.y - 1, 4, 3, COLOR.mint);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.cyan);
-    return;
-  }
-
-  if (tower.definitionId === 'knot') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
-    shapes.line(p.x, p.y - 7, p.x + 7, p.y, 1, COLOR.green);
-    shapes.line(p.x + 7, p.y, p.x, p.y + 7, 1, COLOR.green);
-    shapes.line(p.x, p.y + 7, p.x - 7, p.y, 1, COLOR.cyan);
-    shapes.line(p.x - 7, p.y, p.x, p.y - 7, 1, COLOR.cyan);
-    shapes.rect(p.x - 3, p.y - 3, 7, 7, COLOR.black);
-    shapes.rect(p.x - 2, p.y - 2, 5, 1, COLOR.mint);
-    shapes.rect(p.x - 2, p.y + 2, 5, 1, COLOR.mint);
-    shapes.rect(p.x - 2, p.y - 1, 1, 3, COLOR.mint);
-    shapes.rect(p.x + 2, p.y - 1, 1, 3, COLOR.mint);
-    shapes.rect(p.x, p.y, 1, 1, COLOR.cyan);
-    return;
-  }
-
-  if (tower.definitionId === 'backwash') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
-    shapes.rect(p.x - 4, p.y + 3, 9, 2, COLOR.amber);
-    shapes.rect(p.x - 3, p.y, 7, 2, COLOR.cyan);
-    shapes.rect(p.x - 2, p.y - 3, 5, 2, COLOR.mint);
-    shapes.rect(p.x - 1, p.y - 7, 3, 4, COLOR.amber);
-    shapes.rect(p.x - 6, p.y + 1, 2, 5, COLOR.cyan);
-    shapes.rect(p.x + 5, p.y + 1, 2, 5, COLOR.cyan);
-    shapes.rect(p.x, p.y, 1, 1, COLOR.black);
-    return;
-  }
-
-  if (tower.definitionId === 'stasis') {
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
-    shapes.rect(p.x - 6, p.y - 6, 5, 2, COLOR.cyan);
-    shapes.rect(p.x + 2, p.y - 6, 5, 2, COLOR.cyan);
-    shapes.rect(p.x - 6, p.y + 5, 5, 2, COLOR.cyan);
-    shapes.rect(p.x + 2, p.y + 5, 5, 2, COLOR.cyan);
-    shapes.rect(p.x - 6, p.y - 4, 2, 9, COLOR.mint);
-    shapes.rect(p.x + 5, p.y - 4, 2, 9, COLOR.mint);
-    shapes.rect(p.x - 2, p.y - 4, 2, 9, COLOR.amber);
-    shapes.rect(p.x + 1, p.y - 4, 2, 9, COLOR.amber);
-    shapes.rect(p.x, p.y - 9, 1, 3, COLOR.mint);
-    return;
-  }
-
-  if (tower.definitionId === 'recall') {
-    shapes.rect(p.x - 6, p.y - 6, 13, 13, COLOR.black);
-    shapes.line(p.x - 6, p.y - 1, p.x - 2, p.y - 7, 2, COLOR.amber);
-    shapes.line(p.x - 2, p.y - 7, p.x + 5, p.y - 5, 2, COLOR.cyan);
-    shapes.line(p.x + 5, p.y - 5, p.x + 7, p.y + 2, 2, COLOR.cyan);
-    shapes.line(p.x + 7, p.y + 2, p.x + 2, p.y + 7, 2, COLOR.mint);
-    shapes.line(p.x + 2, p.y + 7, p.x - 5, p.y + 4, 2, COLOR.mint);
-    shapes.rect(p.x - 8, p.y - 3, 4, 5, COLOR.amber);
-    shapes.rect(p.x - 1, p.y - 2, 3, 5, COLOR.black);
-    shapes.rect(p.x, p.y - 1, 1, 3, COLOR.amber);
-    return;
-  }
-
-  if (tower.definitionId === 'dragnet') {
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
-    for (const offset of [-5, 0, 5]) {
-      shapes.line(p.x + offset, p.y - 6, p.x + offset, p.y + 6, 1, offset === 0 ? COLOR.mint : COLOR.cyan);
-      shapes.line(p.x - 6, p.y + offset, p.x + 6, p.y + offset, 1, offset === 0 ? COLOR.mint : COLOR.cyan);
-    }
-    shapes.rect(p.x - 8, p.y - 8, 4, 3, COLOR.green);
-    shapes.rect(p.x + 5, p.y - 8, 4, 3, COLOR.green);
-    shapes.rect(p.x - 8, p.y + 6, 4, 3, COLOR.green);
-    shapes.rect(p.x + 5, p.y + 6, 4, 3, COLOR.green);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.amber);
-    return;
-  }
-
-  if (tower.definitionId === 'singularity') {
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
-    shapes.line(p.x, p.y - 10, p.x + 9, p.y, 2, COLOR.green);
-    shapes.line(p.x + 9, p.y, p.x, p.y + 9, 2, COLOR.cyan);
-    shapes.line(p.x, p.y + 9, p.x - 9, p.y, 2, COLOR.green);
-    shapes.line(p.x - 9, p.y, p.x, p.y - 10, 2, COLOR.cyan);
-    shapes.line(p.x, p.y - 6, p.x + 5, p.y, 1, COLOR.mint);
-    shapes.line(p.x + 5, p.y, p.x, p.y + 5, 1, COLOR.mint);
-    shapes.line(p.x, p.y + 5, p.x - 5, p.y, 1, COLOR.mint);
-    shapes.line(p.x - 5, p.y, p.x, p.y - 6, 1, COLOR.mint);
-    shapes.rect(p.x - 2, p.y - 2, 5, 5, COLOR.black);
-    shapes.rect(p.x, p.y, 1, 1, COLOR.amber);
-    return;
-  }
-
-  if (tower.definitionId === 'orbit') {
-    shapes.rect(p.x - 6, p.y - 6, 13, 13, COLOR.black);
-    shapes.line(p.x, p.y - 8, p.x + 8, p.y, 1, COLOR.cyan);
-    shapes.line(p.x + 8, p.y, p.x, p.y + 8, 1, COLOR.green);
-    shapes.line(p.x, p.y + 8, p.x - 8, p.y, 1, COLOR.cyan);
-    shapes.line(p.x - 8, p.y, p.x, p.y - 8, 1, COLOR.green);
-    shapes.rect(p.x - 2, p.y - 2, 5, 5, COLOR.mint);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.black);
-    shapes.rect(p.x + 6, p.y - 3, 4, 4, COLOR.amber);
-    shapes.rect(p.x - 9, p.y + 3, 3, 3, COLOR.cyan);
-    shapes.rect(p.x + 7, p.y - 2, 1, 1, COLOR.mint);
-    return;
-  }
-
-  if (tower.definitionId === 'braid') {
-    shapes.rect(p.x - 7, p.y - 8, 15, 17, COLOR.black);
-    shapes.line(p.x - 7, p.y - 8, p.x + 4, p.y + 8, 2, COLOR.cyan);
-    shapes.line(p.x + 7, p.y - 8, p.x - 4, p.y + 8, 2, COLOR.green);
-    shapes.line(p.x - 4, p.y - 8, p.x + 7, p.y + 8, 1, COLOR.mint);
-    shapes.line(p.x + 4, p.y - 8, p.x - 7, p.y + 8, 1, COLOR.mint);
-    shapes.rect(p.x - 8, p.y - 9, 5, 3, COLOR.amber);
-    shapes.rect(p.x + 4, p.y - 9, 5, 3, COLOR.amber);
-    shapes.rect(p.x - 8, p.y + 7, 5, 3, COLOR.amber);
-    shapes.rect(p.x + 4, p.y + 7, 5, 3, COLOR.amber);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.black);
-    return;
-  }
-
-  if (tower.definitionId === 'breaker') {
-    shapes.rect(p.x - 8, p.y - 7, 17, 15, COLOR.black);
-    for (const offset of [-5, 0, 5]) {
-      shapes.line(p.x - 8 + Math.abs(offset), p.y + 7 + offset, p.x, p.y - 8 + offset, 2, offset === 0 ? COLOR.mint : COLOR.amber);
-      shapes.line(p.x, p.y - 8 + offset, p.x + 8 - Math.abs(offset), p.y + 7 + offset, 2, offset === 0 ? COLOR.mint : COLOR.amber);
-    }
-    shapes.rect(p.x - 2, p.y - 1, 5, 5, COLOR.cyan);
-    shapes.rect(p.x - 1, p.y, 3, 3, COLOR.black);
-    shapes.rect(p.x, p.y - 11, 1, 4, COLOR.red);
-    return;
-  }
-
-  if (tower.definitionId === 'crosswind') {
-    const wind = tower.controlGeometry || { dx: 1, dy: 0 };
-    const windLength = Math.hypot(wind.dx, wind.dy) || 1;
-    const dx = wind.dx / windLength;
-    const dy = wind.dy / windLength;
-    const px = -dy;
-    const py = dx;
-    shapes.rect(p.x - 6, p.y - 6, 13, 13, COLOR.black);
-    shapes.line(p.x - dx * 8, p.y - dy * 8, p.x + dx * 9, p.y + dy * 9, 2, COLOR.cyan);
-    shapes.line(p.x - px * 6, p.y - py * 6, p.x + px * 6, p.y + py * 6, 1, COLOR.green);
-    shapes.line(p.x + dx * 9, p.y + dy * 9, p.x + dx * 4 + px * 4, p.y + dy * 4 + py * 4, 2, COLOR.amber);
-    shapes.line(p.x + dx * 9, p.y + dy * 9, p.x + dx * 4 - px * 4, p.y + dy * 4 - py * 4, 2, COLOR.amber);
-    shapes.rect(p.x - 2, p.y - 2, 5, 5, COLOR.mint);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.black);
-    return;
-  }
-
-  if (tower.definitionId === 'breakwater') {
-    shapes.rect(p.x - 9, p.y - 7, 19, 15, COLOR.black);
-    shapes.rect(p.x - 9, p.y - 6, 19, 3, COLOR.amber);
-    shapes.rect(p.x - 7, p.y - 2, 15, 3, COLOR.cyan);
-    shapes.rect(p.x - 9, p.y + 2, 19, 3, COLOR.amber);
-    for (const postX of [-8, -2, 4, 9]) shapes.rect(p.x + postX, p.y - 8, 2, 17, COLOR.mint);
-    shapes.rect(p.x - 4, p.y - 1, 9, 3, COLOR.black);
-    shapes.rect(p.x - 1, p.y, 3, 1, COLOR.green);
-    shapes.rect(p.x - 7, p.y + 6, 15, 2, COLOR.cyan);
-    return;
-  }
-
-  if (tower.definitionId === 'tether') {
-    shapes.rect(p.x - 3, p.y - 3, 7, 1, override?.accent || COLOR.cyan);
-    shapes.rect(p.x - 3, p.y + 3, 7, 1, override?.accent || COLOR.cyan);
-    shapes.rect(p.x - 3, p.y - 2, 1, 5, accent);
-    shapes.rect(p.x + 3, p.y - 2, 1, 5, accent);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, override?.core || COLOR.mint);
-    shapes.rect(p.x, p.y - 7, 1, 4, core);
-    shapes.rect(p.x, p.y + 4, 1, 3, core);
-    shapes.rect(p.x - 6, p.y, 3, 1, core);
-    shapes.rect(p.x + 4, p.y, 3, 1, core);
-    return;
-  }
-
-  if (tower.definitionId === 'overclock') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
-    shapes.rect(p.x, p.y - 7, 1, 15, COLOR.green);
-    shapes.rect(p.x - 7, p.y, 15, 1, COLOR.green);
-    shapes.rect(p.x - 4, p.y - 5, 2, 4, COLOR.amber);
-    shapes.rect(p.x + 3, p.y - 5, 2, 4, COLOR.amber);
-    shapes.rect(p.x - 4, p.y + 2, 2, 4, COLOR.amber);
-    shapes.rect(p.x + 3, p.y + 2, 2, 4, COLOR.amber);
-    shapes.rect(p.x - 2, p.y - 2, 5, 5, COLOR.black);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, COLOR.mint);
-    shapes.rect(p.x, p.y - 1, 1, 1, COLOR.amber);
-    return;
-  }
-
-  if (tower.definitionId === 'forge') {
-    shapes.rect(p.x - 6, p.y - 5, 13, 11, COLOR.black);
-    shapes.rect(p.x - 5, p.y - 3, 11, 3, COLOR.amber);
-    shapes.rect(p.x - 3, p.y, 7, 3, COLOR.amber);
-    shapes.rect(p.x - 1, p.y + 3, 3, 4, COLOR.green);
-    shapes.rect(p.x - 4, p.y + 6, 9, 1, COLOR.green);
-    shapes.rect(p.x - 2, p.y - 7, 5, 4, COLOR.cyan);
-    shapes.rect(p.x - 1, p.y - 6, 3, 2, COLOR.black);
-    shapes.rect(p.x, p.y - 6, 1, 1, COLOR.mint);
-    return;
-  }
-
-  if (tower.definitionId === 'relay') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
-    shapes.rect(p.x, p.y - 8, 1, 15, COLOR.cyan);
-    shapes.rect(p.x - 5, p.y + 4, 11, 2, COLOR.green);
-    shapes.rect(p.x - 3, p.y + 2, 7, 2, COLOR.green);
-    shapes.rect(p.x - 1, p.y, 3, 2, COLOR.mint);
-    shapes.rect(p.x - 5, p.y - 6, 2, 2, COLOR.green);
-    shapes.rect(p.x + 4, p.y - 6, 2, 2, COLOR.green);
-    shapes.rect(p.x - 7, p.y - 3, 2, 2, COLOR.dimMint);
-    shapes.rect(p.x + 6, p.y - 3, 2, 2, COLOR.dimMint);
-    shapes.rect(p.x, p.y - 9, 1, 1, COLOR.amber);
-    return;
-  }
-
-  if (tower.definitionId === 'network') {
-    shapes.rect(p.x - 3, p.y - 3, 7, 7, COLOR.black);
-    shapes.rect(p.x, p.y - 5, 1, 11, override?.accent || COLOR.green);
-    shapes.rect(p.x - 5, p.y, 11, 1, override?.accent || COLOR.green);
-    shapes.rect(p.x - 3, p.y - 3, 2, 2, core);
-    shapes.rect(p.x + 2, p.y - 3, 2, 2, core);
-    shapes.rect(p.x - 3, p.y + 2, 2, 2, core);
-    shapes.rect(p.x + 2, p.y + 2, 2, 2, core);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, override?.core || COLOR.mint);
-    return;
-  }
-
-  shapes.rect(p.x - 3, p.y - 3, 7, 1, accent);
-  shapes.rect(p.x - 3, p.y + 3, 7, 1, accent);
-  shapes.rect(p.x - 3, p.y - 2, 1, 5, accent);
-  shapes.rect(p.x + 3, p.y - 2, 1, 5, accent);
-  shapes.rect(p.x - 1, p.y - 1, 3, 3, core);
-  shapes.rect(p.x, p.y - 6, 1, 3, COLOR.amber);
 }
 
 function defenseAreaCenterById(areaId) {
@@ -2559,11 +2268,42 @@ function drawDashedLink(from, to, color) {
   }
 }
 
+let perimeterIntel = [];
+let perimeterIntelTick = -1;
+function drawPerimeterIntel(snapshot, frame) {
+  if (!hasResearch(snapshot,36)) return;
+  if (snapshot.runTick < perimeterIntelTick || snapshot.runTick - perimeterIntelTick >= 30 || perimeterIntelTick < 0) {
+    perimeterIntelTick = snapshot.runTick;
+    const sources = snapshot.towers.filter((tower) => snapshot.towerCatalog.find((definition)=>definition.id===tower.definitionId)?.networkNode);
+    const seen = [];
+    for (let i=0;i<frame.count;i++) {
+      const hp=frame.hpById[frame.idByIndex[i]], x=frame.state[i*4], y=frame.state[i*4+1];
+      if(hp<2 || !sources.some((tower)=>Math.hypot(tower.x-x,tower.y-y)<=(tower.effectiveRange||170)*2)) continue;
+      seen.push({x,y,hp});
+    }
+    seen.sort((a,b)=>b.hp-a.hp||a.x-b.x||a.y-b.y);
+    perimeterIntel=[];
+    for(const enemy of seen) {
+      if(perimeterIntel.every((group)=>Math.hypot(group.x-enemy.x,group.y-enemy.y)>96)) perimeterIntel.push(enemy);
+      if(perimeterIntel.length===6) break;
+    }
+  }
+  for(const group of perimeterIntel) {
+    const p=project(group.x,group.y);
+    shapes.rect(p.x-6,p.y-6,13,1,COLOR.amber);
+    shapes.rect(p.x-6,p.y+6,13,1,COLOR.amber);
+    bitmapText.draw(`${Math.ceil(group.hp)} hp`,p.x+9,p.y-3,COLOR.amber,1);
+  }
+}
+
 function drawNetworkLinks(snapshot) {
   const definitions = new Map(snapshot.towerCatalog.map((definition) => [definition.id, definition]));
   const relayPairs = new Set();
+  const pulseClock = snapshot.runTick / AUTHORITY_TICK_RATE;
+  const relays = snapshot.towers.filter((tower) => isRelayForm(tower.definitionId) && tower.relayTargetAreaId);
+  const pulseSource = relays[Math.floor(pulseClock / 8) % Math.max(1, relays.length)];
   for (const source of snapshot.towers) {
-    if (source.definitionId !== 'relay' || !source.relayTargetAreaId) continue;
+    if (!isRelayForm(source.definitionId) || !source.relayTargetAreaId) continue;
     const pair = [source.areaId, source.relayTargetAreaId].sort().join(':');
     if (relayPairs.has(pair)) continue;
     relayPairs.add(pair);
@@ -2571,10 +2311,16 @@ function drawNetworkLinks(snapshot) {
     if (!targetCenter) continue;
     const from = project(source.x, source.y);
     const to = project(targetCenter.x, targetCenter.y);
-    drawDashedLink(from, to, COLOR.dimMint);
-    shapes.rect(from.x - 1, from.y - 1, 3, 3, COLOR.green);
-    shapes.rect(to.x - 2, to.y - 2, 5, 5, COLOR.black);
-    shapes.rect(to.x - 1, to.y - 1, 3, 3, COLOR.cyan);
+    const focused = source.id === selectedTowerId;
+    drawDashedLink(from, to, focused ? COLOR.dimMint : quietNetwork);
+    shapes.rect(to.x - 1, to.y - 1, 2, 2, focused ? COLOR.cyan : quietPulse);
+    // One two-pixel packet across the entire network, followed by six quiet seconds.
+    const phase = pulseClock % 8;
+    if (!reducedNetworkMotion.matches && source === pulseSource && phase < 2) {
+      const progress = phase / 2;
+      shapes.rect(from.x + (to.x - from.x) * progress,
+        from.y + (to.y - from.y) * progress, 2, 1, quietPulse);
+    }
   }
 
   const selected = snapshot.towers.find((tower) => tower.id === selectedTowerId);
@@ -2670,7 +2416,7 @@ function drawProjectiles(projectiles) {
     }
     const palette = ['tether', 'anchor', 'stasis', 'recall', 'dragnet'].includes(projectile.formId)
       ? { trail: COLOR.cyan, head: COLOR.mint }
-      : ['knot', 'singularity', 'orbit', 'braid'].includes(projectile.formId)
+      : ['knot', 'singularity', 'bond', 'braid'].includes(projectile.formId)
         ? { trail: COLOR.green, head: COLOR.cyan }
         : ['backwash', 'breaker', 'crosswind', 'breakwater'].includes(projectile.formId)
           ? { trail: COLOR.amber, head: COLOR.cyan }
@@ -2714,8 +2460,50 @@ function drawClusterPayloads(fields, runTick) {
   }
 }
 
+function drawReworkedCombat(snapshot) {
+  const state = snapshot.turretRework;
+  if (!state) return;
+  for (const shot of state.shots) {
+    const p = project(shot.x, shot.y);
+    const damage = ['pellet','nail','embedded','splinter','orbit'].includes(shot.type);
+    const color = damage ? COLOR.amber : shot.type === 'gravity_seed' ? COLOR.mint : COLOR.cyan;
+    const size = ['freeze_shell','gravity_seed','embedded'].includes(shot.type) ? 4 : 2;
+    shapes.rect(p.x-size/2,p.y-size/2,size,size,color);
+    if (shot.type === 'nail' || shot.type === 'splinter') shapes.line(p.x,p.y,p.x-shot.dx*7,p.y-shot.dy*7,1,color);
+    if (shot.type === 'chain') drawWorldRing(shot.x,shot.y,7,COLOR.cyan);
+  }
+  for (const v of state.visuals) {
+    if (v.x2 !== undefined) {
+      const p=project(v.x,v.y), q=project(v.x2,v.y2);
+      shapes.line(p.x,p.y,q.x,q.y,v.type === 'ray' ? 2 : 1,COLOR.cyan);
+      if(v.type === 'ray') shapes.rect(q.x-2,q.y-2,4,4,COLOR.mint);
+    } else {
+      drawWorldRing(v.x,v.y,v.radius,v.type === 'gravity' ? COLOR.dimMint : COLOR.cyan);
+      if(v.type === 'gravity') drawWorldRing(v.x,v.y,v.radius*((snapshot.runTick%30)/30),COLOR.cyan);
+    }
+  }
+  // Enemy positions come from the already received swarm presentation.
+  if (!state.chains.length) return;
+  const presentation = session.presentation();
+  const positions = new Map();
+  for(let i=0;i<presentation.count;i++) {
+    const id=presentation.ids?.[i] ?? presentation.idByIndex?.[i];
+    if(id !== undefined) positions.set(id,{x:presentation.state[i*4],y:presentation.state[i*4+1]});
+  }
+  for(const chain of state.chains) for(let i=1;i<chain.members.length;i++) {
+    const a=positions.get(chain.members[i-1].id), b=positions.get(chain.members[i].id);
+    if(a&&b) drawDashedLink(project(a.x,a.y),project(b.x,b.y),COLOR.cyan);
+  }
+}
+
 function drawControlFields(snapshot) {
   for (const field of snapshot.forceFields || []) {
+    if (field.kind === 'barricade') {
+      const a=project(field.x1,field.y1), b=project(field.x2,field.y2);
+      shapes.line(a.x,a.y,b.x,b.y,Math.max(2,field.thickness*2/camera.scale),COLOR.cyan);
+      shapes.line(a.x,a.y,b.x,b.y,1,COLOR.black);
+      continue;
+    }
     const persistent = field.persistentControl === true;
     const durationTicks = Math.max(1, field.expiresTick - field.createdTick);
     const phase = persistent
@@ -2727,15 +2515,17 @@ function drawControlFields(snapshot) {
 
     if (field.kind === 'stasis_zone') {
       const pulsePhase = (snapshot.runTick % field.periodTicks) / field.periodTicks;
+      const freezing = snapshot.runTick % field.periodTicks < field.durationTicks
+        && snapshot.runTick - snapshot.runTick % field.periodTicks >= field.activeFromTick;
       drawWorldRing(field.x, field.y, field.radius, COLOR.cyan);
-      drawWorldRing(field.x, field.y, field.radius * (0.22 + pulsePhase * 0.72), pulsePhase < 0.14 ? COLOR.mint : COLOR.dimMint);
+      drawWorldRing(field.x, field.y, field.radius * (0.22 + pulsePhase * 0.72), freezing ? COLOR.mint : COLOR.dimMint);
       const radiusPixels = Math.max(4, Math.round(field.radius / camera.scale));
       for (const angle of [0, Math.PI * 0.5, Math.PI, Math.PI * 1.5]) {
         const outerX = center.x + Math.round(Math.cos(angle) * radiusPixels);
         const outerY = center.y + Math.round(Math.sin(angle) * radiusPixels);
         const innerX = center.x + Math.round(Math.cos(angle) * (radiusPixels - 7));
         const innerY = center.y + Math.round(Math.sin(angle) * (radiusPixels - 7));
-        shapes.line(outerX, outerY, innerX, innerY, 2, pulsePhase < 0.14 ? COLOR.amber : COLOR.mint);
+        shapes.line(outerX, outerY, innerX, innerY, 2, freezing ? COLOR.amber : COLOR.mint);
       }
       shapes.rect(center.x - 1, center.y - 1, 3, 3, COLOR.amber);
       continue;
@@ -2796,6 +2586,23 @@ function drawControlFields(snapshot) {
       continue;
     }
 
+    if (field.kind === 'bond_zone') {
+      const active = snapshot.runTick % field.periodTicks < field.durationTicks
+        && snapshot.runTick - snapshot.runTick % field.periodTicks >= field.activeFromTick;
+      const selected = selectedTowerId === field.sourceTowerId;
+      if (selected || showAllRanges) drawWorldRing(field.x, field.y, field.radius, active ? COLOR.green : COLOR.dimMint);
+      // Sparse paired pips, not a web of thousands of opaque connections.
+      if (active) {
+        const pulseRadius = field.radius * (0.85 + phase * 0.3);
+        for (const side of [-1, 1]) {
+          const pip = project(field.x + side * pulseRadius * 0.65, field.y - pulseRadius * 0.55);
+          shapes.rect(pip.x - 2, pip.y, 2, 2, COLOR.green);
+          shapes.rect(pip.x + 1, pip.y, 2, 2, COLOR.mint);
+        }
+      }
+      continue;
+    }
+
     if (field.kind === 'vortex_force') {
       drawWorldRing(field.x, field.y, field.radius, phase < 0.75 ? COLOR.green : COLOR.dimMint);
       drawWorldRing(field.x, field.y, field.radius * 0.45, COLOR.cyan);
@@ -2853,6 +2660,30 @@ function drawControlFields(snapshot) {
         shapes.line(outsideA.x, outsideA.y, middle.x, middle.y, 1, COLOR.amber);
         shapes.line(outsideB.x, outsideB.y, middle.x, middle.y, 1, COLOR.amber);
       }
+      continue;
+    }
+
+    if (field.kind === 'splitter_force') {
+      const first = project(field.x1, field.y1);
+      const second = project(field.x2, field.y2);
+      drawDashedLink(first, second, COLOR.dimMint);
+      const normalX = -field.axisY;
+      const normalY = field.axisX;
+      for (const side of [-1, 1]) {
+        const start = project(field.x + field.axisX * side * 8, field.y + field.axisY * side * 8);
+        const endX = field.x + field.axisX * field.halfLength * side;
+        const endY = field.y + field.axisY * field.halfLength * side;
+        const end = project(endX, endY);
+        shapes.line(start.x, start.y, end.x, end.y, 1, COLOR.amber);
+        for (const wing of [-1, 1]) {
+          const tip = project(endX - field.axisX * side * 13 + normalX * wing * 9, endY - field.axisY * side * 13 + normalY * wing * 9);
+          shapes.line(end.x, end.y, tip.x, tip.y, 1, COLOR.mint);
+          const edgeStart = project(field.x1 + normalX * field.thickness * wing, field.y1 + normalY * field.thickness * wing);
+          const edgeEnd = project(field.x2 + normalX * field.thickness * wing, field.y2 + normalY * field.thickness * wing);
+          if (side === 1) drawDashedLink(edgeStart, edgeEnd, COLOR.dimMint);
+        }
+      }
+      shapes.rect(center.x - 1, center.y - 2, 3, 5, COLOR.cyan);
       continue;
     }
 
@@ -2942,38 +2773,42 @@ function drawControlFields(snapshot) {
   }
 }
 
+function drawSelectedBondLinks(snapshot, frame) {
+  if (!selectedTowerId || !frame.bondPartnerById) return;
+  const field = snapshot.forceFields?.find((candidate) => candidate.kind === 'bond_zone' && candidate.sourceTowerId === selectedTowerId);
+  if (!field || snapshot.runTick % field.periodTicks >= field.durationTicks) return;
+  const source = frame.bondSourceIds.indexOf(selectedTowerId);
+  if (source < 1) return;
+  let drawn = 0;
+  // A small visual sample only. Every valid pair still participates in combat.
+  for (let index = 0; index < frame.count && drawn < 24; index += 1) {
+    const id = frame.idByIndex[index];
+    const partner = frame.bondPartnerById[id];
+    if (partner <= id || frame.bondSourceById[id] !== source || frame.bondUntilById[id] <= frame.tick) continue;
+    const partnerIndex = frame.indexById[partner];
+    if (partnerIndex < 0) continue;
+    const a = project(frame.state[index * 4], frame.state[index * 4 + 1]);
+    const b = project(frame.state[partnerIndex * 4], frame.state[partnerIndex * 4 + 1]);
+    if ((a.x < 0 && b.x < 0) || (a.x >= logicalWidth && b.x >= logicalWidth)
+      || (a.y < HUD_TOP_HEIGHT && b.y < HUD_TOP_HEIGHT) || (a.y >= hudBottomY && b.y >= hudBottomY)) continue;
+    shapes.line(a.x, a.y, b.x, b.y, 1, COLOR.dimMint);
+    shapes.rect(a.x, a.y, 1, 1, COLOR.green);
+    shapes.rect(b.x, b.y, 1, 1, COLOR.green);
+    drawn += 1;
+  }
+}
+
 function addAttackFlash(event) {
   const payload = event.payload;
   const geometry = payload.geometry;
-  if (payload.sourceFormId === 'sweeper' && geometry?.type === 'line'
-    && Number.isFinite(geometry.sweepPhase)
-    && [geometry.x1, geometry.y1, geometry.x2, geometry.y2].every(Number.isFinite)) {
-    const existingIndex = attackFlashes.findIndex((candidate) => (
-      candidate.kind === 'sweep' && candidate.sourceTowerId === payload.sourceTowerId
-    ));
-    const existing = existingIndex >= 0 ? attackFlashes[existingIndex] : null;
-    const continuesSweep = existing && geometry.sweepPhase > existing.phase;
-    const flash = {
-      kind: 'sweep',
-      age: 0,
-      sourceTowerId: payload.sourceTowerId,
-      phase: geometry.sweepPhase,
-      x1: geometry.x1,
-      y1: geometry.y1,
-      x2: geometry.x2,
-      y2: geometry.y2,
-      previousX2: continuesSweep ? existing.x2 : null,
-      previousY2: continuesSweep ? existing.y2 : null,
-      width: geometry.width || 10
-    };
-    if (existingIndex >= 0) attackFlashes[existingIndex] = flash;
-    else attackFlashes.push(flash);
-  } else if (['laser', 'cutter', 'prism'].includes(payload.sourceFormId) && geometry?.type === 'line'
+  if (payload.sourceFormId === 'sweeper') return;
+  if (['laser', 'cutter', 'prism'].includes(payload.sourceFormId) && geometry?.type === 'line'
     && [geometry.x1, geometry.y1, geometry.x2, geometry.y2].every(Number.isFinite)) {
     attackFlashes.push({
       kind: 'laser',
       age: 0,
       formId: payload.sourceFormId,
+      beamIndex: geometry.beamIndex || 0,
       x1: geometry.x1,
       y1: geometry.y1,
       x2: geometry.x2,
@@ -3011,39 +2846,8 @@ function drawAttackFlashes(dt) {
   let write = 0;
   for (const flash of attackFlashes) {
     flash.age += dt;
-    if (flash.kind === 'sweep') {
-      if (flash.age >= 0.12) continue;
-      const from = project(flash.x1, flash.y1);
-      const to = project(flash.x2, flash.y2);
-      const previous = Number.isFinite(flash.previousX2) && Number.isFinite(flash.previousY2)
-        ? project(flash.previousX2, flash.previousY2)
-        : null;
-      const baseWidth = Math.max(2, Math.round(flash.width / camera.scale));
-      const hot = flash.age < 0.055;
-      if (previous) {
-        shapes.triangle(from, previous, to, hot ? COLOR.cyan : COLOR.dimMint);
-        shapes.line(previous.x, previous.y, to.x, to.y, 1, hot ? COLOR.mint : COLOR.cyan);
-      }
-      shapes.line(from.x, from.y, to.x, to.y, baseWidth + 2, hot ? COLOR.mint : COLOR.cyan);
-      shapes.line(from.x, from.y, to.x, to.y, Math.max(2, baseWidth - 5), hot ? COLOR.amber : COLOR.mint);
-      shapes.rect(from.x - 2, from.y - 2, 5, 5, hot ? COLOR.amber : COLOR.mint);
-      shapes.rect(to.x - 1, to.y - 1, 3, 3, hot ? COLOR.mint : COLOR.cyan);
-    } else if (flash.kind === 'laser') {
-      if (flash.age >= 0.16) continue;
-      const from = project(flash.x1, flash.y1);
-      const to = project(flash.x2, flash.y2);
-      const baseWidth = Math.max(1, Math.round(flash.width / camera.scale));
-      const hot = flash.age < 0.065;
-      if (flash.formId === 'prism') {
-        shapes.line(from.x, from.y, to.x, to.y, baseWidth + 1, hot ? COLOR.cyan : COLOR.mint);
-        shapes.line(from.x, from.y, to.x, to.y, Math.max(2, baseWidth - 5), hot ? COLOR.amber : COLOR.cyan);
-      } else {
-        shapes.line(from.x, from.y, to.x, to.y, baseWidth + (hot ? 6 : 3), hot ? COLOR.cyan : COLOR.dimMint);
-        shapes.line(from.x, from.y, to.x, to.y, baseWidth + 1, hot ? COLOR.mint : COLOR.cyan);
-        shapes.line(from.x, from.y, to.x, to.y, Math.max(2, baseWidth - 4), hot ? COLOR.amber : COLOR.mint);
-      }
-      shapes.rect(from.x - 3, from.y - 3, 7, 7, COLOR.amber);
-      shapes.rect(to.x - 2, to.y - 2, 5, 5, hot ? COLOR.mint : COLOR.cyan);
+    if (flash.kind === 'laser') {
+      if (!drawLaserPulse(shapes, COLOR, project, camera.scale, flash)) continue;
     } else if (flash.kind === 'rocket') {
       if (flash.age >= 0.3) continue;
       const progress = Math.min(1, flash.age / 0.16);
@@ -3090,7 +2894,7 @@ function drawAttackFlashes(dt) {
       const center = project(flash.x, flash.y);
       shapes.rect(center.x - 4, center.y, 9, 1, COLOR.green);
       shapes.rect(center.x, center.y - 4, 1, 9, COLOR.green);
-      bitmapText.draw(`+${flash.credits}`, center.x + 7, center.y - 10 - Math.round(phase * 5), COLOR.amber, 1);
+      bitmapText.draw(`+${compactMetric(flash.credits)}`, center.x + 7, center.y - 10 - Math.round(phase * 5), COLOR.amber, 1);
     }
     attackFlashes[write++] = flash;
   }
@@ -3118,7 +2922,7 @@ function drawImpactBursts(dt) {
     const radius = 1 + Math.floor(burst.age * 38);
     const alternate = burst.seed & 1;
     const anchorFamily = ['tether', 'anchor', 'stasis', 'recall', 'dragnet'].includes(burst.sourceFormId);
-    const knotFamily = ['knot', 'singularity', 'orbit', 'braid'].includes(burst.sourceFormId);
+    const knotFamily = ['knot', 'singularity', 'bond', 'braid'].includes(burst.sourceFormId);
     const color = anchorFamily
       ? (burst.sourceFormId === 'recall' ? COLOR.amber : burst.age < 0.1 ? COLOR.cyan : COLOR.green)
       : knotFamily
@@ -3214,6 +3018,15 @@ function strikeAttackForDisplay(tower, definition) {
 
 function drawStrikePointPattern(tower, definition, point, color) {
   const attack = strikeAttackForDisplay(tower, definition);
+  if (['hitscan','persistent'].includes(attack.delivery.type)) {
+    const from=project(tower.x,tower.y),range=attack.range;
+    const angle=Math.atan2(point.y-tower.y,point.x-tower.x);
+    const count=attack.volley.count||1;
+    const angles=attack.delivery.motion==='sweep' ? [-.5,0,.5].map((offset)=>angle+offset*attack.delivery.sweepRadians)
+      : Array.from({length:count},(_,i)=>angle+(i-(count-1)/2)*.12);
+    for(const theta of angles) drawDashedLink(from,project(tower.x+Math.cos(theta)*range,tower.y+Math.sin(theta)*range),color);
+    return;
+  }
   const impacts = strikeImpactPoints(tower, attack, point);
   const radius = Math.max(1, attack.geometry?.radius || 1);
   const towerPoint = project(tower.x, tower.y);
@@ -3230,7 +3043,7 @@ function drawStrikePointPattern(tower, definition, point, color) {
 }
 
 function drawStrikeTargetOverlay(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = weaponView(snapshot, tower);
   if (!supportsStrikePoint(definition?.attack)) return;
   const range = tower.effectiveRange || definition.range || 0;
   drawWorldRing(tower.x, tower.y, range, COLOR.cyan);
@@ -3262,7 +3075,7 @@ function drawControlDirectionArrow(tower, direction, length, color) {
 }
 
 function drawControlGeometryShape(tower, definition, geometry, color) {
-  const control = definition?.control;
+  const control = tower.effectiveControl || definition?.control;
   if (!control || !geometry) return;
   const from = project(tower.x, tower.y);
   if (geometry.kind === 'direction') {
@@ -3303,7 +3116,7 @@ function drawControlGeometryShape(tower, definition, geometry, color) {
 }
 
 function drawControlGeometryOverlay(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = weaponView(snapshot, tower);
   const control = definition?.control;
   if (!control || control.input === 'none') return;
   const range = tower.effectiveRange || definition.range || 0;
@@ -3332,11 +3145,18 @@ function drawControlGeometryOverlay(snapshot, tower) {
   const dx = world.x - tower.x;
   const dy = world.y - tower.y;
   const distance = Math.hypot(dx, dy);
-  const valid = distance <= range && (control.input !== 'direction' || distance > 0.001);
   const geometry = control.input === 'point'
     ? { kind: 'point', x: world.x, y: world.y }
     : { kind: 'direction', dx, dy };
-  drawControlGeometryShape(tower, definition, geometry, valid ? COLOR.mint : COLOR.red);
+  const normalized = normalizeControlGeometry(definition, tower, geometry, currentMap);
+  const valid = distance <= range && Boolean(normalized);
+  drawControlGeometryShape(tower, definition, normalized || geometry, valid ? COLOR.mint : COLOR.red);
+}
+
+function towerRingRange(tower, definition) {
+  // A tower-centred passive has an effect radius, not a weapon/placement range.
+  if (definition?.control?.input === 'none' && definition.control.radius) return definition.control.radius;
+  return tower?.effectiveRange || definition?.range;
 }
 
 function drawBuildState(snapshot) {
@@ -3344,14 +3164,14 @@ function drawBuildState(snapshot) {
   if (showAllRanges) {
     for (const tower of snapshot.towers) {
       const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
-      const range = tower.effectiveRange || definition?.range;
+      const range = towerRingRange(tower, definition);
       if (range) drawWorldRing(tower.x, tower.y, range, COLOR.dimMint);
     }
   }
   if (selected) {
     const p = project(selected.x, selected.y);
     const selectedDefinition = snapshot.towerCatalog.find((candidate) => candidate.id === selected.definitionId);
-    const selectedRange = selected.effectiveRange || selectedDefinition?.range;
+    const selectedRange = towerRingRange(selected, selectedDefinition);
     if (towerMenuMode === 'relay') drawRelayTargetOverlay(snapshot, selected);
     else if (towerMenuMode === 'strike') drawStrikeTargetOverlay(snapshot, selected);
     else if (towerMenuMode === 'control') drawControlGeometryOverlay(snapshot, selected);
@@ -3377,23 +3197,50 @@ function drawBuildState(snapshot) {
       });
     }
   }
-  if (selected && towerMenuMode && (sessionMode === 'game' || ['relay', 'strike', 'control'].includes(towerMenuMode))) drawTowerMenu(snapshot, selected);
+  if (selected && towerMenuMode && (sessionMode === 'game' || ['arsenal','reactor'].includes(selected.definitionId) || isRelayForm(selected.definitionId) || ['relay', 'strike', 'control'].includes(towerMenuMode))) drawTowerMenu(snapshot, selected);
   if (!placementArmed || pointer.y <= HUD_TOP_HEIGHT || pointer.y >= hudBottomY) return;
   const placementDefinitionId = bulkPlacementDefinitionId || TOWER_DEFINITION_ID;
   const placementDefinition = snapshot.towerCatalog.find((candidate) => candidate.id === placementDefinitionId);
   const quote = towerBuildQuote(snapshot.towerCatalog, placementDefinitionId);
   const world = unproject(pointer.x, pointer.y);
   const economy = snapshot.economyByPlayer[session.playerId];
-  const canPlace = Boolean(findDefenseAreaAt(currentMap, world.x, world.y)) && (economy?.credits || 0) >= (quote?.cost ?? Infinity);
-  if (placementDefinition) drawWorldRing(world.x, world.y, placementDefinition.range, canPlace ? COLOR.dimMint : COLOR.red);
+  const socketHost = snapshot.towers.find((tower) => {
+    const point = socketPoint(snapshot, currentMap, tower);
+    return point && Math.hypot(point.x - world.x, point.y - world.y) <= 10;
+  });
+  const areaId = socketHost?.areaId || findDefenseAreaAt(currentMap, world.x, world.y);
+  const price = quote ? purchaseCost(snapshot, areaId, quote.cost) : Infinity;
+  const snappedPoint = socketHost ? socketPoint(snapshot, currentMap, socketHost) : world;
+  const clear = towerPlacementClear(snapshot.towers, snappedPoint.x, snappedPoint.y);
+  const canPlace = clear && Boolean(areaId) && (!socketHost || (socketHost.ownerId === session.playerId && placementDefinitionId !== 'hardpoint' && !snapshot.towers.some((tower) => tower.socketHostId === socketHost.id))) && (sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) >= price;
+  drawWorldRing(snappedPoint.x, snappedPoint.y, MIN_TOWER_SPACING / 2, clear ? COLOR.dimMint : COLOR.red);
+  bitmapText.draw(clear ? `${compactMetric(price)} cr` : 'too close', pointer.x + 12, pointer.y + 12, canPlace ? COLOR.amber : COLOR.red, 1);
+  if (placementDefinition) drawWorldRing(world.x, world.y, towerRingRange(null, placementDefinition), canPlace ? COLOR.dimMint : COLOR.red);
   drawTower(
-    { ...world, definitionId: placementDefinitionId },
+    { ...snappedPoint, definitionId: placementDefinitionId },
     { accent: canPlace ? COLOR.green : COLOR.red, core: canPlace ? COLOR.cyan : COLOR.red }
   );
 }
 
 function drawTestFieldWorld(snapshot) {
-  if (sessionMode !== 'test') return;
+  if (sessionMode !== 'test') {
+    for (const source of currentMap.spawnSources) {
+      const remaining = source.unlockSeconds - snapshot.runTick / AUTHORITY_TICK_RATE;
+      if (remaining > 10) continue;
+      const p = project(source.x, source.y);
+      if (p.x < -30 || p.x > logicalWidth + 30 || p.y < HUD_TOP_HEIGHT || p.y > hudBottomY) continue;
+      const color = remaining > 0 ? COLOR.amber : COLOR.red;
+      const pulse = Math.floor(snapshot.runTick / 8) % 4;
+      for (const side of [-1, 1]) {
+        shapes.rect(p.x + side * (8 + pulse), p.y - 12, 2, 24, color);
+        shapes.rect(p.x + side * 8 - 3, p.y - 14, 7, 2, color);
+        shapes.rect(p.x + side * 8 - 3, p.y + 12, 7, 2, color);
+      }
+      shapes.rect(p.x - 2, p.y - 7 + pulse * 3, 4, 5, COLOR.amber);
+      bitmapText.draw(remaining > 0 ? `rift ${Math.ceil(remaining)}s` : 'rift // live', p.x - 30, p.y + 19, color, 1);
+    }
+    return;
+  }
   const active = new Set(snapshot.test.activeSpawnSourceIds || []);
   const overrides = snapshot.test.spawnSourceOverrides || {};
   for (const source of currentMap.spawnSources) {
@@ -3414,11 +3261,12 @@ function drawTestFieldWorld(snapshot) {
 }
 
 function drawButton(id, label, x, y, width, active, color, action) {
-  shapes.rect(x, y, width, 13, COLOR.black);
+  const hovered = pointInside(x, y, width, 13);
+  shapes.rect(x, y, width, 13, hovered ? [0.025, 0.10, 0.10, 1] : COLOR.black);
   shapes.rect(x, y, width, 1, active ? color : COLOR.dimMint);
   shapes.rect(x, y + 12, width, 1, active ? color : COLOR.dimMint);
   if (active) shapes.rect(x, y + 1, 2, 11, color);
-  bitmapText.draw(label, x + 4, y + 3, active ? color : COLOR.ink, 1);
+  bitmapText.draw(clippedUiText(label, width - 8), x + 4, y + 3, active || hovered ? color : COLOR.ink, 1);
   registerHitbox(id, x, y, width, 13, { action });
 }
 
@@ -3432,7 +3280,7 @@ function towerAccent(definitionId) {
   if (['laser', 'cutter', 'prism', 'sweeper'].includes(definitionId)) return COLOR.cyan;
   if (definitionId === 'tether') return COLOR.cyan;
   if (['anchor', 'stasis', 'recall', 'dragnet'].includes(definitionId)) return COLOR.cyan;
-  if (['knot', 'singularity', 'orbit', 'braid'].includes(definitionId)) return COLOR.green;
+  if (['knot', 'singularity', 'bond', 'braid'].includes(definitionId)) return COLOR.green;
   if (['backwash', 'breaker', 'crosswind', 'breakwater'].includes(definitionId)) return COLOR.amber;
   if (definitionId === 'network') return COLOR.green;
   if (definitionId === 'overclock') return COLOR.amber;
@@ -3447,7 +3295,8 @@ function drawTechPanel(x, y, width, height, accent) {
   shapes.rect(x + 3, y + height - 1, width - 6, 1, COLOR.dimMint);
   shapes.rect(x, y + 3, 1, height - 6, COLOR.dimMint);
   shapes.rect(x + width - 1, y + 3, 1, height - 6, COLOR.dimMint);
-  shapes.rect(x + 3, y, Math.min(34, width - 6), 1, accent);
+  shapes.rect(x + 3, y, Math.min(34, width - 6), 2, accent);
+  for (let i = 0; i < 3; i++) shapes.rect(x + width - 20 + i * 5, y, 3, 2, accent);
   shapes.rect(x, y + 3, 3, 1, accent);
   shapes.rect(x + width - 3, y + height - 1, 3, 1, accent);
   shapes.rect(x + width - 1, y + height - 4, 1, 3, accent);
@@ -3484,6 +3333,7 @@ function drawBuildCatalog(snapshot) {
   drawButton('catalog_page_core', 'core', x + 102, y + 4, 34, buildCatalogPageId === 'core', COLOR.mint, () => { buildCatalogPageId = 'core'; });
   drawButton('catalog_page_assault', 'assault iii', x + 140, y + 4, 70, buildCatalogPageId === 'assault', COLOR.amber, () => { buildCatalogPageId = 'assault'; });
   drawButton('catalog_page_tether', 'tether iii', x + 214, y + 4, 66, buildCatalogPageId === 'tether', COLOR.cyan, () => { buildCatalogPageId = 'tether'; });
+  drawButton('catalog_page_network', 'network iii', x + 284, y + 4, 70, buildCatalogPageId === 'network', COLOR.green, () => { buildCatalogPageId = 'network'; });
   drawButton('build_catalog_close', sessionMode === 'test' ? 'u close' : 'b close', x + width - 50, y + 4, 43, false, COLOR.cyan, closeBuildCatalog);
 
   const innerX = x + 7;
@@ -3496,8 +3346,8 @@ function drawBuildCatalog(snapshot) {
       const definition = snapshot.towerCatalog.find((candidate) => candidate.id === entry.definitionId);
       const quote = towerBuildQuote(snapshot.towerCatalog, entry.definitionId);
       if (!definition || !quote) return;
-      const affordable = sessionMode === 'test' || economy.credits >= quote.cost;
-      const pricedLabel = `${entry.key} ${definition.label} ${quote.cost}`;
+      const affordable = sessionMode === 'test' || snapshot.dev?.infiniteMoney || economy.credits >= quote.cost;
+      const pricedLabel = `${entry.key} ${definition.label} ${compactMetric(quote.cost)}`;
       const label = sessionMode === 'test'
         ? `${entry.key} ${definition.label}`
         : pricedLabel.length * 6 <= buttonWidth - 8
@@ -3519,7 +3369,7 @@ function drawBuildCatalog(snapshot) {
   });
   bitmapText.draw(
     sessionMode === 'test'
-      ? 'loads selected test tower // tab changes page'
+      ? 'loads selected test tower // tab changes page // n opens network iii'
       : width < 390
         ? 'pick once // click many // right click ends'
         : 'valid nebula clicks keep building // right click cancels',
@@ -3718,9 +3568,8 @@ function drawMapCard(map, index, x, y, width, height) {
 
 function drawMapSelection(snapshot) {
   const maps = playableMaps();
-  const wide = logicalWidth >= 500 && logicalHeight >= 202;
-  const width = Math.min(wide ? 570 : 300, logicalWidth - 12);
-  const height = Math.min(wide ? 190 : 176, logicalHeight - 12);
+  const width = Math.min(430, logicalWidth - 12);
+  const height = Math.min(140 + maps.length * 23, logicalHeight - 12);
   const x = Math.round((logicalWidth - width) * 0.5);
   const y = Math.round((logicalHeight - height) * 0.5);
   drawTechPanel(x, y, width, height, COLOR.amber);
@@ -3728,23 +3577,17 @@ function drawMapSelection(snapshot) {
   const runIsLive = gameHasEnteredGameplay && snapshot.phase === 'running';
   const warning = runIsLive
     ? 'live run keeps moving // deployment wipes it'
-    : snapshot.phase === 'running' ? 'saved run held // deployment wipes it' : 'one ruleset // three different flows';
+    : snapshot.phase === 'running' ? 'saved run held // deployment wipes it' : 'choose a flow // fresh seed per run';
   bitmapText.draw(warning, x + 16, y + 27, snapshot.phase === 'running' ? COLOR.red : COLOR.dimMint, 1);
 
-  if (wide) {
-    const gap = 6;
-    const cardWidth = Math.floor((width - 32 - gap * 2) / 3);
-    maps.forEach((map, index) => drawMapCard(map, index, x + 16 + index * (cardWidth + gap), y + 39, cardWidth, 104));
-  } else {
-    maps.forEach((map, index) => {
-      const selected = map.id === selectedRunMapId;
-      const label = `${index + 1} ${map.label} // ${map.defenseAreas.length}`;
-      drawMenuButton(`map_${map.id}`, label, x + 16, y + 39 + index * 21, width - 32, selected ? COLOR.mint : COLOR.cyan, () => selectRunMap(map.id), selected);
-    });
-    const selected = maps.find((map) => map.id === selectedRunMapId) || maps[0];
-    bitmapText.draw(selected?.menuLines[0] || '', x + 18, y + 105, COLOR.mint, 1);
-    bitmapText.draw(selected?.menuLines[1] || '', x + 18, y + 117, COLOR.dimMint, 1);
-  }
+  const mapRowHeight=height>=210?23:17, mapRowTop=height>=210?40:35;
+  maps.forEach((map,index) => {
+    const selected=map.id===selectedRunMapId;
+    drawMenuButton(`map_${map.id}`,`${index+1} ${map.label}`,x+16,y+mapRowTop+index*mapRowHeight,width-32,selected?COLOR.mint:COLOR.cyan,()=>selectRunMap(map.id),selected);
+  });
+  const selected=maps.find((map)=>map.id===selectedRunMapId);
+  const descriptionY = mapRowTop + maps.length * mapRowHeight + 4;
+  if(descriptionY < height - 50) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+descriptionY,COLOR.ink,1);
 
   const buttonY = y + height - 38;
   const backWidth = 76;
@@ -3760,7 +3603,7 @@ function drawMapSelection(snapshot) {
     deploySelectedMap,
     true
   );
-  bitmapText.draw('1/2/3 select // enter deploys', x + 17, y + height - 16, COLOR.ink, 1);
+  bitmapText.draw(`1-${maps.length} select // enter deploys`, x + 17, y + height - 16, COLOR.ink, 1);
 }
 
 function resetTestFieldFromMenu() {
@@ -3770,10 +3613,31 @@ function resetTestFieldFromMenu() {
   setStatus('test field reset');
 }
 
+function drawDevTools(snapshot) {
+  uiHitboxes.length = 0;
+  const width = Math.min(300, logicalWidth - 20), height = 212;
+  const x = (logicalWidth - width) / 2, y = (logicalHeight - height) / 2;
+  const host = session.playerId === snapshot.hostPlayerId;
+  drawTechPanel(x, y, width, height, COLOR.amber);
+  bitmapText.draw('dev tools // f2', x + 12, y + 10, COLOR.amber, 1);
+  bitmapText.draw(host ? 'changes apply to this run' : 'host controls // inspect only', x + 12, y + 25, COLOR.ink, 1);
+  const options = [['infiniteMoney', 'infinite money'], ['infiniteHealth', 'infinite base health'], ['paused', 'pause simulation'], ['stopSpawns', 'stop new spawns']];
+  options.forEach(([option, label], index) => {
+    const enabled = Boolean(snapshot.dev?.[option]);
+    drawMenuButton(`dev_${option}`, `${enabled ? '[on]' : '[off]'} ${label}`, x + 12, y + 42 + index * 22, width - 24,
+      enabled ? COLOR.amber : COLOR.ink, () => { if (host) session.send(COMMAND.DEV_TOOLS, { option, enabled: !enabled }); }, enabled);
+  });
+  drawMenuButton('dev_clear', 'clear enemies // no rewards', x + 12, y + 134, width - 24, COLOR.red,
+    () => { if (host) session.send(COMMAND.DEV_TOOLS, { action: 'clearEnemies' }); });
+  drawMenuButton('dev_heal', 'heal base / revive', x + 12, y + 156, width - 24, COLOR.mint,
+    () => { if (host) session.send(COMMAND.DEV_TOOLS, { action: 'healBase' }); });
+  drawMenuButton('dev_close', 'close // f2 or esc', x + 12, y + 184, width - 24, COLOR.cyan, () => { devToolsOpen = false; });
+}
+
 function drawEscapeMenu(snapshot) {
-  const width = Math.min(264, logicalWidth - 20);
+  const width = Math.min(escapeMenuPage === 'help' ? 288 : 264, logicalWidth - 20);
   const networkActive = Boolean(session.networkRole);
-  const height = Math.min(networkActive ? 179 : 158, logicalHeight - 16);
+  const height = Math.min(escapeMenuPage === 'help' ? 222 : networkActive ? 200 : 179, logicalHeight - 16);
   const x = Math.round((logicalWidth - width) * 0.5);
   const y = Math.round((logicalHeight - height) * 0.5);
   drawTechPanel(x, y, width, height, COLOR.cyan);
@@ -3781,6 +3645,27 @@ function drawEscapeMenu(snapshot) {
   shapes.rect(x + width - 10, y + 8, 2, 22, COLOR.red);
   const buttonX = x + 17;
   const buttonWidth = width - 34;
+
+  if (escapeMenuPage === 'help') {
+    bitmapText.draw('field guide', x + 18, y + 10, COLOR.cyan, 2);
+    const rows = [
+      'hp: red 1 / orange 2 / yellow 3',
+      'build in nebulae. each hp pays 1 credit.',
+      'upgrades replace a tower permanently.',
+      sessionMode === 'test' ? 'b place support // drag towers to move' : '1 place frame // click tower to manage',
+      sessionMode === 'test' ? 'u catalog // space pause // . step' : 'b build catalog // tab next page',
+      'q / e targeting // a aim or control',
+      'drag empty space to pan // wheel zoom',
+      'right click cancels // g shows ranges',
+      'k kill rate // t test field // ? help',
+      'solo autosaves on this browser.',
+      'menus and test field do not pause solo.'
+    ];
+    const lineHeight = Math.min(14, Math.floor((height - 69) / rows.length));
+    rows.forEach((line, i) => bitmapText.draw(line, x + 18, y + 34 + i * lineHeight, i === 10 ? COLOR.red : COLOR.ink, 1));
+    drawMenuButton('help_back', 'back // esc', buttonX, y + height - 29, buttonWidth, COLOR.cyan, closeEscapeOptions, true);
+    return;
+  }
 
   if (escapeMenuPage === 'options') {
     bitmapText.draw('gameplay options', x + 18, y + 10, COLOR.cyan, 2);
@@ -3803,19 +3688,21 @@ function drawEscapeMenu(snapshot) {
     return;
   }
 
+  const compact = height < (networkActive ? 200 : 179);
+  const rowY = (index) => y + (compact ? 43 : 58) + index * (compact ? 18 : 21);
   bitmapText.draw('command interrupt', x + 18, y + 10, COLOR.cyan, 2);
   bitmapText.draw('simulation is not paused', x + 18, y + 31, COLOR.red, 1);
   const seconds = Math.floor(snapshot.runTick / AUTHORITY_TICK_RATE);
   const runLabel = networkActive ? `coop ${multiplayerState.roomCode?.toLowerCase() || 'link'}` : sessionMode;
-  bitmapText.draw(`${runLabel} // ${seconds}s // ${snapshot.swarm.activeEnemies} hostiles`, x + 18, y + 43, COLOR.ink, 1);
-  drawMenuButton('escape_resume', 'resume // esc', buttonX, y + 58, buttonWidth, COLOR.mint, resumeSession, true);
+  if (!compact) bitmapText.draw(`${runLabel} // ${seconds}s // ${compactMetric(snapshot.swarm.activeEnemies)} hostiles`, x + 18, y + 43, COLOR.ink, 1);
+  drawMenuButton('escape_resume', 'resume // esc', buttonX, rowY(0), buttonWidth, COLOR.mint, resumeSession, true);
   if (networkActive) {
     const canContinue = snapshot.phase === 'reconnect_wait' && snapshot.hostPlayerId === session.playerId;
     drawMenuButton(
       'escape_coop_status',
       canContinue ? 'continue without pilot' : `coop status // ${multiplayerState.roomCode?.toLowerCase() || 'linked'}`,
       buttonX,
-      y + 79,
+      rowY(1),
       buttonWidth,
       canContinue ? COLOR.amber : COLOR.green,
       canContinue
@@ -3824,17 +3711,18 @@ function drawEscapeMenu(snapshot) {
       canContinue
     );
   } else if (sessionMode === 'game') {
-    drawMenuButton('escape_restart', 'new run // choose map', buttonX, y + 79, buttonWidth, COLOR.amber, () => openMapSelection('escape'));
+    drawMenuButton('escape_restart', 'new run // choose map', buttonX, rowY(1), buttonWidth, COLOR.amber, () => openMapSelection('escape'));
   } else {
-    drawMenuButton('escape_test_reset', 'clear test field', buttonX, y + 79, buttonWidth, COLOR.amber, resetTestFieldFromMenu);
+    drawMenuButton('escape_test_reset', 'clear test field', buttonX, rowY(1), buttonWidth, COLOR.amber, resetTestFieldFromMenu);
   }
-  drawMenuButton('escape_options', 'gameplay options', buttonX, y + 100, buttonWidth, COLOR.cyan, openEscapeOptions);
-  drawMenuButton('escape_main', 'main menu', buttonX, y + 121, buttonWidth, COLOR.cyan, returnToMainMenu);
+  drawMenuButton('escape_options', 'gameplay options', buttonX, rowY(2), buttonWidth, COLOR.cyan, openEscapeOptions);
+  drawMenuButton('escape_help', 'field guide // ?', buttonX, rowY(3), buttonWidth, COLOR.green, () => { escapeMenuPage = 'help'; });
+  drawMenuButton('escape_main', 'main menu', buttonX, rowY(4), buttonWidth, COLOR.cyan, returnToMainMenu);
   if (networkActive) {
-    drawMenuButton('escape_leave_coop', 'leave coop', buttonX, y + 142, buttonWidth, COLOR.red, () => cancelMultiplayer(true));
-    bitmapText.draw('leave // reconnect or split holdings', x + 18, y + 165, COLOR.dimMint, 1);
+    drawMenuButton('escape_leave_coop', 'leave coop', buttonX, rowY(5), buttonWidth, COLOR.red, () => cancelMultiplayer(true));
+    bitmapText.draw('leave // reconnect or split holdings', x + 18, y + height - 14, COLOR.dimMint, 1);
   } else {
-    bitmapText.draw('no pause means no cheese. sorry.', x + 18, y + 143, COLOR.dimMint, 1);
+    bitmapText.draw('no pause means no cheese. sorry.', x + 18, y + height - 14, COLOR.dimMint, 1);
   }
 }
 
@@ -3871,23 +3759,27 @@ function relayCandidateAreas(snapshot, tower) {
   if (!tower) return [];
   const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
   const linkRange = Math.max(0, definition?.linkRange || 0);
-  if (definition?.id !== 'relay' || linkRange <= 0) return [];
+  if (!isRelayForm(definition?.id) || linkRange <= 0) return [];
   return currentMap.defenseAreas.filter((area) => (
     area.id !== tower.areaId && defenseAreaField(area, tower.x, tower.y, linkRange) <= 0
   ));
 }
 
 function openRelayTargetMenu(snapshot, tower) {
-  if (tower?.definitionId !== 'relay') return;
+  if (!isRelayForm(tower?.definitionId)) return;
   towerMenuMode = 'relay';
   const count = relayCandidateAreas(snapshot, tower).length;
   setStatus(count ? 'click a highlighted nebula' : 'no nebulas inside link range');
 }
 
+function weaponView(snapshot, tower) {
+  return snapshot.towerCatalog.find((candidate) => candidate.id === (tower?.echoWeaponId || tower?.definitionId));
+}
+
 function openStrikeTargetMenu(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+  const definition = weaponView(snapshot, tower);
   if (!tower || !supportsStrikePoint(definition?.attack)) {
-    setStatus('only rocket towers can set aim');
+    setStatus('tower cannot aim manually');
     return;
   }
   towerMenuMode = 'strike';
@@ -3895,8 +3787,8 @@ function openStrikeTargetMenu(snapshot, tower) {
 }
 
 function clearSelectedStrikePoint() {
-  const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-  const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+    const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
+  const definition = weaponView(sessionSnapshot, tower);
   if (!tower || !supportsStrikePoint(definition?.attack)) {
     setStatus('tower has no strike point');
     return;
@@ -3906,14 +3798,14 @@ function clearSelectedStrikePoint() {
 }
 
 function openControlGeometryMenu(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+  const definition = weaponView(snapshot, tower);
   const input = definition?.control?.input;
   if (!tower || !input || input === 'none') {
     setStatus('tower has no editable control');
     return;
   }
   towerMenuMode = 'control';
-  setStatus(input === 'line' ? 'click-drag inside range' : input === 'point' ? 'click to place the field' : 'click to choose direction');
+  setStatus(input === 'line' ? 'click-drag inside range' : input === 'point' ? 'click to place the field' : definition.control.type === 'aim' ? 'click to set shotgun facing' : 'choose left or right // no upstream');
 }
 
 function resetSelectedControlGeometry() {
@@ -3933,44 +3825,174 @@ function sellSelectedTower() {
   setStatus('sell command sent');
 }
 
-function compactMetric(value) {
-  const amount = Math.max(0, Math.floor(value || 0));
-  if (amount >= 1000000) return `${Math.floor(amount / 100000) / 10}m`;
-  if (amount >= 1000) return `${Math.floor(amount / 100) / 10}k`;
-  return String(amount);
+
+let researchPage = 0;
+let researchSelection = null;
+let researchDetailPage = 0;
+function openResearchStation(tower) {
+  selectedTowerId = tower.id;
+  towerMenuMode = 'research';
+  researchPage = 0; researchSelection = null; researchDetailPage = 0;
+}
+function stationItems(snapshot, tower) {
+  if (tower.definitionId === 'arsenal') return RESEARCH_NODES.map((node) => ({ ...node,
+    owned: hasResearch(snapshot,node.id), locked: node.parent !== null && !hasResearch(snapshot,node.parent),
+    cost: hasResearch(snapshot,node.id) ? 0 : node.cost }));
+  return REACTOR_CATEGORIES.map((category) => ({ ...category,
+    rank: reactorRank(snapshot,category.id), cost: reactorQuote(snapshot,category.id)?.cost ?? null }));
+}
+function purchaseStationItem(tower, item) {
+  if (tower.ownerId !== session.playerId) return setStatus('only the station owner can buy');
+  if (item.owned) return setStatus('already researched');
+  if (item.locked) return setStatus('unlock parent research first');
+  if (item.cost === null) return setStatus('upgrade capped');
+  session.send(tower.definitionId === 'arsenal' ? COMMAND.RESEARCH_PURCHASE : COMMAND.REACTOR_PURCHASE,
+    tower.definitionId === 'arsenal'
+      ? { towerId: tower.id, researchId: item.id, expectedCost: item.cost }
+      : { towerId: tower.id, categoryId: item.id, expectedRank: item.rank, expectedCost: item.cost });
+}
+function researchScope(id) {
+  if ([13,18,25].includes(id)) return 'affects non-explosive bullets';
+  if (id === 15) return 'affects laser-family beams';
+  if ([26,31].includes(id)) return 'affects rocket-family weapons';
+  if (id === 38) return 'weapons hitting frozen enemies';
+  return 'global // existing and future towers';
+}
+function wrapResearchText(text, columns) {
+  const lines = []; let line = '';
+  for (const word of text.split(' ')) {
+    if (line && line.length + word.length + 1 > columns) { lines.push(line); line = ''; }
+    line += (line ? ' ' : '') + word;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+function drawArsenalTree(snapshot,tower) {
+  uiHitboxes.length=0;
+  const width=Math.min(620,logicalWidth-16),height=Math.min(330,logicalHeight-16);
+  const x=(logicalWidth-width)/2,y=(logicalHeight-height)/2;
+  const items=stationItems(snapshot,tower), column=(width-32)/3;
+  researchSelection ??= 1;
+  const selected=items.find((item)=>item.id===researchSelection)||items[0];
+  drawTechPanel(x,y,width,height,COLOR.amber);
+  bitmapText.draw('arsenal // upgrade tree',x+12,y+10,COLOR.amber,2);
+  bitmapText.draw(`${snapshot.research.unlocked.length}/39 researched // every branch available`,x+12,y+30,COLOR.ink,1);
+  for(let root=1;root<=3;root++) {
+    const ordered=[];
+    const visit=(id)=>{ordered.push(items.find((item)=>item.id===id));for(const child of items.filter((item)=>item.parent===id))visit(child.id);};
+    visit(root);
+    const positions=new Map(ordered.map((item,row)=>[item.id,{x:x+12+(root-1)*column+(item.tier-1)*7,y:y+48+row*14}]));
+    for(const item of ordered){
+      const p=positions.get(item.id),parent=positions.get(item.parent);
+      if(parent){shapes.line(parent.x+2,parent.y+5,parent.x+2,p.y+5,1,COLOR.dimMint);shapes.line(parent.x+2,p.y+5,p.x,p.y+5,1,COLOR.dimMint);}
+      const color=item.id===selected.id?COLOR.amber:item.owned?COLOR.mint:item.locked?COLOR.dimMint:COLOR.cyan;
+      drawButton(`tree_${item.id}`,`${item.owned?'+':item.locked?'-':'>'} ${clippedUiText(item.label,column-30)}`,p.x,p.y,column-18-(item.tier-1)*7,true,color,()=>{researchSelection=item.id;researchDetailPage=0;});
+    }
+  }
+  const detailY=y+238;
+  bitmapText.draw(clippedUiText(selected.label,width-24),x+12,detailY,COLOR.amber,1);
+  const text=(selected.parent?`requires ${researchNode(selected.parent).label}. `:'')+selected.description;
+  const lines=wrapResearchText(text,Math.floor((width-24)/6));
+  lines.slice(0,3).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+12+i*9,COLOR.ink,1));
+  const wallet=snapshot.economyByPlayer[session.playerId]?.credits||0;
+  const available=!selected.owned&&!selected.locked&&(snapshot.dev?.infiniteMoney||wallet>=selected.cost)&&tower.ownerId===session.playerId;
+  const label=selected.owned?'owned':selected.locked?'unlock parent first':`buy // ${compactMetric(selected.cost)} cr // enter`;
+  drawMenuButton('tree_buy',label,x+12,y+height-42,width-24,available?COLOR.mint:COLOR.red,()=>{if(available)purchaseStationItem(tower,selected);},available);
+  drawMenuButton('tree_back','back // esc',x+12,y+height-21,width-24,COLOR.cyan,()=>towerMenuMode='actions');
+}
+
+function drawResearchStation(snapshot, tower) {
+  if(tower.definitionId==='arsenal' && logicalWidth>=400 && logicalHeight>=346) return drawArsenalTree(snapshot,tower);
+  uiHitboxes.length = 0;
+  const width = Math.min(420, logicalWidth - 20), height = Math.min(288, logicalHeight - 16);
+  const x = (logicalWidth - width) / 2, y = (logicalHeight - height) / 2;
+  const perPage = height < 240 ? 1 : 3;
+  const items = stationItems(snapshot,tower);
+  const pages = Math.max(1,Math.ceil(items.length/perPage));
+  researchPage = Math.max(0,Math.min(pages-1,researchPage));
+  const visible = items.slice(researchPage*perPage,(researchPage+1)*perPage);
+  if (!visible.some((item) => item.id === researchSelection)) researchSelection = visible[0]?.id ?? null;
+  const selected = visible.find((item) => item.id === researchSelection);
+  drawTechPanel(x,y,width,height,COLOR.amber);
+  bitmapText.draw(tower.definitionId, x+12,y+9,COLOR.amber,2);
+  bitmapText.draw(`global research ${snapshot.research?.unlocked.length || 0}/39`,x+12,y+30,COLOR.ink,1);
+  if (pages > 1) {
+    drawButton('research_prev','<',x+width-77,y+9,20,true,COLOR.cyan,() => { researchPage=(researchPage+pages-1)%pages; researchDetailPage=0; });
+    drawButton('research_next','>',x+width-27,y+9,20,true,COLOR.cyan,() => { researchPage=(researchPage+1)%pages; researchDetailPage=0; });
+    bitmapText.draw(`${researchPage+1}/${pages}`,x+width-53,y+12,COLOR.ink,1);
+  }
+  for (let i=0;i<visible.length;i++) {
+    const item=visible[i];
+    const cost=item.cost===null?'capped':item.cost===0?'owned':compactMetric(item.cost);
+    drawMenuButton(`research_select_${item.id}`,`${i+1} ${clippedUiText(item.label, width - 110)}`,x+12,y+48+i*20,width-24,COLOR.mint,() => {
+      researchSelection=item.id; researchDetailPage=0;
+    },selected?.id===item.id);
+    const wallet = (snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0);
+    bitmapText.draw(cost, x + width - 18 - cost.length * 6, y + 53 + i * 20, item.cost !== null && wallet >= item.cost ? COLOR.amber : COLOR.red, 1);
+  }
+  if (selected) {
+    const detailY=y+54+perPage*20;
+    const lines=wrapResearchText((selected.parent ? `requires ${researchNode(selected.parent).label}. ` : '')+selected.description,Math.floor((width-24)/6));
+    const lineCount=Math.max(1,Math.floor((y+height-66-detailY)/9));
+    const detailPages=Math.ceil(lines.length/lineCount);
+    researchDetailPage %= Math.max(1,detailPages);
+    lines.slice(researchDetailPage*lineCount,(researchDetailPage+1)*lineCount).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+i*9,COLOR.ink,1));
+    if(detailPages>1) drawButton('research_more','details >',x+width-76,y+height-64,64,true,COLOR.cyan,()=>researchDetailPage++);
+    else bitmapText.draw(tower.definitionId==='arsenal'?researchScope(selected.id):`rank ${selected.rank} -> ${selected.rank+1}`,x+12,y+height-64,COLOR.ink,1);
+    const wallet=(snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0);
+    bitmapText.draw(`credits ${snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(wallet)} // cost ${selected.cost===null?'capped':selected.cost.toLocaleString('en-US')}`,x+12,y+height-52,COLOR.amber,1);
+    const canBuy=tower.ownerId===session.playerId && !selected.owned && !selected.locked && selected.cost!==null && wallet>=selected.cost;
+    drawMenuButton('research_buy',canBuy?(selected.cost===0?'already researched':'buy selected // enter'):tower.ownerId!==session.playerId?'inspect only':selected.owned?'already researched':selected.locked?'unlock parent research first':selected.cost===null?'maximum rank reached':'need more credits',x+12,y+height-41,width-24,canBuy?COLOR.mint:COLOR.red,()=>{
+      if(canBuy) purchaseStationItem(tower,selected);
+    },canBuy);
+  } else bitmapText.draw('all research complete',x+12,y+70,COLOR.mint,1);
+  drawMenuButton('research_back','back // esc',x+12,y+height-21,width-24,COLOR.cyan,()=>towerMenuMode='actions');
 }
 
 function drawTowerActionMenu(snapshot, tower) {
   const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
   if (!definition) return;
-  const canAim = supportsStrikePoint(definition.attack);
-  const canControl = Boolean(definition.control?.input && definition.control.input !== 'none');
-  const hasManualControl = canAim || canControl;
+  if (['arsenal','reactor'].includes(definition.id)) {
+    const panel=towerPanelPosition(tower,180,66);
+    drawTechPanel(panel.x,panel.y,180,66,COLOR.amber);
+    bitmapText.draw(definition.label,panel.x+7,panel.y+5,COLOR.amber,1);
+    drawButton('station_open','1 open upgrades',panel.x+5,panel.y+20,170,true,COLOR.mint,()=>openResearchStation(tower));
+    drawButton('station_sell',`2 sell // ${compactMetric(saleRefund(snapshot,tower))}`,panel.x+5,panel.y+36,170,true,COLOR.amber,sellSelectedTower);
+    bitmapText.draw('research is never refunded',panel.x+5,panel.y+54,COLOR.dimMint,1);
+    return;
+  }
+  const canAim = supportsStrikePoint(weaponView(snapshot, tower)?.attack);
+  const effectiveControl = weaponView(snapshot, tower)?.control;
+  const canControl = Boolean(effectiveControl?.input && effectiveControl.input !== 'none');
+  const relayForm = isRelayForm(definition.id);
+  const hasManualControl = canAim || canControl || relayForm;
   const width = 150;
-  const height = hasManualControl ? 65 : 49;
+  const height = definition.id === 'echo' && (canAim || canControl) ? 97 : ['echo', 'hardpoint'].includes(definition.id) ? 81 : hasManualControl ? 65 : 49;
   const panel = towerPanelPosition(tower, width, height);
   const accent = towerAccent(tower.definitionId);
   drawTechPanel(panel.x, panel.y, width, height, accent);
-  bitmapText.draw(`${definition.label} // ${tower.totalInvestment} cr`, panel.x + 7, panel.y + 5, accent, 1);
+  bitmapText.draw(`${definition.label} // ${compactMetric(tower.totalInvestment)} cr`, panel.x + 7, panel.y + 5, accent, 1);
   const supportLabel = tower.bonusCredits > 0 ? ` +${compactMetric(tower.bonusCredits)} cr` : '';
-  const isPureControl = Boolean(definition.control && !definition.attack);
+  const isPureControl = Boolean(weaponView(snapshot, tower)?.supportOnly);
   const controlLabels = {
     stasis_zone: 'held',
     recall_gate: 'recalled',
-    slow_zone: 'slowed',
+    slow_zone: 'slowed', frost_zone: 'chilled', barricade: 'blocked',
     singularity: 'shaped',
-    vortex: 'shaped',
     braid: 'shaped',
     breaker_wave: 'pushed',
-    crosswind: 'pushed',
-    force_wall: 'pushed'
+    crosswind: 'steered',
+    splitter: 'split'
   };
-  const controlValue = ['stasis_zone', 'recall_gate'].includes(definition.control?.type)
+  const discreteControl = ['stasis_zone', 'recall_gate', 'breaker_wave'].includes(definition.control?.type);
+  const controlValue = discreteControl
     ? tower.controlStats?.affectedUnits || 0
     : Math.floor((tower.controlStats?.affectedUnitTicks || 0) / AUTHORITY_TICK_RATE);
-  const metricLabel = isPureControl
-    ? `${controlLabels[definition.control.type] || 'affected'} // ${compactMetric(controlValue)}${['stasis_zone', 'recall_gate'].includes(definition.control.type) ? '' : ' unit-s'}`
-    : `kills // ${String(tower.kills || 0).padStart(6, '0')}${supportLabel}`;
+  const metricLabel = isPureControl && weaponView(snapshot, tower)?.attack
+    ? `casts // ${compactMetric(tower.controlStats?.activations || 0)}`
+    : isPureControl
+    ? `${controlLabels[definition.control?.type] || 'affected'} // ${compactMetric(controlValue)}${discreteControl ? '' : ' unit-s'}`
+    : `kills // ${compactMetric(tower.kills || 0)}${supportLabel}`;
   const recentlyActive = isPureControl
     ? tower.controlStats?.lastActiveTick > 0 && snapshot.runTick - tower.controlStats.lastActiveTick <= AUTHORITY_TICK_RATE * 0.45
     : tower.lastKillTick > 0 && snapshot.runTick - tower.lastKillTick <= AUTHORITY_TICK_RATE * 0.45;
@@ -3986,9 +4008,9 @@ function drawTowerActionMenu(snapshot, tower) {
     bitmapText.draw('inspect only', panel.x + 7, panel.y + 40, COLOR.dimMint, 1);
     return;
   }
-  const refund = Math.floor(tower.totalInvestment * 0.5);
+  const refund = saleRefund(snapshot, tower);
   const hasChoices = definition.evolutionChoices?.length > 0;
-  const isRelay = definition.id === 'relay';
+  const isRelay = relayForm && !hasChoices;
   drawButton(
     `tower_upgrade_${tower.id}`,
     isRelay ? (tower.relayTargetAreaId ? '1 relink' : '1 link') : hasChoices ? '1 upgrade' : '1 upgrade ?',
@@ -4001,7 +4023,7 @@ function drawTowerActionMenu(snapshot, tower) {
   );
   drawButton(
     `tower_sell_${tower.id}`,
-    `2 sell ${refund}`,
+    `2 sell ${compactMetric(refund)}`,
     panel.x + 75,
     panel.y + 31,
     70,
@@ -4009,7 +4031,21 @@ function drawTowerActionMenu(snapshot, tower) {
     COLOR.red,
     sellSelectedTower
   );
-  if (hasManualControl) {
+  if (relayForm) {
+    drawButton(`network_link_${tower.id}`, '3 link nebula', panel.x + 5, panel.y + 47, 140, true, COLOR.cyan, () => openRelayTargetMenu(snapshot, tower));
+    if (['echo', 'hardpoint'].includes(definition.id)) drawButton(`network_config_${tower.id}`,
+      definition.id === 'echo' ? `copy: ${tower.echoWeaponId || 'select control'}` : 'position build socket',
+      panel.x + 5, panel.y + 63, 140, true, COLOR.amber, () => {
+        towerMenuMode = definition.id === 'echo' ? 'echo' : 'socket';
+        setStatus(definition.id === 'echo' ? 'click a connected control turret' : 'click along the relay line');
+      });
+    if (definition.id === 'echo' && canControl) {
+      drawButton(`echo_control_${tower.id}`, 'reshape control', panel.x + 5, panel.y + 79, 140, true, COLOR.cyan, () => openControlGeometryMenu(snapshot, tower));
+    } else if (definition.id === 'echo' && canAim) {
+      drawButton(`echo_aim_${tower.id}`, 'aim point', panel.x + 5, panel.y + 79, 88, true, COLOR.cyan, () => openStrikeTargetMenu(snapshot, tower));
+      drawButton(`echo_auto_${tower.id}`, 'auto', panel.x + 98, panel.y + 79, 47, true, COLOR.amber, clearSelectedStrikePoint);
+    }
+  } else if (hasManualControl) {
     drawButton(
       `tower_aim_${tower.id}`,
       canControl
@@ -4056,8 +4092,8 @@ function wrappedDescription(lines, maximumCharacters, maximumLines) {
 
 function drawUpgradeChoice(snapshot, tower, definition, shortcut, x, y, width, height) {
   const economy = snapshot.economyByPlayer[session.playerId];
-  const cost = definition.evolutionCost || 0;
-  const affordable = (economy?.credits || 0) >= cost;
+  const cost = purchaseCost(snapshot, tower.areaId, definition.evolutionCost || 0);
+  const affordable = (sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) >= cost;
   const accent = affordable ? towerAccent(definition.id) : COLOR.red;
   const hovered = pointInside(x, y, width, height);
   shapes.rect(x, y, width, height, COLOR.black);
@@ -4069,7 +4105,7 @@ function drawUpgradeChoice(snapshot, tower, definition, shortcut, x, y, width, h
   if (hovered) shapes.rect(x + width - 5, y + 3, 2, 5, accent);
   bitmapText.draw(`${shortcut} ${definition.label}`, x + 5, y + 9, accent, 1);
   bitmapText.draw(definition.role || 'branch', x + 5, y + 19, COLOR.ink, 1);
-  bitmapText.draw(`${cost} cr`, x + 5, y + 30, affordable ? COLOR.amber : COLOR.red, 1);
+  bitmapText.draw(`${compactMetric(cost)} cr`, x + 5, y + 30, affordable ? COLOR.amber : COLOR.red, 1);
   shapes.rect(x + 5, y + 40, width - 10, 1, COLOR.dimMint);
   const maximumCharacters = Math.max(6, Math.floor((width - 10) / 6));
   const lines = wrappedDescription(definition.description, maximumCharacters, 4);
@@ -4079,7 +4115,7 @@ function drawUpgradeChoice(snapshot, tower, definition, shortcut, x, y, width, h
   registerHitbox(`upgrade_choice_${tower.id}_${definition.id}`, x, y, width, height, {
     action: () => {
       if (!affordable) {
-        setStatus(`need ${cost} credits`);
+        setStatus(`need ${compactMetric(cost)} credits`);
         return;
       }
       evolveSelectedTower(definition.id);
@@ -4100,8 +4136,8 @@ function drawTowerUpgradeMenu(snapshot, tower) {
   const height = 116;
   const panel = towerPanelPosition(tower, width, height);
   drawTechPanel(panel.x, panel.y, width, height, COLOR.mint);
-  const cost = choices[0]?.evolutionCost || 0;
-  bitmapText.draw(`upgrade // 1 2 3 choose // ${cost} cr`, panel.x + 7, panel.y + 5, COLOR.mint, 1);
+  const cost = purchaseCost(snapshot, tower.areaId, choices[0]?.evolutionCost || 0);
+  bitmapText.draw(`upgrade // 1 2 3 choose // ${compactMetric(cost)} cr`, panel.x + 7, panel.y + 5, COLOR.mint, 1);
   drawButton(`upgrade_back_${tower.id}`, 'back', panel.x + width - 39, panel.y + 3, 34, false, COLOR.cyan, () => {
     towerMenuMode = 'actions';
   });
@@ -4144,13 +4180,13 @@ function drawStrikeTargetMenu(snapshot, tower) {
 }
 
 function drawControlGeometryMenu(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = weaponView(snapshot, tower);
   const width = 216;
   const height = 43;
   const panel = towerPanelPosition(tower, width, height);
   drawTechPanel(panel.x, panel.y, width, height, COLOR.cyan);
   const input = definition?.control?.input || 'point';
-  const verb = input === 'line' ? 'drag line' : input === 'direction' ? 'choose direction' : 'place field';
+  const verb = input === 'line' ? (definition?.id === 'braid' ? 'drag along flow' : 'drag line') : input === 'direction' ? (definition.control.type === 'aim' ? 'set facing' : 'choose left / right') : 'place field';
   const rebootTicks = Math.max(0, (tower.controlReadyTick || 0) - snapshot.runTick);
   bitmapText.draw(`${definition?.label || 'control'} // ${verb}`, panel.x + 7, panel.y + 6, COLOR.cyan, 1);
   bitmapText.draw(rebootTicks > 0 ? `reboot // ${(rebootTicks / AUTHORITY_TICK_RATE).toFixed(1)}s` : `${tower.effectiveRange || definition?.range || 0}u // authority locked`, panel.x + 7, panel.y + 18, rebootTicks > 0 ? COLOR.amber : COLOR.ink, 1);
@@ -4161,6 +4197,7 @@ function drawControlGeometryMenu(snapshot, tower) {
 }
 
 function drawTowerMenu(snapshot, tower) {
+  if (towerMenuMode === 'research') return;
   if (towerMenuMode === 'upgrades') drawTowerUpgradeMenu(snapshot, tower);
   else if (towerMenuMode === 'relay') drawRelayTargetMenu(snapshot, tower);
   else if (towerMenuMode === 'strike') drawStrikeTargetMenu(snapshot, tower);
@@ -4235,8 +4272,8 @@ function drawTopHud(fps, snapshot, telemetry) {
   bitmapText.draw('framebound', 11, 5, COLOR.mint, 1);
   bitmapText.draw(sessionMode === 'test' ? '//test' : '//horde', 75, 5, sessionMode === 'test' ? COLOR.amber : COLOR.red, 1);
   bitmapText.draw(`lives ${String(snapshot.base.lives).padStart(3, '0')}`, 130, 5, COLOR.ink, 1);
-  bitmapText.draw(`credits ${String(economy.credits).padStart(5, '0')}`, 208, 5, COLOR.amber, 1);
-  bitmapText.draw(`horde ${snapshot.swarm.activeEnemies}`, 322, 5, COLOR.red, 1);
+  bitmapText.draw(`credits ${snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(economy.credits)}`, 208, 5, COLOR.amber, 1);
+  bitmapText.draw(`horde ${compactMetric(snapshot.swarm.activeEnemies)}`, 322, 5, COLOR.red, 1);
   const fpsX = logicalWidth - 54;
   const timerLabel = `time ${formatRunTimer(snapshot.runTick)}`;
   const timerX = fpsX - timerLabel.length * 6 - 12;
@@ -4245,7 +4282,7 @@ function drawTopHud(fps, snapshot, telemetry) {
     : `spawn ${Math.round(snapshot.swarm.spawnRatePerSecond)}/s`;
   if (416 + spawnLabel.length * 6 < timerX - 6) bitmapText.draw(spawnLabel, 416, 5, COLOR.ink, 1);
   let telemetryX = 532;
-  const goldLabel = `gold ${telemetry.goldPerSecond.toFixed(1)}/s`;
+  const goldLabel = `gold ${compactMetric(telemetry.goldPerSecond)}/s`;
   if (telemetryX + goldLabel.length * 6 < timerX - 6) {
     bitmapText.draw(goldLabel, telemetryX, 5, COLOR.amber, 1);
     telemetryX += goldLabel.length * 6 + 8;
@@ -4258,7 +4295,7 @@ function drawTopHud(fps, snapshot, telemetry) {
       telemetryX += networkLabel.length * 6 + 8;
     }
   }
-  const kpsLabel = `kps ${telemetry.oneSecond.toFixed(0)}`;
+  const kpsLabel = `kps ${compactMetric(telemetry.oneSecond)}`;
   if (showKps && telemetryX + kpsLabel.length * 6 < timerX - 6) bitmapText.draw(kpsLabel, telemetryX, 5, COLOR.mint, 1);
   bitmapText.draw(timerLabel, timerX, 5, COLOR.amber, 1);
   bitmapText.draw(`fps ${String(fps).padStart(3, '0')}`, fpsX, 5, COLOR.cyan, 1);
@@ -4307,18 +4344,26 @@ function drawGameHud(snapshot, telemetry) {
     ? `next rift ${Math.ceil(nextRift.unlockSeconds - elapsedSeconds)}s`
     : `${snapshot.swarm.activeSpawnPoints} rifts live`;
   const rebootTicks = Math.max(0, (selectedTower?.controlReadyTick || 0) - snapshot.runTick);
+  const countsControlHits = ['stasis_zone', 'recall_gate', 'breaker_wave'].includes(selectedDefinition?.control?.type);
+  const controlWork = countsControlHits
+    ? `${compactMetric(selectedTower?.controlStats?.affectedUnits || 0)} enemies`
+    : `${compactMetric(Math.floor((selectedTower?.controlStats?.affectedUnitTicks || 0) / AUTHORITY_TICK_RATE))} unit-s`;
   const passive = selectedTower
-    ? selectedDefinition?.control
-      ? `${selectedTower.definitionId} // control ${rebootTicks > 0 ? `reboot ${(rebootTicks / AUTHORITY_TICK_RATE).toFixed(1)}s` : 'online'} // affected ${compactMetric(Math.floor((selectedTower.controlStats?.affectedUnitTicks || 0) / AUTHORITY_TICK_RATE))} unit-s // invested ${selectedTower.totalInvestment}`
-      : `${selectedTower.definitionId} // kills ${selectedTower.kills || 0} // target ${targetLabel} // invested ${selectedTower.totalInvestment}`
+    ? weaponView(snapshot, selectedTower)?.supportOnly && weaponView(snapshot, selectedTower)?.attack
+      ? `${selectedTower.definitionId} // control casts ${compactMetric(selectedTower.controlStats?.activations || 0)} // zero damage`
+      : selectedDefinition?.control && selectedDefinition.control.type !== 'bond_zone'
+      ? `${selectedTower.definitionId} // control ${rebootTicks > 0 ? `reboot ${(rebootTicks / AUTHORITY_TICK_RATE).toFixed(1)}s` : 'online'} // affected ${controlWork} // invested ${compactMetric(selectedTower.totalInvestment)}`
+      : selectedDefinition?.control?.type === 'bond_zone'
+        ? `bond // kills ${compactMetric(selectedTower.kills || 0)} // pairs ${selectedDefinition.control.durationSeconds}s every ${selectedDefinition.control.periodSeconds}s // no chains`
+        : `${selectedTower.definitionId} // kills ${compactMetric(selectedTower.kills || 0)} // target ${targetLabel} // invested ${compactMetric(selectedTower.totalInvestment)}`
     : bulkDefinition
       ? `${bulkDefinition.label} repeat // right click ends // b switches tower`
       : `1 one frame // b tower catalog // ${riftStatus} // drag pan // wheel zoom`;
   bitmapText.draw(performance.now() < statusUntil ? statusMessage : passive, 10, statusY, COLOR.amber, 1);
-  const stats = `kills ${snapshot.stats.kills} // gold ${telemetry.goldPerSecond.toFixed(1)}/s // shots ${snapshot.stats.shotsResolved}/${snapshot.stats.shotsFired}`;
+  const stats = `kills ${compactMetric(snapshot.stats.kills)} // gold ${compactMetric(telemetry.goldPerSecond)}/s // shots ${compactMetric(snapshot.stats.shotsResolved)}/${compactMetric(snapshot.stats.shotsFired)}`;
   bitmapText.draw(stats, Math.max(10, logicalWidth - stats.length * 6 - 10), statusY, COLOR.mint, 1);
   if (showKps && logicalWidth >= 900) {
-    const kps = `1s ${telemetry.oneSecond.toFixed(0)} 10s ${telemetry.tenSecond.toFixed(0)} peak ${telemetry.peak.toFixed(0)}`;
+    const kps = `1s ${compactMetric(telemetry.oneSecond)} 10s ${compactMetric(telemetry.tenSecond)} peak ${compactMetric(telemetry.peak)}`;
     bitmapText.draw(kps, Math.max(10, logicalWidth * 0.5 - kps.length * 3), statusY, COLOR.dimMint, 1);
   }
 }
@@ -4398,6 +4443,7 @@ function drawTestHud(snapshot, telemetry) {
   x = 8;
   drawButton('support', placementArmed ? 'b placing' : 'b support', x, toolRow, 62, placementArmed, COLOR.mint, () => { placementArmed = !placementArmed; }); x += 66;
   drawButton('test_forms', buildCatalogOpen ? 'u close' : 'u forms', x, toolRow, 48, buildCatalogOpen, COLOR.amber, buildCatalogOpen ? closeBuildCatalog : () => openBuildCatalog('assault')); x += 52;
+  drawButton('test_network_forms', 'n net iii', x, toolRow, 57, buildCatalogOpen && buildCatalogPageId === 'network', COLOR.green, () => openBuildCatalog('network')); x += 61;
   drawButton('keep_swarm', testKeepSwarm ? 'keep on' : 'keep off', x, toolRow, 52, testKeepSwarm, COLOR.amber, () => {
     testKeepSwarm = !testKeepSwarm;
     saveTestPreferences(snapshot.test);
@@ -4426,14 +4472,14 @@ function drawTestHud(snapshot, telemetry) {
   const seconds = snapshot.runTick / AUTHORITY_TICK_RATE;
   bitmapText.draw(`kps 1s ${telemetry.oneSecond.toFixed(1)} // 10s ${telemetry.tenSecond.toFixed(1)} // peak ${telemetry.peak.toFixed(1)}`, 8, statsRow, COLOR.mint, 1);
   if (logicalWidth >= 850) {
-    bitmapText.draw(`alive ${snapshot.swarm.activeEnemies} records ${snapshot.swarm.simulationRecords}/${snapshot.swarm.recordBudget} killed ${snapshot.stats.kills}`, 246, statsRow, COLOR.ink, 1);
-    bitmapText.draw(`gold ${telemetry.goldPerSecond.toFixed(1)}/s shots ${snapshot.stats.shotsResolved}/${snapshot.stats.shotsFired} fx ${snapshot.stats.controlApplications} bonus ${snapshot.stats.bonusCredits || 0} time ${seconds.toFixed(1)}s`, Math.max(8, logicalWidth - 338), statsRow, COLOR.cyan, 1);
+    bitmapText.draw(`alive ${compactMetric(snapshot.swarm.activeEnemies)} records ${snapshot.swarm.simulationRecords}/${snapshot.swarm.recordBudget} killed ${compactMetric(snapshot.stats.kills)}`, 246, statsRow, COLOR.ink, 1);
+    bitmapText.draw(`gold ${compactMetric(telemetry.goldPerSecond)}/s shots ${compactMetric(snapshot.stats.shotsResolved)}/${compactMetric(snapshot.stats.shotsFired)} fx ${snapshot.stats.controlApplications} bonus ${compactMetric(snapshot.stats.bonusCredits || 0)} time ${seconds.toFixed(1)}s`, Math.max(8, logicalWidth - 338), statsRow, COLOR.cyan, 1);
   } else {
-    bitmapText.draw(`alive ${snapshot.swarm.activeEnemies} rec ${snapshot.swarm.simulationRecords} kill ${snapshot.stats.kills} gold ${telemetry.goldPerSecond.toFixed(1)}/s t${seconds.toFixed(0)}s`, 270, statsRow, COLOR.ink, 1);
+    bitmapText.draw(`alive ${compactMetric(snapshot.swarm.activeEnemies)} rec ${snapshot.swarm.simulationRecords} kill ${compactMetric(snapshot.stats.kills)} gold ${compactMetric(telemetry.goldPerSecond)}/s t${seconds.toFixed(0)}s`, 270, statsRow, COLOR.ink, 1);
   }
   const selectedStats = selected
-    ? `${selected.definitionId} // ${Number(selected.effectiveCadence || 0).toFixed(1)}/s r${Math.round(selected.effectiveRange || 0)} // kills ${selected.kills || 0}${selected.bonusCredits ? ` +${selected.bonusCredits}cr` : ''} // drag towers and spawns`
-    : 'drag spawn markers // drag towers // production enemies stay 1 hp';
+    ? `${selected.definitionId} // ${Number(selected.effectiveCadence || 0).toFixed(1)}/s r${Math.round(selected.effectiveRange || 0)} // kills ${compactMetric(selected.kills || 0)}${selected.bonusCredits ? ` +${compactMetric(selected.bonusCredits)}cr` : ''} // drag towers and spawns`
+    : 'drag spawn markers // drag towers // colour shows remaining hp';
   bitmapText.draw(performance.now() < statusUntil ? statusMessage : selectedStats, 8, y + 77, COLOR.amber, 1);
 }
 
@@ -4453,13 +4499,25 @@ function drawHud(fps, snapshot) {
     bitmapText.draw('waiting for the host snapshot', panelX + 14, panelY + 32, COLOR.ink, 1);
     bitmapText.draw('replica held // no fake progress', panelX + 14, panelY + 44, COLOR.dimMint, 1);
   } else if (snapshot.phase === 'defeated') {
-    const panelX = Math.round(logicalWidth * 0.5 - 71);
-    const panelY = Math.round(logicalHeight * 0.5 - 24);
-    shapes.rect(panelX, panelY, 142, 47, COLOR.black);
-    shapes.rect(panelX, panelY, 142, 2, COLOR.red);
-    shapes.rect(panelX, panelY + 45, 142, 2, COLOR.red);
-    bitmapText.draw('base lost', panelX + 25, panelY + 9, COLOR.red, 2);
-    bitmapText.draw(session.networkRole ? 'coop run ended' : 'r restart same seed', panelX + 16, panelY + 34, COLOR.ink, 1);
+    uiHitboxes.length = 0;
+    const width = Math.min(264, logicalWidth - 20);
+    const height = 132;
+    const panelX = Math.round((logicalWidth - width) / 2);
+    const panelY = Math.round((logicalHeight - height) / 2);
+    drawTechPanel(panelX, panelY, width, height, COLOR.red);
+    bitmapText.draw('base lost', panelX + 16, panelY + 10, COLOR.red, 2);
+    const seconds = Math.floor(snapshot.runTick / AUTHORITY_TICK_RATE);
+    bitmapText.draw(`survived ${Math.floor(seconds / 60)}m ${seconds % 60}s`, panelX + 16, panelY + 34, COLOR.ink, 1);
+    bitmapText.draw(`${compactMetric(snapshot.stats.kills)} kills // ${snapshot.towers.length} towers`, panelX + 16, panelY + 48, COLOR.amber, 1);
+    if (session.networkRole) {
+      drawMenuButton('defeat_coop', 'room status', panelX + 16, panelY + 68, width - 32, COLOR.cyan, () => { frontEndScreen = 'coop'; });
+      bitmapText.draw('new coop run needs a fresh room', panelX + 16, panelY + 92, COLOR.ink, 1);
+    } else {
+      drawMenuButton('defeat_retry', 'retry same field // r', panelX + 16, panelY + 68, width - 32, COLOR.mint,
+        () => { clearTransientUi(); session.send(COMMAND.SESSION_RESTART); }, true);
+      drawMenuButton('defeat_map', 'choose another map', panelX + 16, panelY + 89, width - 32, COLOR.cyan, () => openMapSelection('main'));
+    }
+    drawMenuButton('defeat_menu', 'main menu', panelX + 16, panelY + 110, width - 32, COLOR.cyan, returnToMainMenu);
   } else if (snapshot.phase === 'reconnect_wait' && snapshot.disconnectWait) {
     const panelWidth = Math.min(236, logicalWidth - 16);
     const panelHeight = 70;
@@ -4549,7 +4607,7 @@ function syncDiagnostics(snapshot = sessionSnapshot) {
     spawnRatePerSecond: snapshot.swarm.spawnRatePerSecond,
     fps,
     logicalResolution: `${logicalWidth}x${logicalHeight}`,
-    cssIntegerScale: displayPixelScale,
+    nativeRenderScale: renderScale,
     textureMinFilter: 'nearest',
     textureMagFilter: 'nearest',
     multisampling: false,
@@ -4648,13 +4706,22 @@ function frame(now) {
   const sessionFrame = session.advance(shouldAdvance ? elapsedMs * timeScale : 0);
   sessionSnapshot = sessionFrame.snapshot;
   for (const event of sessionFrame.events) {
-    if (event.type === EVENT.TOWER_PLACED && event.payload.tower.ownerId === session.playerId) {
+    if ([EVENT.RESEARCH_PURCHASED, EVENT.REACTOR_PURCHASED].includes(event.type)) {
+      setStatus(event.type===EVENT.RESEARCH_PURCHASED ? `${event.payload.label} unlocked` : `${event.payload.categoryId} rank ${event.payload.rank}`);
+      researchDetailPage=0;
+      const station = sessionSnapshot.towers.find((tower) => tower.id === event.payload.towerId);
+      if (station && (event.payload.cost || 0) > 0) researchWave = {
+        x: station.x, y: station.y, mapId: currentMap.id, startedAt: performance.now()
+      };
+      void saveGameBundle();
+    } else if (event.type === EVENT.TOWER_PLACED && event.payload.tower.ownerId === session.playerId) {
       const keepBulkPlacement = sessionMode === 'game'
         && bulkPlacementDefinitionId === event.payload.tower.definitionId;
       placementArmed = keepBulkPlacement;
       const autoSelect = !keepBulkPlacement && (sessionMode === 'test' || gameplayPreferences.autoSelectPlacedFrame);
       selectedTowerId = autoSelect ? event.payload.tower.id : null;
       towerMenuMode = autoSelect && sessionMode === 'game' ? 'actions' : null;
+      if (['arsenal','reactor'].includes(event.payload.tower.definitionId)) openResearchStation(event.payload.tower);
       setStatus(keepBulkPlacement
         ? `${event.payload.tower.definitionId} placed // click next // right click ends`
         : autoSelect ? 'frame selected // 1 upgrade // 2 sell' : 'frame placed // press 1 for another');
@@ -4662,7 +4729,7 @@ function frame(now) {
       selectedTowerId = event.payload.tower.id;
       const evolved = sessionSnapshot.towerCatalog.find((definition) => definition.id === event.payload.tower.definitionId);
       towerMenuMode = sessionMode === 'test'
-        ? evolved?.id === 'relay' ? 'relay' : evolved?.control?.input !== 'none' && evolved?.control?.input ? 'control' : null
+        ? isRelayForm(evolved?.id) ? 'actions' : evolved?.control?.input !== 'none' && evolved?.control?.input ? 'control' : null
         : evolved?.evolutionChoices?.length
           ? 'upgrades'
           : evolved?.id === 'relay'
@@ -4670,11 +4737,12 @@ function frame(now) {
             : evolved?.control?.input !== 'none' && evolved?.control?.input
               ? 'control'
               : 'actions';
+      if (['arsenal','reactor'].includes(event.payload.tower.definitionId)) openResearchStation(event.payload.tower);
       setStatus(`${event.payload.tower.definitionId} online`);
     } else if (event.type === EVENT.TOWER_SOLD && event.payload.ownerId === session.playerId) {
       selectedTowerId = null;
       towerMenuMode = null;
-      setStatus(`sold // refund ${event.payload.refund}`);
+      setStatus(`sold // refund ${compactMetric(event.payload.refund)}`);
     } else if (event.type === EVENT.TOWER_TARGETING_CHANGED && event.payload.towerId === selectedTowerId) {
       setStatus(`target ${event.payload.mode.replace('_', ' ')}`);
     } else if (event.type === EVENT.TOWER_STRIKE_POINT_CHANGED && event.payload.towerId === selectedTowerId) {
@@ -4725,7 +4793,7 @@ function frame(now) {
       if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) addImpactBurst(event);
     } else if (event.type === EVENT.SUPPORT_TRIGGERED) {
       if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) addSupportFlash(event);
-      if (event.payload.sourceTowerId === selectedTowerId) setStatus(`forge +${event.payload.credits} credits`);
+      if (event.payload.sourceTowerId === selectedTowerId) setStatus(`forge +${compactMetric(event.payload.credits)} credits`);
     } else if (event.type === EVENT.TEST_CONFIG_CHANGED) {
       saveTestPreferences(event.payload.test);
     } else if (event.type === EVENT.COMMAND_REJECTED && event.payload.clientId === session.clientId) {
@@ -4747,16 +4815,37 @@ function frame(now) {
   uiHitboxes.length = 0;
   drawBackground();
   if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) {
-    enemyRenderer.draw(camera, enemyFrame);
-    drawTestFieldWorld(sessionSnapshot);
+    // Background technology stays underneath enemies, including at intersections.
     drawNetworkLinks(sessionSnapshot);
+    shapes.flush();
+    enemyRenderer.draw(camera, enemyFrame);
+    if (currentMap.sideWalls) for (const wallX of [currentMap.bounds.left,currentMap.bounds.right]) {
+      const a=project(wallX,currentMap.bounds.top),b=project(wallX,currentMap.bounds.bottom);
+      shapes.line(a.x,a.y,b.x,b.y,4,COLOR.dimMint);
+      shapes.line(a.x,a.y,b.x,b.y,1,COLOR.amber);
+    }
+    drawTestFieldWorld(sessionSnapshot);
+    drawPerimeterIntel(sessionSnapshot,enemyFrame);
     drawProjectiles(presentProjectiles(sessionSnapshot.projectiles, dt));
     drawClusterPayloads(sessionSnapshot.attackFields, sessionSnapshot.runTick);
     drawControlFields(sessionSnapshot);
+    drawReworkedCombat(sessionSnapshot);
+    drawSelectedBondLinks(sessionSnapshot, enemyFrame);
+    shapes.flush();
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    for (const field of sessionSnapshot.attackFields) {
+      if (field.kind === 'sweep_line') drawSweep(shapes, COLOR, project, camera.scale, field, sessionSnapshot.runTick, enemyFrame.alpha);
+    }
     drawAttackFlashes(dt);
+    shapes.flush();
+    gl.disable(gl.BLEND);
     drawImpactBursts(dt);
     for (const tower of sessionSnapshot.towers) drawTower(tower);
     drawBase(time, sessionSnapshot.base);
+    const wall = project(0, currentMap.bounds.bottom);
+    shapes.rect(0, wall.y - 3, logicalWidth, 3, COLOR.dimMint);
+    for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, wall.y - 3, 12, 1, COLOR.amber);
     drawBuildState(sessionSnapshot);
     drawHud(fps, sessionSnapshot);
   } else {
@@ -4767,7 +4856,20 @@ function frame(now) {
     else if (frontEndScreen === 'map_select') drawMapSelection(sessionSnapshot);
     else drawCoopMenu(sessionSnapshot);
   }
-  if (frontEndScreen === 'escape') drawEscapeMenu(sessionSnapshot);
+  if (frontEndScreen === 'game' && towerMenuMode === 'research') {
+    const tower=sessionSnapshot.towers.find((item)=>item.id===selectedTowerId);
+    if(tower) drawResearchStation(sessionSnapshot,tower);
+  }
+  if (frontEndScreen === 'escape') {
+    uiHitboxes.length = 0;
+    drawEscapeMenu(sessionSnapshot);
+  }
+  if (frontEndScreen === 'game') {
+    const enabled = Object.entries(sessionSnapshot.dev || {}).filter(([, value]) => value).map(([key]) =>
+      ({ infiniteMoney: 'money', infiniteHealth: 'health', paused: 'paused', stopSpawns: 'no spawns' })[key]).filter(Boolean);
+    bitmapText.draw(enabled.length ? `dev // ${enabled.join(' / ')} // f2` : 'f2 dev tools', 8, HUD_TOP_HEIGHT + 5, enabled.length ? COLOR.amber : COLOR.dimMint, 1);
+    if (devToolsOpen) drawDevTools(sessionSnapshot);
+  }
   drawCursor();
   shapes.flush();
   bitmapText.flush();

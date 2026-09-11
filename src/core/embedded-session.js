@@ -1,3 +1,8 @@
+import { fireReworked, tickReworked } from './turret-rework.js';
+import { decorateResearchAttack, secondaryAttack, damageFixed, damageResearchBonus, researchSecondaryPlans, pruneResearchCombat, enemyKey, physicalBullet } from './research-combat.js';
+import { freshResearch, hasResearch, reactorRank, reactorQuote, researchNode, arsenalChoices, researchStat } from './research.js';
+import { towerPlacementClear } from './placement.js';
+import { spawnProfileAt } from './progression.js';
 import {
   AUTHORITY_TICK_MS,
   AUTHORITY_TICK_RATE,
@@ -23,6 +28,7 @@ import {
   resolveAttackPlans
 } from './effect-system.js';
 import { towerBuildQuote } from './tower-catalog.js';
+import { controlSource, purchaseCost, saleRefund, socketPoint } from './network-descendants.js';
 import { strikeImpactPoints, supportsStrikePoint } from './strike-pattern.js';
 import {
   buildControlField,
@@ -130,7 +136,7 @@ export class EmbeddedAuthority {
   }
 
   bindMap(mapId) {
-    this.map = getMapDefinition(mapId);
+    this.map = getMapDefinition(mapId, this.seed);
     this.networkAreasByArea = new Map();
     this.relayTargetByTowerId = new Map();
     this.modifierCache = null;
@@ -142,9 +148,12 @@ export class EmbeddedAuthority {
   }
 
   resetFreshRun(mapId = this.map.id) {
+    this.state.dev = {};
     const nextMap = getMapDefinition(mapId);
     if (this.mode === 'game' && !nextMap.playable) throw new Error('map is not playable');
+    if (this.mode === 'game') this.seed = mix32((this.seed + 0x9e3779b9) >>> 0);
     this.bindMap(nextMap.id);
+    this.state.seed = this.seed;
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
     this.state.mapCatalog = playableMaps().map((map) => ({ id: map.id, label: map.label }));
@@ -152,10 +161,12 @@ export class EmbeddedAuthority {
     this.state.base = { ...this.map.base, lives: this.startingLives };
     this.state.towers = this.initialTowers.map((tower) => this.normalizeTower(tower));
     this.state.projectiles = [];
+    delete this.state.turretRework;
     this.state.attackFields = [];
     this.state.forceFields = [];
     this.state.deployables = [];
     this.state.supportCounters = {};
+    this.state.research = freshResearch();
     this.state.disconnectWait = null;
     this.state.stats = initialStats();
     this.state.test = this.initialTestConfig ? cloneSerializable(this.initialTestConfig) : null;
@@ -190,6 +201,7 @@ export class EmbeddedAuthority {
       forceFields: [],
       deployables: [],
       supportCounters: {},
+      research: freshResearch(),
       economyByPlayer: {},
       towerCatalog: Object.values(this.towerDefinitions),
       test: this.initialTestConfig ? cloneSerializable(this.initialTestConfig) : null,
@@ -200,8 +212,27 @@ export class EmbeddedAuthority {
   }
 
   normalizeTower(tower) {
-    const definition = this.towerDefinitions[tower.definitionId];
-    const strikePoint = supportsStrikePoint(definition?.attack)
+    const migrated = { salvage: 'reactor', foundry: 'arsenal' };
+    if (migrated[tower.definitionId]) tower = { ...tower,
+      definitionId: migrated[tower.definitionId],
+      formHistory: (tower.formHistory || [tower.definitionId]).map((id) => migrated[id] || id),
+      researchPath: []
+    };
+    // Orbit is replaced in-place: old solo saves keep their tower, investment,
+    // ownership and lifetime statistics rather than losing a paid upgrade.
+    if (tower.definitionId === 'orbit') {
+      tower = {
+        ...tower,
+        definitionId: 'bond',
+        formHistory: (tower.formHistory || ['frame', 'tether', 'knot', 'orbit']).map((id) => id === 'orbit' ? 'bond' : id),
+        controlGeometry: null,
+        controlStats: null
+      };
+    }
+    const ownDefinition = this.towerDefinitions[tower.definitionId];
+    const copiedDefinition = tower.definitionId === 'echo' ? this.towerDefinitions[tower.echoWeaponId] : null;
+    const definition = copiedDefinition?.supportOnly ? copiedDefinition : ownDefinition;
+    const strikePoint = (supportsStrikePoint(definition?.attack) || tower.definitionId === 'echo')
       && Number.isFinite(tower.strikePoint?.x)
       && Number.isFinite(tower.strikePoint?.y)
       ? { x: tower.strikePoint.x, y: tower.strikePoint.y }
@@ -215,6 +246,7 @@ export class EmbeddedAuthority {
       : null;
     const normalized = {
       ...tower,
+      researchPath: [...(tower.researchPath || [])],
       kills: Math.max(0, Math.floor(tower.kills || 0)),
       lastKillTick: Math.max(0, Math.floor(tower.lastKillTick || 0)),
       supportTriggers: Math.max(0, Math.floor(tower.supportTriggers || 0)),
@@ -233,7 +265,7 @@ export class EmbeddedAuthority {
     normalized.controlGeometry = definition?.control
       ? normalizeControlGeometry(definition, normalized, tower.controlGeometry || legacyGeometry, this.map)
       : null;
-    normalized.controlReadyTick = definition?.control
+    normalized.controlReadyTick = definition?.control || tower.definitionId === 'echo'
       ? Math.max(0, Math.floor(tower.controlReadyTick || 0))
       : 0;
     normalized.controlStats = {
@@ -245,7 +277,7 @@ export class EmbeddedAuthority {
     return normalized;
   }
 
-  swarmSummary(spawnRatePerSecond, sources) {
+  swarmSummary(spawnRatePerSecond, sources, meanHp = 1) {
     return {
       activeEnemies: this.swarm.activeUnitCount,
       simulationRecords: this.swarm.count,
@@ -255,6 +287,8 @@ export class EmbeddedAuthority {
       allocatedCapacity: this.swarm.capacity,
       spawnedTotal: this.swarm.spawnedTotal,
       spawnRatePerSecond,
+      meanHp,
+      hpPerSecond: spawnRatePerSecond * meanHp,
       activeSpawnPoints: sources.length,
       checksum: this.swarm.lastChecksum
     };
@@ -317,7 +351,7 @@ export class EmbeddedAuthority {
     if (this.state.disconnectWait && this.state.tick >= this.state.disconnectWait.deadlineTick) {
       this.completeBalancedInheritance(this.state.disconnectWait.playerId);
     }
-    if (this.state.phase !== 'running' || this.state.test?.paused) return;
+    if (this.state.phase !== 'running' || this.state.test?.paused || this.state.dev?.paused) return;
 
     this.state.runTick += 1;
     this.simulateGameplay();
@@ -339,18 +373,22 @@ export class EmbeddedAuthority {
       };
     }
     return {
-      rate: spawnRateAt(this.map, this.state.runTick, AUTHORITY_TICK_RATE),
+      ...spawnProfileAt(this.map, this.state.runTick, AUTHORITY_TICK_RATE),
       sources: activeSpawnSources(this.map, this.state.runTick, AUTHORITY_TICK_RATE),
       enemyHp: this.swarmConfig.enemyHp || 1
     };
   }
 
   simulateGameplay() {
+    if (!this.modifierCache) this.rebuildModifierCache();
+    this.syncTowerStats();
     const spawn = this.spawnSettings();
+    pruneResearchCombat(this.state.research, this.swarm, this.state.runTick);
     const controlFields = this.syncControlFields();
     this.pulseControlFields(controlFields);
     const swarmTick = this.swarm.tick(this.state.runTick, {
-      spawnRatePerSecond: spawn.rate,
+      spawnRatePerSecond: this.state.dev?.stopSpawns ? 0 : spawn.rate,
+      meanHp: spawn.meanHp ?? null,
       spawnSources: spawn.sources,
       enemyHp: spawn.enemyHp,
       forceFields: this.state.forceFields
@@ -359,12 +397,13 @@ export class EmbeddedAuthority {
     this.state.stats.spawned += swarmTick.spawned;
     if (swarmTick.breaches > 0) this.recordBreaches(swarmTick.breaches, Boolean(this.state.test?.invincibleBase));
     if (this.state.phase === 'running') {
+      tickReworked(this);
       this.fireTowers();
       this.moveProjectiles();
       this.tickAttackFields();
     }
     if (this.state.runTick % AUTHORITY_TICK_RATE === 0) this.swarm.updateChecksum();
-    this.state.swarm = this.swarmSummary(spawn.rate, spawn.sources);
+    this.state.swarm = this.swarmSummary(spawn.rate, spawn.sources, spawn.meanHp ?? spawn.enemyHp);
   }
 
   syncControlFields() {
@@ -373,8 +412,21 @@ export class EmbeddedAuthority {
     );
     const controlFields = [];
     for (const tower of [...this.state.towers].sort(compareStableIds)) {
-      const definition = this.towerDefinitions[tower.definitionId];
-      const field = buildControlField(definition, tower, this.map, this.state.runTick);
+      const definition = this.weaponDefinition(tower);
+      let effective = definition;
+      if (definition?.control) {
+        const control = { ...definition.control };
+        for (const key of ['radius', 'width', 'thickness', 'waveThickness']) {
+          if (Number.isFinite(control[key])) control[key] = this.towerStat(tower, key === 'radius' ? 'controlRadius' : 'controlWidth', control[key]);
+        }
+        if (control.periodSeconds) {
+          control.periodSeconds = Math.max(2 * (control.durationSeconds || control.activeSeconds || control.travelSeconds || 0),
+            control.periodSeconds / this.towerStat(tower, 'controlRecharge', 1));
+        }
+        effective = { ...definition, control };
+        tower.effectiveControl = control;
+      }
+      const field = buildControlField(effective, tower, this.map, this.state.runTick);
       if (field) controlFields.push(field);
     }
     this.state.forceFields = [...transient, ...controlFields];
@@ -393,12 +445,17 @@ export class EmbeddedAuthority {
         for (const target of targets) claimedStasisIds.add(target.id);
         const affected = this.swarm.applyStatus(targets, {
           status: 'stasis',
+          appliedTick: this.state.runTick,
           durationSeconds: field.durationTicks / AUTHORITY_TICK_RATE
         });
         const units = affected.reduce((total, enemy) => total + Math.max(1, Math.floor(enemy.units || 1)), 0);
         field.triggeredUnitsTick += units;
         stats.activations += 1;
         stats.lastActiveTick = this.state.runTick;
+      } else if (field.kind === 'bond_zone' && this.state.runTick % field.periodTicks === 0) {
+        field.triggeredUnitsTick += this.swarm.pulseBonds(field, this.state.runTick);
+        stats.activations += 1;
+        if (field.triggeredUnitsTick > 0) stats.lastActiveTick = this.state.runTick;
       } else if ((field.kind === 'singularity_force' || field.kind === 'breaker_wave')
         && this.state.runTick % field.periodTicks === 0) {
         stats.activations += 1;
@@ -420,7 +477,7 @@ export class EmbeddedAuthority {
   }
 
   towerStat(tower, stat, baseValue) {
-    let value = baseValue;
+    let value = baseValue + researchStat(this.state, stat, baseValue, tower, this.swarm);
     const modifiers = this.modifierCache?.get(tower.id) || [];
     for (const modifier of modifiers) {
       if (modifier.stat !== stat) continue;
@@ -446,8 +503,18 @@ export class EmbeddedAuthority {
     const relayTowers = this.state.towers
       .filter((tower) => this.towerDefinitions[tower.definitionId]?.supportEffects?.some((effect) => effect.type === 'area_link'))
       .sort(compareStableIds);
+    const occupied = new Set(relayTowers.map((tower) => this.validRelayTargetAreaId(tower, tower.relayTargetAreaId)).filter(Boolean));
     for (const tower of relayTowers) {
-      const targetAreaId = this.validRelayTargetAreaId(tower, tower.relayTargetAreaId);
+      let targetAreaId = this.validRelayTargetAreaId(tower, tower.relayTargetAreaId);
+      if (!targetAreaId) {
+        targetAreaId = this.map.defenseAreas
+          .filter((area) => !occupied.has(area.id) && !adjacency.get(tower.areaId)?.has(area.id)
+            && this.validRelayTargetAreaId(tower, area.id))
+          .sort((a, b) => Math.hypot(a.shape.x - tower.x, a.shape.y - tower.y)
+            - Math.hypot(b.shape.x - tower.x, b.shape.y - tower.y) || a.id.localeCompare(b.id))[0]?.id || null;
+        tower.relayTargetAreaId = targetAreaId;
+      }
+      if (targetAreaId) occupied.add(targetAreaId);
       this.relayTargetByTowerId.set(tower.id, targetAreaId);
       if (!targetAreaId) continue;
       adjacency.get(tower.areaId)?.add(targetAreaId);
@@ -532,15 +599,33 @@ export class EmbeddedAuthority {
       }
     }
     this.modifierCache = cache;
+    this.networkSourcesByArea = new Map(this.map.defenseAreas.map((area) => [area.id,
+      this.state.towers.filter((tower) => this.networkAreasByArea.get(area.id)?.includes(tower.areaId))]));
+    const amplifiedAreas = new Set(this.state.towers.filter((tower) => tower.definitionId === 'amplifier').map((tower) => tower.areaId));
+    for (const tower of this.state.towers) {
+      if (!amplifiedAreas.has(tower.areaId)) continue;
+      for (const modifier of cache.get(tower.id)) {
+        if (['range', 'cadencePerSecond', 'controlRecharge', 'geometryRadius', 'geometryWidth', 'controlRadius', 'controlWidth'].includes(modifier.stat)) modifier.value *= 1.5;
+      }
+    }
+  }
+
+  weaponDefinition(tower) {
+    if (tower.definitionId !== 'echo') return this.towerDefinitions[tower.definitionId];
+    const source = (this.networkSourcesByArea?.get(tower.areaId) || []).find((candidate) => candidate.id === tower.echoSourceId);
+    return source && controlSource(this.state, tower, source.id)
+      ? this.towerDefinitions[source.definitionId] : this.towerDefinitions.echo;
   }
 
   syncTowerStats() {
     for (const tower of this.state.towers) {
-      const definition = this.towerDefinitions[tower.definitionId];
+      const definition = this.weaponDefinition(tower);
       if (!definition) continue;
       tower.effectiveRange = this.towerStat(tower, 'range', definition.range);
+      tower.echoWeaponId = tower.definitionId === 'echo' && definition.id !== 'echo' ? definition.id : null;
+      if (!definition.control) delete tower.effectiveControl;
       tower.effectiveCadence = definition.attack
-        ? this.towerStat(tower, 'cadencePerSecond', definition.attack.cadencePerSecond)
+        ? this.towerStat(tower, definition.supportOnly ? 'controlRecharge' : 'cadencePerSecond', definition.attack.cadencePerSecond)
         : 0;
       if (definition.control && definition.control.input !== 'none') {
         const geometry = normalizeControlGeometry(definition, tower, tower.controlGeometry, this.map);
@@ -554,6 +639,9 @@ export class EmbeddedAuthority {
   }
 
   applyTowerAttackStats(tower, attack) {
+    for (const followUp of attack.impactFollowUps || []) {
+      if (Number.isFinite(followUp.radius)) followUp.radius = this.towerStat(tower, 'geometryRadius', followUp.radius);
+    }
     if (attack.volley) {
       attack.volley.count = Math.max(1, Math.round(this.towerStat(tower, 'volleyCount', attack.volley.count || 1)));
     }
@@ -606,32 +694,119 @@ export class EmbeddedAuthority {
     modifyEffects(attack.effects);
     for (const trigger of attack.triggers || []) modifyEffects(trigger.effects);
     attack.rewardPerKill = Math.max(0, this.towerStat(tower, 'killReward', attack.rewardPerKill));
-    return attack;
+    return decorateResearchAttack(this.state, tower, attack);
+  }
+
+  researchTarget(tower, attack, excludedIds = null) {
+    const ids = attack.research?.ids || this.state.research.unlocked;
+    const special = ids.includes(27) || ids.includes(19) || ['execution', 'highest_hp'].includes(tower.targetingMode) || attack.research?.split;
+    let target;
+    if (!special) target = this.swarm.findTarget(tower.x, tower.y, attack.range, tower.targetingMode, excludedIds);
+    else {
+      let candidates = this.swarm.enemiesInCircle(tower.x, tower.y, attack.range, excludedIds)
+        .filter((enemy) => ids.includes(27) || !this.swarm.reservedById[enemy.id]);
+      if (attack.research?.split && attack.research.group) {
+        const separate = candidates.filter((enemy) => Math.hypot(enemy.x - attack.research.group.x, enemy.y - attack.research.group.y) >= 64);
+        if (separate.length) candidates = separate;
+      }
+      const baseDamage = (attack.effects || []).filter((effect) => effect.type === 'damage').reduce((sum,effect) => sum + effect.amount, 0);
+      const linked = new Set((this.networkSourcesByArea?.get(tower.areaId) || []).map((source) => source.id));
+      const score = (enemy) => {
+        const remaining = enemy.hp - (this.researchReservations?.get(enemyKey(enemy)) || 0);
+        const covered = ids.includes(27) && remaining <= 0 ? 1e15 : 0;
+        const entry = this.state.research.combat[enemyKey(enemy)];
+        const exposed = ids.includes(19) && entry?.exposedUntil > this.state.runTick
+          && Object.keys(entry.contributors).some((id) => linked.has(id));
+        if (tower.targetingMode === 'highest_hp') return covered - enemy.hp;
+        if (tower.targetingMode === 'execution') return covered + (enemy.hp <= baseDamage ? enemy.hp : 1e12 + enemy.hp);
+        if (exposed) return covered - 1e10 + enemy.hp;
+        if (tower.targetingMode === 'nearest_base') return covered + Math.hypot(enemy.x - this.map.base.x, enemy.y - this.map.base.y);
+        if (tower.targetingMode === 'farthest_base') return covered - Math.hypot(enemy.x - this.map.base.x, enemy.y - this.map.base.y);
+        if (tower.targetingMode === 'densest_group') return covered - this.swarm.density[this.swarm.cellIndex(enemy.x,enemy.y)];
+        return covered + Math.hypot(enemy.x - tower.x, enemy.y - tower.y);
+      };
+      candidates.sort((a,b) => score(a) - score(b) || a.id - b.id);
+      target = candidates[0] || null;
+    }
+    return target;
   }
 
   fireTowers() {
     if (!this.modifierCache) this.rebuildModifierCache();
     this.syncTowerStats();
-    for (const tower of this.state.towers) {
-      const definition = this.towerDefinitions[tower.definitionId];
-      if (!definition?.attack) continue;
-      // Preserve fractional cadence between ticks. Clamping before the shot
-      // silently quantized rates down (for example, 6/s behaved as 5.5/s).
-      tower.fireCharge = (tower.fireCharge || 0) + tower.effectiveCadence / AUTHORITY_TICK_RATE;
-      if (tower.fireCharge < 1) continue;
-      const attack = createAttackSnapshot(definition, tower, {
-        range: tower.effectiveRange,
-        cadencePerSecond: tower.effectiveCadence,
-        createdTick: this.state.runTick
-      });
-      this.applyTowerAttackStats(tower, attack);
-      if (attack.delivery.type === 'projectile') this.fireProjectileVolley(tower, attack);
-      else if (attack.delivery.type === 'hitscan') this.fireHitscan(tower, attack);
-      else if (attack.delivery.type === 'persistent') this.firePersistent(tower, attack);
-      // A tower with no target keeps one ready shot, but never stockpiles an
-      // arbitrarily large burst while the arena is empty.
-      tower.fireCharge = Math.min(1, tower.fireCharge);
+    this.researchReservations = new Map();
+    if (hasResearch(this.state, 27)) for (const projectile of this.state.projectiles) {
+      const key = `${projectile.targetEnemyId}:${projectile.targetGeneration}`;
+      const damage = projectile.attack.effects.filter((effect) => effect.type === 'damage').reduce((sum,effect) => sum + effect.amount,0);
+      this.researchReservations.set(key, (this.researchReservations.get(key) || 0) + damage);
     }
+    for (const tower of this.state.towers) {
+      const definition = this.weaponDefinition(tower);
+      if (!definition?.attack) continue;
+      const target = this.researchTarget(tower, { ...definition.attack, range: tower.effectiveRange });
+      if (hasResearch(this.state,34)) {
+        const key = target ? enemyKey(target) : null;
+        if (key !== tower.researchTrackingKey) {
+          tower.researchTrackingKey = key;
+          tower.researchTrackingSince = this.state.runTick;
+        }
+      }
+      if (!target) tower.researchIdleSince ??= this.state.runTick;
+      const redlines = (this.networkSourcesByArea.get(tower.areaId) || []).filter((source) => source.definitionId === 'redline').length;
+      const period = Math.max(1, Math.round(10 * AUTHORITY_TICK_RATE / (1 + Math.max(0, redlines - 1) * 0.01)));
+      if (!definition.supportOnly && redlines && this.state.runTick % period === 0) {
+        const charge = tower.fireCharge;
+        const bonus = createAttackSnapshot(definition, tower, { range: tower.effectiveRange, cadencePerSecond: tower.effectiveCadence, createdTick: this.state.runTick });
+        this.applyTowerAttackStats(tower, bonus);
+        bonus.research.cycle += ':redline';
+        this.dispatchVolley(tower, bonus);
+        tower.fireCharge = charge;
+      }
+      const magazine = !definition.supportOnly && hasResearch(this.state,7) ? (hasResearch(this.state,22) ? 3 : 1) : 0;
+      tower.fireCharge = (tower.fireCharge || 0) + tower.effectiveCadence / AUTHORITY_TICK_RATE;
+      const stored = Math.max(0, Math.floor(tower.fireCharge) - 1);
+      const emergency = hasResearch(this.state,23) && target && Math.hypot(target.x - this.map.base.x, target.y - this.map.base.y) <= 180;
+      const ready = this.state.runTick >= (tower.researchNextStoredTick || 0);
+      if (tower.fireCharge >= 1 && ready) {
+        tower.researchCharged = hasResearch(this.state,24) && stored > 0
+          && tower.researchIdleSince != null && this.state.runTick - tower.researchIdleSince >= 300;
+        const attack = createAttackSnapshot(definition, tower, { range: tower.effectiveRange, cadencePerSecond: tower.effectiveCadence, createdTick: this.state.runTick });
+        this.applyTowerAttackStats(tower, attack);
+        const charge = tower.fireCharge;
+        this.dispatchVolley(tower, attack);
+        tower.researchCharged = false;
+        if (tower.fireCharge < charge) {
+          tower.researchIdleSince = null;
+          tower.researchCycle = (tower.researchCycle || 0) + 1;
+          tower.researchNextStoredTick = this.state.runTick + (stored > 0 ? (emergency ? 1 : 6) : 1);
+          if (!definition.supportOnly && hasResearch(this.state,9) && tower.researchCycle % (hasResearch(this.state,28) ? 2 : 5) === 0) {
+            const extra = secondaryAttack(attack, hasResearch(this.state,30) ? .4 : .25);
+            extra.volley = { ...extra.volley, count: 1 };
+            extra.research.split = hasResearch(this.state,29);
+            extra.research.group = target ? { x: target.x, y: target.y } : null;
+            this.state.research.pending.push({ tick: this.state.runTick + (hasResearch(this.state,30) ? 36 : 1), towerId: tower.id, attack: extra });
+          }
+        }
+      }
+      tower.fireCharge = Math.min(1 + magazine, tower.fireCharge);
+    }
+    const pending = this.state.research.pending;
+    this.state.research.pending = [];
+    for (const entry of pending) {
+      if (entry.tick > this.state.runTick) { this.state.research.pending.push(entry); continue; }
+      const tower = this.state.towers.find((item) => item.id === entry.towerId);
+      if (!tower) continue;
+      const charge = tower.fireCharge;
+      this.dispatchVolley(tower, entry.attack);
+      tower.fireCharge = charge;
+    }
+  }
+
+  dispatchVolley(tower, attack) {
+    if (fireReworked(this, tower, attack)) return;
+    if (attack.delivery.type === 'projectile') this.fireProjectileVolley(tower, attack);
+    else if (attack.delivery.type === 'hitscan') this.fireHitscan(tower, attack);
+    else if (attack.delivery.type === 'persistent') this.firePersistent(tower, attack);
   }
 
   reserveVolleyTargets(tower, attack) {
@@ -640,9 +815,18 @@ export class EmbeddedAuthority {
     const targetSpacing = Math.max(0, attack.volley?.targetSpacing || 0);
     const excludedIds = new Set();
     for (let projectileIndex = 0; projectileIndex < count; projectileIndex += 1) {
-      const target = this.swarm.findTarget(tower.x, tower.y, attack.range, tower.targetingMode, excludedIds)
-        || (targetSpacing > 0 ? this.swarm.findTarget(tower.x, tower.y, attack.range, tower.targetingMode) : null);
-      if (!target || !this.swarm.reserve(target.id, target.generation)) break;
+      const target = this.researchTarget(tower, attack, excludedIds)
+        || (targetSpacing > 0 ? this.researchTarget(tower, attack) : null);
+      if (!target) break;
+      const routing = attack.research?.ids.includes(27);
+      if (!routing && !this.swarm.reserve(target.id, target.generation)) break;
+      if (routing) {
+        this.swarm.reservedById[target.id] = 1;
+        const key = enemyKey(target);
+        const damage = attack.effects.filter((effect) => effect.type === 'damage').reduce((sum,effect) => sum + effect.amount,0);
+        this.researchReservations ||= new Map();
+        this.researchReservations.set(key, (this.researchReservations.get(key) || 0) + damage);
+      }
       targets.push(target);
       if (targetSpacing > 0) {
         for (const nearby of this.swarm.enemiesInCircle(target.x, target.y, targetSpacing)) excludedIds.add(nearby.id);
@@ -652,16 +836,25 @@ export class EmbeddedAuthority {
   }
 
   fireProjectileVolley(tower, attack) {
-    const strikePoints = tower.strikePoint
+    let strikePoints = tower.strikePoint
       ? strikeImpactPoints(tower, attack, tower.strikePoint)
       : [];
+    if (!tower.strikePoint && attack.research?.ids.includes(26) && supportsStrikePoint(attack)) {
+      const target = this.researchTarget(tower, attack);
+      if (target) {
+        const index = this.swarm.indexById[target.id] * 4;
+        const flight = Math.hypot(target.x - tower.x, target.y - tower.y) / attack.delivery.speed;
+        const aim = { x: target.x + this.swarm.state[index + 2] * flight, y: target.y + this.swarm.state[index + 3] * flight };
+        strikePoints = strikeImpactPoints(tower, attack, aim);
+      }
+    }
     const manualDetonation = strikePoints.length > 0;
     if (manualDetonation) {
       const activationRadius = Math.max(1, attack.geometry?.radius || attack.delivery?.collisionRadius || 1);
       const hasTargetNearPattern = strikePoints.some((point) => (
         this.swarm.enemiesInCircle(point.x, point.y, activationRadius).length > 0
       ));
-      if (!hasTargetNearPattern) return;
+      if (tower.strikePoint && !hasTargetNearPattern) return;
     }
     const targets = manualDetonation
       ? strikePoints.map((point) => ({ ...point, id: 0, generation: 0 }))
@@ -740,11 +933,10 @@ export class EmbeddedAuthority {
     const plans = [];
     const beamCount = Math.max(1, Math.round(attack.volley?.count || 1));
     for (let beamIndex = 0; beamIndex < beamCount; beamIndex += 1) {
-      const target = this.swarm.findTarget(tower.x, tower.y, attack.range, tower.targetingMode, pendingKilled);
+      const target = tower.strikePoint || this.researchTarget(tower, attack, pendingKilled);
       if (!target) break;
-      const dx = target.x - tower.x;
-      const dy = target.y - tower.y;
-      const distance = Math.hypot(dx, dy) || 1;
+      const aimAngle = Math.atan2(target.y-tower.y,target.x-tower.x) + (tower.strikePoint ? (beamIndex-(beamCount-1)/2)*.12 : 0);
+      const dx = Math.cos(aimAngle), dy = Math.sin(aimAngle), distance = 1;
       const beamAttack = cloneSerializable(attack);
       beamAttack.geometry = {
         ...beamAttack.geometry,
@@ -767,7 +959,7 @@ export class EmbeddedAuthority {
   }
 
   firePersistent(tower, attack) {
-    const target = this.swarm.findTarget(tower.x, tower.y, attack.range, tower.targetingMode);
+    const target = tower.strikePoint || this.researchTarget(tower, attack);
     if (!target) return;
     tower.fireCharge -= 1;
     const durationTicks = Math.max(1, Math.round((attack.delivery.durationSeconds || 1) * AUTHORITY_TICK_RATE));
@@ -792,6 +984,7 @@ export class EmbeddedAuthority {
       field.baseAngle = Math.atan2(target.y - tower.y, target.x - tower.x);
       field.sweepRadians = attack.delivery.sweepRadians || Math.PI * 0.5;
       field.sweepDirection = fieldNumber % 2 === 0 ? -1 : 1;
+      if (tower.strikePoint) field.baseAngle -= field.sweepDirection * field.sweepRadians * .5;
       field.range = attack.range;
     }
     this.state.attackFields.push(field);
@@ -861,13 +1054,18 @@ export class EmbeddedAuthority {
         if (field.countsAsShot !== false) this.state.stats.shotsResolved += 1;
         continue;
       }
-      if (field.nextPulseTick <= this.state.runTick) {
+      if (field.nextPulseTick <= this.state.runTick
+        || (field.kind === 'sweep_line' && this.state.runTick >= field.createdTick + field.durationTicks)) {
         field.nextPulseTick += field.pulseTicks;
         let pulseAttack = field.attack;
         let contact = field;
         if (field.kind === 'sweep_line') {
           const phase = Math.max(0, Math.min(1, (this.state.runTick - field.createdTick) / Math.max(1, field.durationTicks)));
+          const previousPhase = field.lastSweepPhase ?? Math.max(0,
+            (this.state.runTick - field.pulseTicks - field.createdTick) / Math.max(1, field.durationTicks));
+          const fromAngle = field.baseAngle + (field.sweepDirection || 1) * field.sweepRadians * previousPhase;
           const angle = field.baseAngle + (field.sweepDirection || 1) * field.sweepRadians * phase;
+          field.lastSweepPhase = phase;
           const endX = field.x + Math.cos(angle) * field.range;
           const endY = field.y + Math.sin(angle) * field.range;
           pulseAttack = cloneSerializable(field.attack);
@@ -879,7 +1077,9 @@ export class EmbeddedAuthority {
             x2: endX,
             y2: endY,
             width: pulseAttack.geometry.width || 6,
-            sweepPhase: phase
+            sweepPhase: phase,
+            sweepFromAngle: fromAngle,
+            sweepToAngle: angle
           };
           contact = { x: endX, y: endY };
         }
@@ -896,6 +1096,7 @@ export class EmbeddedAuthority {
     const pendingKilled = new Set();
     const pendingDamage = new Map();
     const plans = [];
+    const continuations = [];
 
     for (const projectile of this.state.projectiles) {
       const fallbackExpiryTick = (projectile.createdTick ?? projectile.attack?.createdTick ?? this.state.runTick)
@@ -929,10 +1130,13 @@ export class EmbeddedAuthority {
         survivors.push(projectile);
         continue;
       }
-      let target = this.swarm.enemy(projectile.targetEnemyId, projectile.targetGeneration);
+      let target = projectile.researchStraight ? null : this.swarm.enemy(projectile.targetEnemyId, projectile.targetGeneration);
       if (target && pendingKilled.has(target.id)) target = null;
-      if (!target) {
-        const replacement = this.swarm.findAnyUnreserved(projectile.x, projectile.y, pendingKilled);
+      if (!target && !projectile.researchStraight) {
+        const replacement = projectile.attack.research?.ids.includes(8)
+          ? this.swarm.findTarget(projectile.x, projectile.y, projectile.attack.range * 1.5, 'closest', pendingKilled)
+            || this.swarm.findAnyUnreserved(projectile.x, projectile.y, pendingKilled)
+          : this.swarm.findTarget(projectile.x, projectile.y, projectile.attack.range, 'closest', pendingKilled);
         if (replacement && this.swarm.reserve(replacement.id, replacement.generation)) {
           projectile.targetEnemyId = replacement.id;
           projectile.targetGeneration = replacement.generation;
@@ -941,7 +1145,7 @@ export class EmbeddedAuthority {
         }
       }
       if (!target) {
-        if ((projectile.contactsMade || 0) > 0) {
+        if ((projectile.contactsMade || 0) > 0 && !projectile.researchStraight) {
           this.state.stats.shotsResolved += 1;
           continue;
         }
@@ -953,12 +1157,19 @@ export class EmbeddedAuthority {
       const dy = target ? target.y - projectile.y : 0;
       const distance = target ? Math.hypot(dx, dy) || 1 : 0;
       const currentVelocityLength = Math.hypot(projectile.vx, projectile.vy) || 1;
-      const directionX = parallelLaunchActive
+      let directionX = parallelLaunchActive
         ? projectile.launchDirectionX ?? projectile.vx / currentVelocityLength
         : target ? dx / distance : projectile.vx / currentVelocityLength;
-      const directionY = parallelLaunchActive
+      let directionY = parallelLaunchActive
         ? projectile.launchDirectionY ?? projectile.vy / currentVelocityLength
         : target ? dy / distance : projectile.vy / currentVelocityLength;
+      if (!parallelLaunchActive && target && !projectile.researchStraight) {
+        const turn = Math.min(1, .75 * (projectile.attack.research?.guidance || 1));
+        const blendedX = projectile.vx / currentVelocityLength * (1 - turn) + directionX * turn;
+        const blendedY = projectile.vy / currentVelocityLength * (1 - turn) + directionY * turn;
+        const length = Math.hypot(blendedX, blendedY) || 1;
+        directionX = blendedX / length; directionY = blendedY / length;
+      }
       const travel = parallelLaunchActive || !target
         ? projectile.speed / AUTHORITY_TICK_RATE
         : Math.min(projectile.speed / AUTHORITY_TICK_RATE, distance);
@@ -979,6 +1190,11 @@ export class EmbeddedAuthority {
         this.swarm.release(projectile.targetEnemyId, projectile.targetGeneration);
         plans.push(planAttackImpact(this.swarm, projectile.attack, collision, pendingKilled, pendingDamage));
         this.scheduleImpactFollowUps(projectile.attack, collision);
+        if (physicalBullet(projectile.attack) && !projectile.attack.research?.secondary
+          && (projectile.attack.research?.ids.includes(13) || projectile.attack.research?.ids.includes(25))) {
+          continuations.push({ projectile, collision });
+          continue;
+        }
         projectile.contactsMade = Math.max(0, Math.floor(projectile.contactsMade || 0)) + 1;
         projectile.contactsRemaining = Math.max(
           1,
@@ -1004,7 +1220,30 @@ export class EmbeddedAuthority {
     }
 
     this.state.projectiles = survivors;
-    if (plans.length) this.resolvePlans(plans);
+    const resolution = plans.length ? this.resolvePlans(plans) : null;
+    for (const { projectile, collision } of continuations) {
+      const killed = resolution?.results.some((result) => result.attack === projectile.attack
+        && result.kills.some((hit) => hit.id === collision.id && hit.generation === collision.generation));
+      const ricochet = killed && projectile.attack.research.ids.includes(25);
+      const through = projectile.attack.research.ids.includes(13);
+      const target = ricochet ? this.swarm.enemiesInCircle(collision.x, collision.y, 80, new Set([collision.id]))[0] : null;
+      if (!target && !through) { this.state.stats.shotsResolved++; continue; }
+      const redirected = Boolean(target);
+      const speed = Math.hypot(projectile.vx,projectile.vy) || 1;
+      const dx = redirected ? target.x - collision.x : projectile.vx;
+      const dy = redirected ? target.y - collision.y : projectile.vy;
+      const length = Math.hypot(dx,dy) || 1;
+      const clearance = Math.max(2, projectile.collisionRadius * 1.5);
+      projectile.x = collision.x + dx / length * clearance;
+      projectile.y = collision.y + dy / length * clearance;
+      projectile.vx = dx / length * speed; projectile.vy = dy / length * speed;
+      projectile.attack = secondaryAttack(projectile.attack, redirected ? .25 : .5);
+      projectile.contactsRemaining = 1; projectile.contactsMade = 1;
+      projectile.researchStraight = !redirected;
+      projectile.targetEnemyId = target?.id || 0; projectile.targetGeneration = target?.generation || 0;
+      if (target) this.swarm.reserve(target.id,target.generation);
+      this.state.projectiles.push(projectile);
+    }
   }
 
   resolvePlans(plans) {
@@ -1013,11 +1252,41 @@ export class EmbeddedAuthority {
       tick: this.state.runTick,
       forceFields: this.state.forceFields,
       nextFieldNumber: () => this.nextFieldNumber++,
-      sourceKillCounts
+      sourceKillCounts,
+      research: this.state.research
     });
     this.state.stats.triggerEvents += resolution.processedTriggers;
     if (resolution.triggerOverflow) this.state.stats.triggerOverflows += 1;
-    for (const result of resolution.results) this.recordAttackResult(result);
+    const extraPlans = [];
+    for (const result of resolution.results) {
+      this.recordAttackResult(result);
+      extraPlans.push(...researchSecondaryPlans(this.state.research, this.swarm, result, this.state.runTick));
+    }
+    if (extraPlans.length) this.resolvePlans(extraPlans);
+    const bondKillsBySource = new Map();
+    for (const kill of resolution.bondKills) {
+      if (!bondKillsBySource.has(kill.sourceTowerId)) bondKillsBySource.set(kill.sourceTowerId, []);
+      bondKillsBySource.get(kill.sourceTowerId).push(kill);
+    }
+    for (const [sourceTowerId, kills] of bondKillsBySource) {
+      const tower = this.state.towers.find((candidate) => candidate.id === sourceTowerId);
+      this.recordAttackResult({
+        attack: {
+          sourceTowerId,
+          sourceFormId: 'bond',
+          sourceAreaId: tower?.areaId || null,
+          ownerId: tower?.ownerId || null,
+          rewardPerKill: tower ? this.towerStat(tower, 'killReward', this.towerDefinitions.bond.killReward) : 1,
+          geometry: { type: 'bond' }
+        },
+        contact: kills[0],
+        hits: kills,
+        kills,
+        controlTargets: [],
+        createdFields: []
+      });
+    }
+    return resolution;
   }
 
   recordAttackResult(result) {
@@ -1041,10 +1310,31 @@ export class EmbeddedAuthority {
       controlTargets: result.controlTargets,
       createdFields: result.createdFields
     });
-    if (killCount < 1) return;
-    const totalReward = killCount * result.attack.rewardPerKill;
-    this.state.stats.kills += killCount;
+    const hpPopped = damageFixed(result.hits.reduce((total, hit) => total + (hit.hpPopped ?? hit.damage ?? 0), 0));
+    const rewardKey = `hp_credit:${result.attack.sourceAreaId || 'global'}`;
+    const mills = (this.state.supportCounters[rewardKey] || 0) + Math.round(hpPopped * 1000);
+    const paidHp = Math.floor(mills / 1000);
+    this.state.supportCounters[rewardKey] = mills % 1000;
+    const totalReward = paidHp * result.attack.rewardPerKill;
+    this.state.stats.hpPopped = damageFixed((this.state.stats.hpPopped || 0) + hpPopped);
     const sourceTower = this.state.towers.find((tower) => tower.id === result.attack.sourceTowerId);
+    if (totalReward > 0) this.distributeIncome(totalReward);
+    const areaId = result.attack.sourceAreaId || sourceTower?.areaId;
+    const mints = (this.networkSourcesByArea?.get(areaId) || []).filter((tower) => tower.definitionId === 'mint');
+    if (mints.length && totalReward > 0) {
+      const key = `mint:${areaId}`;
+      const points = (this.state.supportCounters[key] || 0) + totalReward * (20 + mints.length - 1);
+      const credits = Math.floor(points / 100);
+      this.state.supportCounters[key] = points % 100;
+      if (credits) {
+        this.distributeIncome(credits);
+        mints[0].bonusCredits = (mints[0].bonusCredits || 0) + credits;
+        this.state.stats.bonusCredits += credits;
+      }
+    }
+    this.applyKillIncomeSupport(result.attack, paidHp);
+    if (killCount < 1) return;
+    this.state.stats.kills += killCount;
     if (sourceTower) {
       sourceTower.kills = Math.max(0, Math.floor(sourceTower.kills || 0)) + killCount;
       sourceTower.lastKillTick = this.state.runTick;
@@ -1062,8 +1352,6 @@ export class EmbeddedAuthority {
       towerKills: sourceTower?.kills ?? null,
       totalKills: this.state.stats.kills
     });
-    if (totalReward > 0) this.distributeIncome(totalReward);
-    this.applyKillIncomeSupport(result.attack, killCount);
   }
 
   activeKillIncomeEffects(areaId) {
@@ -1159,11 +1447,16 @@ export class EmbeddedAuthority {
     if (command.type === COMMAND.SESSION_START) return this.startSession(command, player);
     if (command.type === COMMAND.SESSION_CONTINUE_WITHOUT_PLAYER) return this.continueWithoutPlayer(command, player);
     if (this.state.phase === 'reconnect_wait') return this.reject(command, 'waiting for player reconnect');
+    if (command.type === COMMAND.DEV_TOOLS) return this.setDevTools(command, player);
     if (command.type === COMMAND.SESSION_RESTART) return this.restartSession(command);
     if (this.state.phase !== 'running') return this.reject(command, 'the run is defeated');
-    if (command.type === COMMAND.TOWER_PLACE) this.placeTower(command, player);
+    if (command.type === COMMAND.RESEARCH_PURCHASE) this.purchaseResearch(command, player);
+    else if (command.type === COMMAND.REACTOR_PURCHASE) this.purchaseReactor(command, player);
+    else if (command.type === COMMAND.TOWER_PLACE) this.placeTower(command, player);
     else if (command.type === COMMAND.TOWER_EVOLVE) this.evolveTower(command, player);
     else if (command.type === COMMAND.TOWER_SELL) this.sellTower(command, player);
+    else if (command.type === COMMAND.TOWER_ECHO_SOURCE_SET) this.setEchoSource(command, player);
+    else if (command.type === COMMAND.TOWER_SOCKET_SET) this.setSocket(command, player);
     else if (command.type === COMMAND.TOWER_TARGETING_SET) this.setTowerTargeting(command, player);
     else if (command.type === COMMAND.TOWER_STRIKE_POINT_SET) this.setTowerStrikePoint(command, player);
     else if (command.type === COMMAND.TOWER_FORCE_DIRECTION_SET) this.setTowerForceDirection(command, player);
@@ -1358,6 +1651,64 @@ export class EmbeddedAuthority {
     this.emit(EVENT.SESSION_RESTARTED, { runNumber: this.state.runNumber, seed: this.seed, mapId: this.map.id });
   }
 
+  setDevTools(command, player) {
+    if (player.id !== this.state.hostPlayerId) return this.reject(command, 'only the host may change dev tools');
+    const { option, enabled, action } = command.payload;
+    const options = ['infiniteMoney', 'infiniteHealth', 'paused', 'stopSpawns'];
+    if (option && (!options.includes(option) || typeof enabled !== 'boolean')) return this.reject(command, 'invalid dev option');
+    if (action && !['clearEnemies', 'healBase'].includes(action)) return this.reject(command, 'invalid dev action');
+    this.state.dev ||= {};
+    if (option) this.state.dev[option] = enabled;
+    if (action === 'clearEnemies') {
+      this.swarm.clearEnemies();
+      this.state.projectiles = [];
+    delete this.state.turretRework;
+      this.state.attackFields = [];
+      this.state.forceFields = [];
+      const spawn = this.spawnSettings();
+      this.state.swarm = this.swarmSummary(this.state.dev.stopSpawns ? 0 : spawn.rate, spawn.sources, spawn.meanHp ?? spawn.enemyHp);
+    }
+    if (action === 'healBase' || (option === 'infiniteHealth' && enabled)) {
+      this.state.base.lives = this.state.base.maxLives || this.startingLives;
+      if (this.state.phase === 'defeated') this.state.phase = 'running';
+    }
+  }
+
+  purchaseResearch(command, player) {
+    const tower = this.state.towers.find((item) => item.id === command.payload.towerId);
+    if (!tower || tower.definitionId !== 'arsenal' || tower.ownerId !== player.id) return this.reject(command, 'own an arsenal to research');
+    const node = researchNode(command.payload.researchId);
+    if (!node || !arsenalChoices(this.state).some((item) => item.id === node.id)) return this.reject(command, 'unlock the parent research first');
+    const owned = hasResearch(this.state, node.id);
+    if (owned) return this.reject(command, 'research already owned');
+    const cost = node.cost;
+    if (command.payload.expectedCost !== cost) return this.reject(command, 'research changed; refresh the price');
+    const wallet = this.state.economyByPlayer[player.id];
+    if (!this.state.dev?.infiniteMoney && wallet.credits < cost) return this.reject(command, 'insufficient research credits');
+    if (!this.state.dev?.infiniteMoney) wallet.credits -= cost; wallet.totalSpent += cost;
+    if (!owned) this.state.research.unlocked.push(node.id);
+    tower.researchPath = []; // Legacy physical-station paths are no longer used.
+    this.modifierCache = null;
+    this.emit(EVENT.RESEARCH_PURCHASED, { towerId: tower.id, researchId: node.id, cost, label: node.label });
+  }
+
+  purchaseReactor(command, player) {
+    const tower = this.state.towers.find((item) => item.id === command.payload.towerId);
+    if (!tower || tower.definitionId !== 'reactor' || tower.ownerId !== player.id) return this.reject(command, 'own a reactor to upgrade');
+    const quote = reactorQuote(this.state, command.payload.categoryId);
+    if (!quote || command.payload.expectedRank !== quote.rank || command.payload.expectedCost !== quote.cost) return this.reject(command, 'reactor rank or price changed');
+    const wallet = this.state.economyByPlayer[player.id];
+    if (!this.state.dev?.infiniteMoney && wallet.credits < quote.cost) return this.reject(command, 'insufficient reactor credits');
+    if (!this.state.dev?.infiniteMoney) wallet.credits -= quote.cost; wallet.totalSpent += quote.cost;
+    this.state.research.reactor[quote.id] = quote.rank + 1;
+    if (quote.id === 'lives') {
+      this.state.base.maxLives = this.startingLives + (quote.rank + 1) * 5;
+      this.state.base.lives = Math.min(this.state.base.maxLives, this.state.base.lives + 5);
+    }
+    this.modifierCache = null;
+    this.emit(EVENT.REACTOR_PURCHASED, { towerId: tower.id, categoryId: quote.id, rank: quote.rank + 1, cost: quote.cost });
+  }
+
   placeTower(command, player) {
     const { definitionId, x, y } = command.payload;
     const definition = this.towerDefinitions[definitionId];
@@ -1365,19 +1716,28 @@ export class EmbeddedAuthority {
     const build = towerBuildQuote(this.towerDefinitions, definitionId);
     if (!build) return this.reject(command, 'tower form cannot be built directly');
     if (!Number.isFinite(x) || !Number.isFinite(y)) return this.reject(command, 'tower position is invalid');
-    const areaId = findDefenseAreaAt(this.map, x, y);
+    const socket = this.state.towers.find((candidate) => {
+      const point = socketPoint(this.state, this.map, candidate);
+      return point && Math.hypot(point.x - x, point.y - y) <= 10;
+    });
+    if (socket && (socket.ownerId !== player.id || definitionId === 'hardpoint'
+      || this.state.towers.some((candidate) => candidate.socketHostId === socket.id))) return this.reject(command, 'socket unavailable');
+    const point = socket ? socketPoint(this.state, this.map, socket) : { x, y };
+    const areaId = socket?.areaId || findDefenseAreaAt(this.map, x, y);
     if (!areaId) return this.reject(command, 'tower must be inside a defense area');
-    const cost = build.cost;
+    if (!towerPlacementClear(this.state.towers, point.x, point.y)) return this.reject(command, 'towers need 24 units of clearance');
+    const cost = purchaseCost(this.state, areaId, build.cost);
     const economy = this.state.economyByPlayer[player.id];
-    if (economy.credits < cost) return this.reject(command, 'insufficient credits');
-    economy.credits -= cost;
+    if (!this.state.dev?.infiniteMoney && economy.credits < cost) return this.reject(command, 'insufficient credits');
+    if (!this.state.dev?.infiniteMoney) economy.credits -= cost;
     economy.totalSpent += cost;
     const tower = this.normalizeTower({
       id: `tower_${this.nextTowerNumber++}`,
       ownerId: player.id,
       definitionId,
-      x,
-      y,
+      x: point.x,
+      y: point.y,
+      socketHostId: socket?.id || null,
       areaId,
       targetingMode: 'closest',
       totalInvestment: cost,
@@ -1400,12 +1760,24 @@ export class EmbeddedAuthority {
       return this.reject(command, 'tower form is not a valid replacement');
     }
     const economy = this.state.economyByPlayer[player.id];
-    if (economy.credits < next.evolutionCost) return this.reject(command, 'insufficient credits');
-    economy.credits -= next.evolutionCost;
-    economy.totalSpent += next.evolutionCost;
+    if (tower.socketHostId && next.id === 'hardpoint') return this.reject(command, 'hardpoints cannot nest');
+    const cost = purchaseCost(this.state, tower.areaId, next.evolutionCost);
+    if (!this.state.dev?.infiniteMoney && economy.credits < cost) return this.reject(command, 'insufficient credits');
+    if (!this.state.dev?.infiniteMoney) economy.credits -= cost;
+    economy.totalSpent += cost;
     const previousDefinitionId = tower.definitionId;
     tower.definitionId = next.id;
-    tower.totalInvestment += next.evolutionCost;
+    if (next.supportOnly || next.networkNode) {
+      const harmful = (attack) => attack?.effects?.some((effect) => effect.type === 'damage');
+      this.state.projectiles = this.state.projectiles.filter((shot) => {
+        if (shot.attack?.sourceTowerId !== tower.id || !harmful(shot.attack)) return true;
+        this.swarm.release(shot.targetEnemyId, shot.targetGeneration);
+        return false;
+      });
+      this.state.attackFields = this.state.attackFields.filter((field) => field.attack?.sourceTowerId !== tower.id || !harmful(field.attack));
+      this.state.research.pending = this.state.research.pending.filter((entry) => entry.towerId !== tower.id);
+    }
+    tower.totalInvestment += cost;
     tower.fireCharge = 0;
     tower.formHistory = [...tower.formHistory, next.id];
     if (!supportsStrikePoint(next.attack)) tower.strikePoint = null;
@@ -1424,7 +1796,7 @@ export class EmbeddedAuthority {
       towerId: tower.id,
       previousDefinitionId,
       tower,
-      cost: next.evolutionCost,
+      cost,
       credits: economy.credits
     });
   }
@@ -1434,7 +1806,8 @@ export class EmbeddedAuthority {
     if (towerIndex < 0) return this.reject(command, 'tower does not exist');
     const tower = this.state.towers[towerIndex];
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may sell it');
-    const refund = Math.floor(tower.totalInvestment * 0.5);
+    if (this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
+    const refund = saleRefund(this.state, tower);
     const economy = this.state.economyByPlayer[player.id];
     economy.credits += refund;
     this.state.towers.splice(towerIndex, 1);
@@ -1442,11 +1815,32 @@ export class EmbeddedAuthority {
     this.emit(EVENT.TOWER_SOLD, { towerId: tower.id, ownerId: player.id, refund, credits: economy.credits });
   }
 
+  setEchoSource(command, player) {
+    const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
+    if (!tower || tower.ownerId !== player.id || tower.definitionId !== 'echo') return this.reject(command, 'echo unavailable');
+    if (!controlSource(this.state, tower, command.payload.sourceTowerId)) return this.reject(command, 'select a connected control turret');
+    tower.echoSourceId = command.payload.sourceTowerId;
+    tower.controlGeometry = null;
+    tower.controlReadyTick = this.state.runTick + AUTHORITY_TICK_RATE;
+    tower.strikePoint = null;
+    tower.fireCharge = 0;
+    this.syncTowerStats();
+  }
+
+  setSocket(command, player) {
+    const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
+    const fraction = command.payload.fraction;
+    if (!tower || tower.ownerId !== player.id || !socketPoint(this.state, this.map, tower)) return this.reject(command, 'linked hardpoint required');
+    if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) return this.reject(command, 'socket must lie on the relay line');
+    if (this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
+    tower.socketFraction = fraction;
+  }
+
   setTowerTargeting(command, player) {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may change targeting');
-    const allowedModes = this.towerDefinitions[tower.definitionId]?.targetingModes || ['closest'];
+    const allowedModes = [...(this.weaponDefinition(tower)?.targetingModes || ['closest']), ...(hasResearch(this.state,16) ? ['execution'] : []), ...(hasResearch(this.state,36) ? ['highest_hp'] : [])];
     if (!allowedModes.includes(command.payload.mode)) return this.reject(command, 'targeting mode is unavailable');
     tower.targetingMode = command.payload.mode;
     this.emit(EVENT.TOWER_TARGETING_CHANGED, { towerId: tower.id, mode: tower.targetingMode });
@@ -1456,7 +1850,7 @@ export class EmbeddedAuthority {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may set its strike point');
-    const definition = this.towerDefinitions[tower.definitionId];
+    const definition = this.weaponDefinition(tower);
     if (!supportsStrikePoint(definition?.attack)) return this.reject(command, 'tower does not support strike points');
     const clearing = command.payload.x === null && command.payload.y === null;
     if (clearing) {
@@ -1478,7 +1872,7 @@ export class EmbeddedAuthority {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may set its force direction');
-    const definition = this.towerDefinitions[tower.definitionId];
+    const definition = this.weaponDefinition(tower);
     if (definition?.control?.input !== 'direction') return this.reject(command, 'tower does not support manual direction');
     const clearing = command.payload.x === null && command.payload.y === null;
     if (clearing) {
@@ -1504,7 +1898,8 @@ export class EmbeddedAuthority {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may configure it');
-    const definition = this.towerDefinitions[tower.definitionId];
+    const definition = this.weaponDefinition(tower);
+    if ((tower.socketHostId && definition.id === 'hardpoint') || this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     if (!supportsControlGeometry(definition)) return this.reject(command, 'tower has no configurable control geometry');
     const geometry = normalizeControlGeometry(definition, tower, command.payload.geometry, this.map);
     if (!geometry) return this.reject(command, 'control geometry is invalid or outside range');
@@ -1521,6 +1916,7 @@ export class EmbeddedAuthority {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'tower does not exist');
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may set its relay');
+    if (this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     const targetAreaId = this.validRelayTargetAreaId(tower, command.payload.targetAreaId);
     if (!targetAreaId) return this.reject(command, 'nebula is outside relay range');
     tower.relayTargetAreaId = targetAreaId;
@@ -1575,6 +1971,7 @@ export class EmbeddedAuthority {
     const resetCounters = command.payload.resetCounters !== false;
     this.swarm.clearEnemies();
     this.state.projectiles = [];
+    delete this.state.turretRework;
     this.state.attackFields = [];
     this.state.forceFields = [];
     this.state.base.lives = this.startingLives;
@@ -1583,6 +1980,7 @@ export class EmbeddedAuthority {
       this.swarm.resetRunCounters();
       this.state.stats = initialStats();
       this.state.supportCounters = {};
+    this.state.research = freshResearch();
       for (const tower of this.state.towers) {
         tower.kills = 0;
         tower.lastKillTick = 0;
@@ -1633,9 +2031,11 @@ export class EmbeddedAuthority {
     const tower = this.state.towers.find((candidate) => candidate.id === command.payload.towerId);
     if (!tower) return this.reject(command, 'test tower does not exist');
     if (tower.ownerId !== player.id) return this.reject(command, 'only the tower owner may move it');
+    if (tower.socketHostId || this.state.towers.some((candidate) => candidate.socketHostId === tower.id)) return this.reject(command, 'sell the socket tower first');
     const { x, y } = command.payload;
     const areaId = findDefenseAreaAt(this.map, x, y);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !areaId) return this.reject(command, 'test tower must stay inside a defense area');
+    if (!towerPlacementClear(this.state.towers, Math.round(x), Math.round(y), tower.id)) return this.reject(command, 'towers need 24 units of clearance');
     tower.x = Math.round(x);
     tower.y = Math.round(y);
     tower.areaId = areaId;
@@ -1673,7 +2073,7 @@ export class EmbeddedAuthority {
   }
 
   recordBreaches(count, invincible = false) {
-    const livesLost = invincible ? 0 : Math.min(this.state.base.lives, count);
+    const livesLost = invincible || this.state.dev?.infiniteHealth ? 0 : Math.min(this.state.base.lives, count);
     this.state.base.lives -= livesLost;
     this.state.stats.breaches += count;
     if (this.state.base.lives === 0) this.state.phase = 'defeated';
@@ -1681,7 +2081,7 @@ export class EmbeddedAuthority {
   }
 
   presentation() {
-    const alpha = this.state.phase === 'running' && !this.state.test?.paused ? this.accumulatorMs / AUTHORITY_TICK_MS : 0;
+    const alpha = this.state.phase === 'running' && !this.state.test?.paused && !this.state.dev?.paused ? this.accumulatorMs / AUTHORITY_TICK_MS : 0;
     return this.swarm.presentation(alpha);
   }
 
@@ -1709,7 +2109,7 @@ export class EmbeddedAuthority {
   }
 
   applyCorrectionSnapshot(correction) {
-    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
+    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
       throw new Error('session correction is incompatible');
     }
     const correctionSeed = correction.state?.seed;
@@ -1726,6 +2126,7 @@ export class EmbeddedAuthority {
     }
     this.state = cloneSerializable(correction.state);
     this.state.protocolVersion = PROTOCOL_VERSION;
+    this.state.research = { ...freshResearch(), ...(this.state.research || {}) };
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
     this.state.mapCatalog = playableMaps().map((map) => ({ id: map.id, label: map.label }));
@@ -1741,10 +2142,29 @@ export class EmbeddedAuthority {
     this.state.towerCatalog = Object.values(this.towerDefinitions);
     this.state.towers = (this.state.towers || []).map((tower) => this.normalizeTower(tower));
     this.swarm.applyCorrection(correction.swarm);
+    if (correction.protocolVersion < 18) {
+      const oldSupport = (attack) => this.towerDefinitions[attack?.sourceFormId]?.supportOnly
+        || this.state.towers.some((t) => t.id === attack?.sourceTowerId && t.definitionId === 'echo');
+      this.state.projectiles = this.state.projectiles.filter((p) => {
+        if (!oldSupport(p.attack)) return true;
+        this.swarm.release(p.targetEnemyId, p.targetGeneration);
+        return false;
+      });
+      this.state.attackFields = this.state.attackFields.filter((f) => !oldSupport(f.attack));
+      this.state.research.pending = this.state.research.pending.filter((p) => !oldSupport(p.attack));
+      this.state.forceFields = [];
+      for (let id = 1; id < this.swarm.nextFreshId; id++) this.swarm.clearBond(id);
+      delete this.state.turretRework;
+    }
+    if (correction.protocolVersion < 14) {
+      this.state.forceFields = (this.state.forceFields || []).filter((field) => !field.persistentControl && field.sourceFormId !== 'orbit');
+      this.syncControlFields();
+    }
     const activeSpawnPoints = Math.max(0, Math.floor(this.state.swarm?.activeSpawnPoints || 0));
     this.state.swarm = this.swarmSummary(
       Number(this.state.swarm?.spawnRatePerSecond) || 0,
-      { length: activeSpawnPoints }
+      { length: activeSpawnPoints },
+      this.state.swarm?.meanHp || 1
     );
     const metadata = correction.authority || {};
     this.eventCounter = metadata.eventCounter || this.eventCounter;

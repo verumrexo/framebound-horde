@@ -1,13 +1,16 @@
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 20;
 export const AUTHORITY_TICK_RATE = 60;
 export const AUTHORITY_TICK_MS = 1000 / AUTHORITY_TICK_RATE;
 
 export const COMMAND = Object.freeze({
+  DEV_TOOLS: 'dev.tools',
   JOIN: 'session.join',
   LEAVE: 'session.leave',
   SESSION_START: 'session.start',
   SESSION_RESTART: 'session.restart',
   SESSION_CONTINUE_WITHOUT_PLAYER: 'session.continue_without_player',
+  RESEARCH_PURCHASE: 'research.purchase',
+  REACTOR_PURCHASE: 'reactor.purchase',
   TOWER_PLACE: 'tower.place',
   TOWER_EVOLVE: 'tower.evolve',
   TOWER_SELL: 'tower.sell',
@@ -16,6 +19,8 @@ export const COMMAND = Object.freeze({
   TOWER_FORCE_DIRECTION_SET: 'tower.force_direction.set',
   TOWER_CONTROL_GEOMETRY_SET: 'tower.control_geometry.set',
   TOWER_RELAY_TARGET_SET: 'tower.relay_target.set',
+  TOWER_ECHO_SOURCE_SET: 'tower.echo_source.set',
+  TOWER_SOCKET_SET: 'tower.socket.set',
   TEST_CONFIG_SET: 'test.config.set',
   TEST_CLEAR: 'test.clear',
   TEST_STEP: 'test.step',
@@ -34,6 +39,8 @@ export const EVENT = Object.freeze({
   PLAYER_BECAME_SPECTATOR: 'player.spectator',
   HOST_MIGRATED: 'session.host.migrated',
   BALANCED_INHERITANCE_COMPLETED: 'tower.inheritance.balanced',
+  RESEARCH_PURCHASED: 'research.purchased',
+  REACTOR_PURCHASED: 'reactor.purchased',
   TOWER_PLACED: 'tower.placed',
   TOWER_EVOLVED: 'tower.evolved',
   TOWER_SOLD: 'tower.sold',

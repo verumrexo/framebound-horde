@@ -58,6 +58,7 @@ export function defaultControlGeometry(definition, tower, map) {
     return { kind: 'point', ...point };
   }
   if (control.input === 'direction') {
+    if (control.type === 'aim') return { kind: 'direction', dx: downstream.x, dy: downstream.y };
     const sign = stableSign(tower.id);
     return { kind: 'direction', dx: -downstream.y * sign, dy: downstream.x * sign };
   }
@@ -66,8 +67,8 @@ export function defaultControlGeometry(definition, tower, map) {
     x: tower.x + downstream.x * midpointDistance,
     y: tower.y + downstream.y * midpointDistance
   }, map);
-  const axisX = -downstream.y;
-  const axisY = downstream.x;
+  const axisX = control.type === 'braid' ? downstream.x : -downstream.y;
+  const axisY = control.type === 'braid' ? downstream.y : downstream.x;
   const halfLength = Math.min((control.maxLength || range) * 0.5, range * 0.36);
   const first = clampDefaultPoint({ x: midpoint.x - axisX * halfLength, y: midpoint.y - axisY * halfLength }, map);
   const second = clampDefaultPoint({ x: midpoint.x + axisX * halfLength, y: midpoint.y + axisY * halfLength }, map);
@@ -97,6 +98,13 @@ export function normalizeControlGeometry(definition, tower, geometry, map) {
     }
     const length = Math.hypot(dx, dy);
     if (length <= 0.001) return null;
+    if (control.type === 'crosswind') {
+      const downstream = baseDirection(tower, map);
+      const side = (-downstream.y * dx + downstream.x * dy) / length;
+      if (Math.abs(side) < 0.05) return null;
+      const sign = side < 0 ? -1 : 1;
+      return { kind: 'direction', dx: -downstream.y * sign, dy: downstream.x * sign };
+    }
     return { kind: 'direction', dx: dx / length, dy: dy / length };
   }
   if (geometry.kind !== 'line') return null;
@@ -181,11 +189,10 @@ export function buildControlField(definition, tower, map, runTick) {
       thickness: control.thickness,
       normalX: -line.axisY,
       normalY: line.axisX,
-      delayTicks: Math.max(1, Math.round(control.delaySeconds * AUTHORITY_TICK_RATE)),
-      cooldownTicks: Math.max(1, Math.round(control.cooldownSeconds * AUTHORITY_TICK_RATE))
+      delayTicks: Math.max(1, Math.round(control.delaySeconds * AUTHORITY_TICK_RATE))
     };
   }
-  if (control.type === 'slow_zone') {
+  if (control.type === 'slow_zone' || control.type === 'frost_zone') {
     return { ...common, kind: 'slow_field', x: geometry.x, y: geometry.y, radius: control.radius, speedFactor: 1 - control.magnitude };
   }
   if (control.type === 'singularity') {
@@ -200,16 +207,15 @@ export function buildControlField(definition, tower, map, runTick) {
       activeTicks: Math.max(1, Math.round(control.activeSeconds * AUTHORITY_TICK_RATE))
     };
   }
-  if (control.type === 'vortex') {
+  if (control.type === 'bond_zone') {
     return {
       ...common,
-      kind: 'vortex_force',
+      kind: 'bond_zone',
       x: tower.x,
       y: tower.y,
       radius: control.radius,
-      radialStrength: control.radialStrength,
-      tangentialStrength: control.tangentialStrength,
-      spin: stableSign(tower.id)
+      periodTicks: Math.max(1, Math.round(control.periodSeconds * AUTHORITY_TICK_RATE)),
+      durationTicks: Math.max(1, Math.round(control.durationSeconds * AUTHORITY_TICK_RATE))
     };
   }
   if (control.type === 'braid') {
@@ -238,12 +244,14 @@ export function buildControlField(definition, tower, map, runTick) {
       range: control.range,
       halfWidth: control.width * 0.5,
       waveThickness: control.waveThickness,
-      strength: control.strength,
+      shoveDistance: control.shoveDistance,
       periodTicks: Math.max(1, Math.round(control.periodSeconds * AUTHORITY_TICK_RATE)),
       travelTicks: Math.max(1, Math.round(control.travelSeconds * AUTHORITY_TICK_RATE))
     };
   }
   if (control.type === 'crosswind') {
+    const phase = (runTick - (tower.controlReadyTick || 0)) % Math.round(control.periodSeconds * AUTHORITY_TICK_RATE);
+    if (phase >= Math.round(control.activeSeconds * AUTHORITY_TICK_RATE)) return null;
     return {
       ...common,
       kind: 'crosswind_force',
@@ -255,20 +263,24 @@ export function buildControlField(definition, tower, map, runTick) {
       strength: control.strength
     };
   }
-  if (control.type === 'force_wall') {
+  if (control.type === 'barricade') {
+    const phase = (runTick - (tower.controlReadyTick || 0)) % Math.round(control.periodSeconds * AUTHORITY_TICK_RATE);
+    if (phase >= Math.round(control.durationSeconds * AUTHORITY_TICK_RATE)) return null;
     const line = lineGeometry(geometry);
-    const direction = baseDirection({ x: line.x, y: line.y }, map, true);
+    return { ...common, ...line, kind: 'barricade', radius: line.halfLength + control.thickness,
+      thickness: control.thickness, normalX: -line.axisY, normalY: line.axisX };
+  }
+  if (control.type === 'splitter') {
+    const line = lineGeometry(geometry);
     return {
       ...common,
       ...line,
-      kind: 'force_wall',
-      radius: line.halfLength + control.thickness,
+      kind: 'splitter_force',
+      radius: Math.hypot(line.halfLength, control.thickness),
       wallAxisX: line.axisX,
       wallAxisY: line.axisY,
       wallNormalX: -line.axisY,
       wallNormalY: line.axisX,
-      pushX: direction.x,
-      pushY: direction.y,
       thickness: control.thickness,
       strength: control.strength
     };

@@ -24,7 +24,30 @@ async function openDatabase() {
     const database = request.result;
     if (!database.objectStoreNames.contains(RUN_STORE)) database.createObjectStore(RUN_STORE, { keyPath: 'sessionId' });
   });
-  return requestResult(request);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    };
+    const timeout = setTimeout(() => fail(new Error('indexeddb open timed out')), 10000);
+    request.addEventListener('blocked', () => fail(new Error('save database blocked by another tab')), { once: true });
+    request.addEventListener('error', () => fail(request.error || new Error('indexeddb open failed')), { once: true });
+    request.addEventListener('success', () => {
+      const database = request.result;
+      if (settled) {
+        database.close();
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      // Cooperate with an upgrade in another tab instead of blocking it forever.
+      database.addEventListener('versionchange', () => database.close());
+      resolve(database);
+    }, { once: true });
+  });
 }
 
 export async function saveSoloRun(sessionId, correction, commandLog) {
@@ -47,8 +70,12 @@ export async function loadSoloRun(sessionId) {
   const database = await openDatabase();
   try {
     const transaction = database.transaction(RUN_STORE, 'readonly');
-    const result = await requestResult(transaction.objectStore(RUN_STORE).get(sessionId));
-    await transactionDone(transaction);
+    // Observe commit/abort before the request resolves, and consume both failures.
+    const done = transactionDone(transaction);
+    const [result] = await Promise.all([
+      requestResult(transaction.objectStore(RUN_STORE).get(sessionId)),
+      done
+    ]);
     return result || null;
   } finally {
     database.close();

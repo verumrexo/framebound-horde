@@ -27,7 +27,7 @@ export const TEST_FIELD_SESSION_CONFIG = Object.freeze({
   mapId: 'test_field',
   seed: SESSION_SEED ^ 0x13579bdf,
   startingLives: 100,
-  startingCredits: 999999,
+  startingCredits: 1000000000000,
   towers: Object.freeze([]),
   towerDefinitions: TOWER_DEFINITIONS,
   swarm: Object.freeze({

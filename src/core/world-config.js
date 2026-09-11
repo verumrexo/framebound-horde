@@ -1,3 +1,4 @@
+import { spawnProfileAt } from './progression.js';
 const freezeArea = (area) => Object.freeze({
   ...area,
   shape: Object.freeze({ ...area.shape })
@@ -77,7 +78,15 @@ function freezeMap(map) {
     base: Object.freeze({ ...map.base }),
     spawnCurve: Object.freeze({ ...map.spawnCurve }),
     defenseAreas: Object.freeze(map.defenseAreas.map(freezeArea)),
-    spawnSources: Object.freeze(map.spawnSources.map(freezeSpawn))
+    spawnSources: Object.freeze(map.spawnSources.map((source) => freezeSpawn(
+      map.playable && source.y + (source.spreadY || 8) > map.bounds.bottom - 12
+        ? { ...source, x: source.x < 0 ? -1690 : 1690, y: 720,
+          spreadX: 34, spreadY: 140 }
+        : source
+    )).map((source) => freezeSpawn(map.playable ? { ...source,
+      x: Math.abs(source.x) >= 1500 ? source.x + Math.sign(source.x) * 1600 : source.x,
+      y: source.y < -1000 ? source.y - 1600 : source.y
+    } : source)))
   });
 }
 
@@ -264,7 +273,7 @@ const MAP_03_SPAWN_ORDER = [
 ];
 
 const COMMON_MAP = Object.freeze({
-  bounds: { left: -1800, right: 1800, top: -1500, bottom: 1180 },
+  bounds: { left: -3600, right: 3600, top: -3300, bottom: 900 },
   cameraBounds: { left: -1340, right: 1340, top: -1050, bottom: 900 },
   spawnCurve: {
     basePerSecond: 2,
@@ -307,6 +316,43 @@ export const MAP_DEFINITIONS = Object.freeze({
     defenseAreas: MAP_03_AREAS,
     spawnSources: perimeterSpawns('continent', MAP_03_SPAWN_ORDER)
   }),
+  map_04: freezeMap({
+    ...COMMON_MAP, id: 'map_04', label: 'map 04 // corridor',
+    menuLines: ['solid side walls', 'linear north-to-south flow'], playable: true,
+    sideWalls: true, bounds: { left: -380, right: 380, top: -1100, bottom: 900 },
+    cameraBounds: { left: -520, right: 520, top: -1100, bottom: 900 },
+    camera: { x: 0, y: 100, scale: 4 },
+    base: { id: 'base_4', x: 0, y: 790, reachRadius: 30 },
+    defenseAreas: [
+      ...areasFromSpecs('corridor_', 1, [-650,-300,50,400,650].flatMap((y) => [-245,245].map((x) => [x,y,70,60,0]))),
+      ...areasFromSpecs('corridor_', 11, [[0,-470,70,60,2],[0,230,70,60,4]])
+    ],
+    spawnSources: [-180,0,180].map((x,i) => ({id:`corridor_rift_${i}`,x,y:-1000,spreadX:30,spreadY:12,unlockSeconds:i*120}))
+  }),
+  map_05: freezeMap({
+    ...COMMON_MAP, id: 'map_05', label: 'map 05 // shuffled rifts',
+    menuLines: ['seeded rift positions', 'new approaches every run'], playable: true,
+    randomRifts: true, camera: { x: 0, y: 300, scale: 4 },
+    base: { id: 'base_5', x: 0, y: 760, reachRadius: 30 },
+    defenseAreas: MAP_01_AREAS,
+    spawnSources: perimeterSpawns('shuffle', MAP_01_SPAWN_ORDER)
+  }),
+  map_06: freezeMap({
+    ...COMMON_MAP,
+    id: 'map_06',
+    label: 'map 06 // walled clusters',
+    menuLines: ['47 mixed areas + side walls', 'northern rifts only'],
+    playable: true,
+    sideWalls: true,
+    bounds: { left: -1420, right: 1420, top: -3300, bottom: 900 },
+    cameraBounds: { left: -1560, right: 1560, top: -1050, bottom: 900 },
+    camera: { x: 0, y: 300, scale: 4 },
+    base: { id: 'base_6', x: 0, y: 760, reachRadius: 30 },
+    defenseAreas: MAP_01_AREAS,
+    spawnSources: perimeterSpawns('walled', MAP_01_SPAWN_ORDER)
+      .filter((source) => source.id.startsWith('walled_n_')
+        && Math.abs(source.x) + source.spreadX < 1420)
+  }),
   test_field: freezeMap({
     id: 'test_field',
     label: 'test field',
@@ -333,10 +379,20 @@ export const MAP_DEFINITIONS = Object.freeze({
 
 export const DEFAULT_MAP_ID = 'map_01';
 
-export function getMapDefinition(mapId = DEFAULT_MAP_ID) {
+export function getMapDefinition(mapId = DEFAULT_MAP_ID, seed = 0) {
   const map = MAP_DEFINITIONS[mapId];
   if (!map) throw new Error(`unknown map: ${mapId}`);
-  return map;
+  if (!map.randomRifts) return map;
+  let value = (seed ^ 0xa341316c) >>> 0;
+  const random = () => { value = (Math.imul(value,1664525)+1013904223) >>> 0; return value/4294967296; };
+  const sources = map.spawnSources.map((source) => {
+    const edge = Math.floor(random()*3);
+    const x = edge === 0 ? map.bounds.left+120 : edge === 1 ? map.bounds.right-120
+      : map.bounds.left+120+random()*(map.bounds.right-map.bounds.left-240);
+    const y = edge === 2 ? map.bounds.top+120 : map.bounds.top+120+random()*(map.bounds.bottom-map.bounds.top-360);
+    return Object.freeze({...source,x,y,spreadX:24,spreadY:24});
+  });
+  return Object.freeze({...map,layoutSeed:seed>>>0,spawnSources:Object.freeze(sources)});
 }
 
 export function playableMaps() {
@@ -358,9 +414,7 @@ export function isInsideDefenseArea(mapOrId, x, y) {
 
 export function spawnRateAt(mapOrId, runTick, tickRate = 60) {
   const map = typeof mapOrId === 'string' ? getMapDefinition(mapOrId) : mapOrId;
-  const minutes = Math.max(0, runTick) / tickRate / 60;
-  const curve = map.spawnCurve;
-  return (curve.basePerSecond + curve.linearPerMinute * minutes) * Math.pow(curve.growthPerMinute, minutes);
+  return spawnProfileAt(map, runTick, tickRate).rate;
 }
 
 export function activeSpawnSources(mapOrId, runTick, tickRate = 60) {

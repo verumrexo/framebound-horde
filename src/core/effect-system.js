@@ -1,3 +1,5 @@
+import { insideSweptBeam } from './sweep-collision.js';
+import { damageFixed, damageResearchBonus } from './research-combat.js';
 import { AUTHORITY_TICK_RATE, cloneSerializable } from './protocol.js';
 
 const MAX_TRIGGER_EVENTS_PER_TICK = 4096;
@@ -14,7 +16,7 @@ function takeVictims(candidates, geometry) {
 function damagePerVictim(attack) {
   return attack.effects
     .filter((effect) => effect.type === 'damage')
-    .reduce((total, effect) => total + Math.max(0, Math.round(effect.amount || 0)), 0);
+    .reduce((total, effect) => total + damageFixed(effect.amount || 0), 0);
 }
 
 function selectChain(swarm, contact, geometry, excludedIds) {
@@ -55,6 +57,12 @@ export function selectAttackVictims(swarm, attack, contact, excludedIds = null) 
     return takeVictims(swarm.enemiesInCircle(contact.x, contact.y, geometry.radius, excludedIds), geometry);
   }
   if (geometry.type === 'line') {
+    if (Number.isFinite(geometry.sweepFromAngle) && Number.isFinite(geometry.sweepToAngle)) {
+      const range = Math.hypot(geometry.x2 - geometry.x1, geometry.y2 - geometry.y1);
+      return takeVictims(swarm.enemiesInCircle(geometry.x1, geometry.y1, range + geometry.width * .5, excludedIds)
+        .filter((enemy) => insideSweptBeam(enemy.x - geometry.x1, enemy.y - geometry.y1,
+          range, geometry.width, geometry.sweepFromAngle, geometry.sweepToAngle)), geometry);
+    }
     return takeVictims(
       swarm.enemiesAlongSegment(geometry.x1, geometry.y1, geometry.x2, geometry.y2, geometry.width * 0.5, excludedIds),
       geometry
@@ -237,9 +245,11 @@ export function resolveAttackPlans(swarm, plans, {
   tick,
   forceFields,
   nextFieldNumber = () => 0,
+  research = null,
   sourceKillCounts = new Map()
 }) {
   const results = [];
+  const bondKills = [];
   const triggerQueue = [];
   const killOrdinalBySource = new Map(sourceKillCounts);
   const enqueueKillTriggers = (attack, origin, depth, lineage) => {
@@ -267,14 +277,27 @@ export function resolveAttackPlans(swarm, plans, {
     const packetWide = plan.attack.geometry.packetMode === 'all';
     const nonDamageEffects = directEffects.filter((effect) => effect.type !== 'damage');
     for (const victim of plan.victims) {
+      const currentVictim = swarm.enemy(victim.id, victim.generation);
+      if (!currentVictim) continue;
       let hit = null;
+      let hpPopped = 0;
+      let overkill = 0;
+      let bonus = research ? damageResearchBonus(research, swarm, plan.attack, currentVictim, plan.contact, tick) : 0;
       for (const effect of directEffects) {
         if (effect.type !== 'damage') continue;
-        hit = swarm.damage(victim.id, victim.generation, effect.amount, { packetWide });
+        const amount = damageFixed(effect.amount + bonus);
+        bonus = 0;
+        const live = swarm.enemy(victim.id, victim.generation);
+        if (live) overkill += Math.max(0, amount - live.hp);
+        hit = swarm.damage(victim.id, victim.generation, amount, { packetWide });
+        hpPopped += hit?.hpPopped || 0;
         if (!hit || hit.killed) break;
       }
       if (!hit && !directEffects.some((effect) => effect.type === 'damage')) hit = swarm.enemy(victim.id, victim.generation);
       if (!hit) continue;
+      if (hit.bondKill) bondKills.push(hit.bondKill);
+      hit.hpPopped = damageFixed(hpPopped);
+      hit.overkill = damageFixed(overkill);
       result.hits.push(hit);
       if (hit.killed) {
         result.kills.push(hit);
@@ -310,6 +333,7 @@ export function resolveAttackPlans(swarm, plans, {
         for (const target of targets) {
           const hit = swarm.damage(target.id, target.generation, effect.amount);
           if (!hit) continue;
+          if (hit.bondKill) bondKills.push(hit.bondKill);
           result.hits.push(hit);
           if (!hit.killed) continue;
           result.kills.push(hit);
@@ -330,5 +354,5 @@ export function resolveAttackPlans(swarm, plans, {
     }
   }
 
-  return { results, processedTriggers, triggerOverflow: triggerQueue.length > 0 };
+  return { results, bondKills, processedTriggers, triggerOverflow: triggerQueue.length > 0 };
 }

@@ -35,7 +35,7 @@ the root tower is `frame` and costs 100 credits to place. progression replaces t
 
 - first replacement: pay 200 and choose exactly one of `assault`, `tether`, or `network`.
 - second replacement: each first form offers three mutually exclusive children costing 400. all nine second-stage forms are implemented.
-- third replacement: each assault and tether child offers three mutually exclusive finished forms costing 800. all nine assault grandchildren and all nine tether grandchildren are implemented; network currently stops at its three children.
+- third replacement: each assault, tether and network child offers three mutually exclusive finished forms costing 800. all twenty-seven grandchildren are implemented.
 - choosing a child permanently locks its siblings.
 - a finished assault path has 1,500 credits invested and sells for 750.
 
@@ -88,27 +88,29 @@ each replacement costs 400 credits, fully replaces tether, preserves the tower's
 
 ## approved tether grandchildren
 
-each grandchild costs 800 credits, fully replaces its parent, sacrifices the frame-like weapon, preserves tower identity, and ends that branch for now. the parent effect is not inherited. these are pure control installations: they do not target, fire, or need kills to operate.
+each grandchild costs 800 credits, fully replaces its parent, sacrifices the frame-like weapon, preserves tower identity, and ends that branch for now. the parent effect is not inherited. these are passive installations: they do not fire projectiles. bond links enemies without requiring a kill to activate, but its paired-death payoff needs another weapon to kill a linked enemy. the other eight manipulate time or movement without dealing damage.
 
-configurable points and walls may be placed anywhere inside the tower's current range, not only inside a nebula. repositioning is free but reboots that installation for one second. point and direction controls use one click; line controls use click-drag. overlapping copies of the same finished form do not multiply their force or slow, while different control forms combine. every valid enemy inside the geometry is affected without a hidden target cap. all geometry, pulse phase, crossing outcome, and telemetry are authoritative and correction-safe.
+configurable points and walls may be placed anywhere inside the tower's current range, not only inside a nebula. repositioning is free but reboots that installation for one second. point and direction controls use one click; line controls use click-drag. overlapping copies of the same finished form do not multiply their force or slow. braid, crosswind, and breakwater combine only sideways steering, with a shared lateral-speed bound and preserved obstacle-aware forward movement. timed effects use shared rhythms so more copies add coverage, not permanent trapping. geometry affects every eligible enemy without a hidden population cap; a bond requires two unpaired enemies. all geometry, pulse phase, pairing, crossing outcomes, and telemetry are authoritative and correction-safe.
 
 from `anchor`:
 
-- `stasis`: place a 72-unit time field. on a shared six-second authority rhythm it freezes every enemy inside for 1.05 seconds.
-- `recall`: draw a memory gate up to 130 units long. an enemy crossing it records that exact crossing point, receives the recall marker, and snaps back after 1.5 seconds. each enemy has a five-second gate cooldown so stacked recall gates cannot create a teleport blender.
-- `dragnet`: place a permanent 86-unit field that slows every enemy inside by 55 percent.
+- `stasis`: place a 72-unit time field. on a shared eight-second authority rhythm it freezes every enemy inside for 0.6 seconds; enemies arriving after the pulse are not frozen.
+- `recall`: draw a memory gate up to 130 units long. an enemy crossing it records that exact crossing point, receives the recall marker, and snaps back after 1.5 seconds. each enemy may be marked only once in its lifetime, shared across all recall gates. moving, stacking or selling gates cannot rearm it.
+- `dragnet`: place a permanent 86-unit field that slows every enemy inside by 25 percent, down from 55 percent. the strongest slow wins rather than multiplying with other slows.
 
 from `knot`:
 
-- `singularity`: place a 108-unit gravity point. it produces a violent 0.85-second inward pulse on a shared three-second authority rhythm.
-- `orbit`: creates a permanent 145-unit tower-centred vortex, combining inward pull with a stable tower-specific spin direction.
-- `braid`: draw a corridor up to 180 units long and 82 units wide. opposing lateral forces continuously squeeze enemies toward its centreline.
+- `singularity`: place a 108-unit gathering point. it pulls inward for 0.45 seconds every six seconds, then releases the clump. inward strength is reduced from 400 to 300; there is no always-on holding field.
+- `bond`: replaces orbit. every six seconds it links spatially neighbouring enemies in pairs within 120 units of the tower for two seconds. killing one kills its surviving partner. an enemy has at most one active link; linked deaths cannot trigger more links or attack on-kill chains. bonus kills, ordinary income and forge progress are attributed to bond. it does not slow, pull or shoot. compressed records link a matched number of represented units, so one ordinary bullet claims at most one extra unit, not an entire packet. existing saved orbit towers become bond without losing investment, ownership or lifetime kills.
+- `braid`: draw a corridor up to 180 units long and 82 units wide, preferably along the swarm's flow. weaker opposing lateral forces squeeze enemies toward its centreline without reducing forward movement. its default corridor now follows the flow instead of cutting across it.
 
 from `backwash`:
 
-- `breaker`: emits one enormous 180-unit-wide upstream shockwave every seven seconds. the hard wavefront travels 220 units over 1.1 seconds and pushes everything it intersects.
-- `crosswind`: the owner chooses a direction for a permanent 132-unit steering field centred on the tower. every enemy inside is bent laterally without being stopped.
-- `breakwater`: draw a persistent passable force wall up to 188 units long. enemies may cross its 18-unit band, but occupancy continuously pushes them upstream.
+- `breaker`: emits a 180-unit-wide shockwave every eight seconds. the hard wavefront travels 220 units over 1.1 seconds. each enemy receives one 26-unit upstream shove per shared wave cycle; overlapping breakers cannot repeatedly shove the same enemy during that cycle. there is no continuing acceleration or lingering push field, and nebula exclusion still applies.
+- `crosswind`: choose left or right for a permanent 132-unit steering field centred on the tower. both the preview and accepted direction snap sideways relative to local flow. enemy steering projects sideways against its own obstacle-aware direction, never upstream, and strength is reduced from 190 to 130.
+- `breakwater`: draw a persistent passable splitter up to 188 units long, with a 30-unit influence band on either side. it steers enemies toward the nearer endpoint rather than pushing upstream. a stable enemy identity decides an exact centre tie. enemies retain forward movement, may cross anywhere, and never queue against a solid wall.
+
+these are initial rework values, not a claim of playtested final balance. the test field exposes all nine through the existing tether catalog. bond uses a green centre marker; selecting it shows a small sample of actual live links, while normal play avoids a screenful of connecting lines. bond's selection displays kills, and breaker's selection counts enemies shoved rather than meaningless sustained-force time.
 
 ## approved network replacements
 
@@ -134,7 +136,7 @@ each replacement costs 400 credits, fully replaces network, preserves the tower'
 
 press or click `t` to enter the local test field while the actual solo run continues in the background. it uses the same authority, swarm, targeting, projectile, collision, effect, and tower-form code as the game.
 
-the field provides one primary tower, up to 8 support towers, two defense areas for relay checks, direct hotkeys for the 13 core forms, and a paged `u` form catalog for all 31 implemented forms. it also provides draggable towers, draggable and toggleable spawn points, a 0–100,000 enemies-per-second slider, presets, hp diagnostics, invincible-base toggle, clear/reset, keep-swarm toggle, pause, single-step, 0.25×/1×/2×/4× time, range display, and live 1-second/10-second/peak kps plus real population, simulation-record, and combat counters. test settings persist locally.
+the field provides one primary tower, up to 8 support towers, two defense areas for relay checks, direct hotkeys for the 13 core forms, and a paged `u` form catalog for all 40 implemented forms. it also provides draggable towers, draggable and toggleable spawn points, a 0–100,000 enemies-per-second slider, presets, hp diagnostics, invincible-base toggle, clear/reset, keep-swarm toggle, pause, single-step, 0.25×/1×/2×/4× time, range display, and live 1-second/10-second/peak kps plus real population, simulation-record, and combat counters. test settings persist locally.
 
 ## cooperative multiplayer contract
 
@@ -152,9 +154,9 @@ the pixel main menu now hosts or joins a six-character room through the existing
 
 the full contract above remains the target. this beta does not yet have network host migration, turn fallback, or restart voting. the host must keep the game open; an original guest can reconnect, but the room cannot survive its host closing. restrictive-network connectivity and multi-machine gameplay are manual acceptance checks, not claimed as verified by a build.
 
-## deferred network grandchildren
+## network grandchildren
 
-the approved relay descendants and the current overclock/forge recommendations are recorded in [`network-grandchildren-todo.md`](network-grandchildren-todo.md). they remain outside the multiplayer beta milestone and must not be implemented accidentally while transport work is in progress.
+the nine implemented forms, shared rules, controls and acceptance boundary are recorded in [`network-grandchildren-todo.md`](network-grandchildren-todo.md). overclock becomes redline, metronome or aperture; forge becomes mint, salvage or foundry; relay becomes amplifier, echo or hardpoint.
 
 ## visual contract
 
@@ -162,11 +164,37 @@ the approved relay descendants and the current overclock/forge recommendations a
 - camera and geometry snap to logical pixels. the context disables antialiasing, multisampling, dithering, smoothing, and filtered textures. shaders use hard cutoffs and never `smoothstep` edges.
 - enemies are chunky red squares. compressed packets remain visibly plural: one movement point draws a hard cluster of up to four separate squares, with a center overload pixel when it represents more. a status is a tiny contrasting square in the packet center: slow uses cyan, recall uses amber, and stasis uses mint.
 - each nebula is one authored organic harmonic silhouette, drawn from three families: torn islands, angled wisps, and shallow bitten hubs. there are no stacked-circle seams or enclosed cutout traps. the interior is near-black green with sparse hard scratches; the full edge stays subdued and only broken edge scars use bright mint. cyan is reserved for towers, shots, status, and information.
-- prism and sweeper tower art uses open negative space with no black backing plate. prism beams have no dark outer band; sweeper presentation replaces stacked beam afterimages with one connected moving sector and a bright leading cut.
+- tower bodies use only horizontal and vertical rectangles, including all upgrades and future forms. frame and its assault, tether and network replacements are the reference: square housings, inset cores, straight rails and blunt attachments. no diagonal lines, diagonal silhouettes, triangles, angled arms or rotating body parts. prism is a three-emitter rack; sweeper is a straight scanner rail. combat beams and world-space targeting retain their actual geometry.
 - all interface text is lowercase and drawn from a real bitmap glyph atlas inside the game framebuffer.
 - the palette is black `#010607`, cyan `#35f2ff`, mint `#55ffc2`, green `#74ff6a`, amber `#ffc857`, and hostile red `#ff4d5a`.
 - the hud may be polished, readable, responsive, and playful, but never becomes glossy web chrome: no gradients, glow, blur, soft shadows, rounded cards, or corporate cyan dashboard sludge.
 
+## usability
+
+- press `?` or open the escape menu field guide for build, targeting, camera and save controls. the guide distinguishes test-field shortcuts from production shortcuts and explicitly states that menus do not pause solo.
+- pointer cancellation, lost capture and focus loss clear unfinished gestures without committing control geometry. secondary touches cannot hijack a gesture. browser modifier shortcuts do not trigger game hotkeys. escape and defeat screens discard underlying interactive hitboxes.
+- solo saving is attempted when a tab becomes hidden as well as on page exit and the existing autosave cadence; browser storage and abrupt process termination remain external limits. blocked database opens and ten-second open timeouts report save unavailability instead of locking the loading flow indefinitely. a read is accepted only after its transaction commits.
+- defeat shows survival time, kills and remaining towers with clickable retry, map selection and menu actions. co-op offers room status and explains the fresh-room restart limitation.
+
 ## current scope boundary
 
-the current milestone is the browser multiplayer beta: the reusable game foundation, all nine assault grandchildren, all nine tether grandchildren, three selectable production maps, the menu shell, perimeter production rifts, the test field, and live webrtc room flow. final balance, deferred network grandchildren, audio, and tauri packaging remain later milestones. tower names and effects beyond the approved forms require player decisions before implementation.
+the current build includes the reusable game foundation, all twenty-seven grandchildren, three selectable production maps, the menu shell, perimeter production rifts, the test field, and live webrtc room flow. final balance, audio, and tauri packaging remain later milestones. tower names and effects beyond the approved forms require player decisions before implementation.
+
+## current hp economy and boundary revision — protocol 16
+
+this section supersedes the earlier one-hp-only and forced low-resolution rendering requirements.
+
+- the original exponential spawn formula is retained as hp per second, and each hp actually removed pays one ordinary credit before existing mint/forge bonuses. nonlethal hits pay immediately; overkill cannot pay. body kills remain a separate statistic.
+- after two minutes the hp mixture gradually changes from red (1) to orange (2). it reaches all-orange at twenty minutes. the physical spawn cap is that twenty-minute body rate: approximately 480.22/sec. all later exponential growth becomes average hp. neighbouring integer hp values mix deterministically; colour changes as remaining hp drops. first tiers are red, orange, yellow, violet and magenta; higher hp uses marked colour bands.
+- the budget identity is `body rate * average hp = old uncapped spawn rate`. at 45 minutes that is about 480.22 bodies/sec * 608.89 hp = 292,399.06 hp/sec. this preserves available reward supply, not automatic income or unchanged survival difficulty. late-game damage research remains the next design stage.
+- rocket cadence: rocket 0.25/sec; warhead 0.3/sec; cluster 0.4/sec; salvo one three-rocket volley per three seconds. laser/cutter/prism/sweeper widths are 16/32/10/12.
+- tower placement and test dragging enforce an 80-unit centre separation; occupied socket purchases also respect clearance. existing saved layouts are not moved. tower art scales with world zoom rather than staying the same screen size.
+- production bottom boundary is y=900 for camera and enemies. old southern entrances now approach from the side perimeter above the wall. zoom levels 1–8 are restored, with the bottom of the playable viewport clamped to the wall.
+- unlinked relays automatically select the nearest eligible nebula not already claimed by a relay target, respecting existing link range. valid manual links remain unchanged; target choice has stable tie-breaking.
+- the canvas renders at display pixel density with antialiasing, without forced low-resolution enlargement or geometry snapping. blocky tower assets and bitmap lettering remain intentional.
+- protocol 16 is required between peers; older solo corrections through 15 still load. hp tables use float64 to avoid the previous 65,535-hp limit. fractional spawn state is included in corrections and checksums.
+- arsenal/reactor replacements and revised 39-node research are proposed in `arsenal-reactor-proposal.md`; their purchase systems are not implemented yet.
+
+## arsenal and reactor / protocol 17
+
+this supersedes earlier salvage/foundry descriptions: salvage migrates to reactor and foundry to arsenal. arsenal offers 39 unique global research nodes in a 3/9/27 tree, with one path per station and free traversal of owned ancestors. tiers cost 10 million, 100 million and 1 billion. reactor offers 12 globally priced rank categories. research survives station sale and never contributes to its refund. purchases use the payer wallet; benefits are shared. see [the approved station design](arsenal-reactor-proposal.md) for effects and caps. fractional damage pays accumulated whole hp, without overkill rewards; secondary attacks cannot recursively trigger research. automated checks cover authority behavior; manual gameplay and multiplayer acceptance remain pending.

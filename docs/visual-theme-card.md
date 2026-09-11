@@ -201,3 +201,18 @@ use the framebound visual system for this project: a dominant #010607 near-black
 - [ ] panels use interrupted lines and square geometry
 - [ ] the design still reads with all decorative stars and scratches removed
 - [ ] none of the forbidden soft effects slipped back in
+
+## tower body contract
+
+frame and its three direct replacements (assault, tether, network) are the reference. every existing and future turret is assembled from horizontal and vertical rectangles: square housings, inset cores, blunt barrels, cooling fins, rails, sockets and mechanical blocks. no diagonals, slanted silhouettes, angled components, triangular bodies or rotating body parts. animation moves indicators along straight rails or changes illumination. silhouettes remain stable.
+
+`src/render/tower-sprites.js` owns body art for the world, placement previews and catalog. world-space links and combat geometry are separate. `npm run test:art` exercises every catalog entry with a rectangle-only drawing interface and checks integer geometry, sprite bounds, distinct designs and placement tint. preserve this gate for future forms. the bitmap atlas in `src/main.js` remains the typography source of truth.
+
+## current rendering override
+
+the game now renders at display pixel density with antialiasing. the earlier forced low-resolution enlargement and geometry-snapping requirements are superseded. the blocky tower body contract and authored bitmap lettering remain, but there is no full-scene pixelation filter. enemies use remaining-hp colours instead of a universally red body.
+
+
+## subtle sleeping-machine network
+
+linked nebulae reveal sparse, static, world-aligned circuit traces inside their silhouettes. traces disappear beyond zoom scale 5; ordinary link lines stay below enemy contrast and render underneath enemies. at most one two-pixel signal moves across the entire network for two seconds every eight seconds. paid research triggers one outward activation on existing traces only, lasting at most four seconds; repeated purchases replace the wave. no full-field flashes, tower-body blinking, glow, particles, or additional labels. reduced-motion preference disables both traveling effects. this is presentation only and does not change buff timing or network rules.

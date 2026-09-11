@@ -4,12 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check src/main.js && node --check src/core/protocol.js && node --check src/core/embedded-session.js && node --check src/core/effect-system.js && node --check src/core/enemy-swarm.js && node --check src/core/control-system.js && node --check src/core/tower-catalog.js && node --check src/core/strike-pattern.js && node --check src/core/session-config.js && node --check src/core/world-config.js && node --check src/core/persistence.js && node --check src/core/p2p-wire.js && node --check src/core/p2p-transport.js && node --check src/core/p2p-session.js && node --check vite.config.js && node --check scripts/benchmark-kps.mjs && node --check scripts/benchmark-gameplay.mjs",
+    "test:network": "node scripts/test-network-descendants.mjs",
+    "check": "node --check src/main.js && node --check src/core/protocol.js && node --check src/core/embedded-session.js && node --check src/core/effect-system.js && node --check src/core/enemy-swarm.js && node --check src/core/control-system.js && node --check src/core/tower-catalog.js && node --check src/core/strike-pattern.js && node --check src/core/session-config.js && node --check src/core/world-config.js && node --check src/core/persistence.js && node --check src/core/p2p-wire.js && node --check src/core/p2p-transport.js && node --check src/core/p2p-session.js && node --check vite.config.js && node --check scripts/benchmark-kps.mjs && node --check scripts/benchmark-gameplay.mjs && node --check src/core/network-descendants.js && node --check src/render/tower-sprites.js && npm run test:art && npm run test:network && npm run test:persistence && node --check src/core/progression.js && node --check src/core/placement.js && npm run test:progression && node --check src/core/research.js && node --check src/core/research-combat.js && npm run test:research && npm run test:dev && node --check src/core/turret-rework.js && npm run test:turrets && node --check src/render/laser-effects.js && npm run test:lasers && node --check src/core/sweep-collision.js && npm run test:sweep && npm run test:options",
     "build": "vite build",
     "dev": "vite --host 127.0.0.1 --port 4173",
     "balance:kps": "node scripts/benchmark-kps.mjs",
     "balance:gameplay": "node scripts/benchmark-gameplay.mjs",
-    "serve": "vite preview --host 127.0.0.1 --port 4173"
+    "serve": "vite preview --host 127.0.0.1 --port 4173",
+    "test:art": "node scripts/test-tower-sprites.mjs",
+    "test:persistence": "node scripts/test-persistence.mjs",
+    "test:progression": "node scripts/test-progression.mjs",
+    "test:research": "node scripts/test-research.mjs",
+    "test:dev": "node scripts/test-dev-tools.mjs",
+    "test:turrets": "node scripts/test-turret-rework.mjs",
+    "test:lasers": "node scripts/test-laser-effects.mjs",
+    "test:sweep": "node scripts/test-sweep-collision.mjs",
+    "test:options": "node scripts/test-gameplay-options.mjs"
   },
   "dependencies": {
     "socket.io-client": "^4.8.3"

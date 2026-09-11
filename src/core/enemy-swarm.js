@@ -1,3 +1,4 @@
+import { damageFixed } from './research-combat.js';
 import { AUTHORITY_TICK_RATE } from './protocol.js';
 import { defenseAreaBounds, defenseAreaField } from './world-config.js';
 
@@ -31,8 +32,24 @@ export const STATUS_MARKER = Object.freeze({
   mark: 3,
   recall: 3,
   stun: 4,
-  stasis: 4
+  stasis: 4,
+  bond: 5
 });
+
+// Identity-indexed control state survives packed-record swaps and peer corrections.
+const CONTROL_ID_TABLES = Object.freeze({
+  recallUsedById: Uint8Array,
+  breakerCycleById: Uint32Array,
+  bondPartnerById: Uint32Array,
+  bondGenerationById: Uint32Array,
+  bondUntilById: Uint32Array,
+  bondSourceById: Uint32Array,
+  bondUnitsById: Float32Array
+});
+const BOND_TABLES = Object.freeze([
+  'bondPartnerById', 'bondGenerationById', 'bondUntilById', 'bondSourceById', 'bondUnitsById'
+]);
+const CONTROL_ID_NAMES = Object.freeze(Object.keys(CONTROL_ID_TABLES));
 
 function hash32(value) {
   let hash = value >>> 0;
@@ -71,7 +88,7 @@ export class EnemySwarm {
     this.randomState = this.seed || 0x6d2b79f5;
     this.map = map;
     this.base = map.base;
-    this.defaultEnemyHp = Math.max(1, Math.min(65535, Math.round(enemyHp)));
+    this.defaultEnemyHp = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.round(enemyHp)));
     this.capacity = 0;
     this.count = 0;
     this.activeUnitCount = 0;
@@ -79,11 +96,14 @@ export class EnemySwarm {
     this.freeCount = 0;
     this.tickNumber = 0;
     this.spawnAccumulator = 0;
+    this.spawnHpAccumulator = 0;
     this.spawnSourceCursor = 0;
     this.spawnedTotal = 0;
     this.slowedCount = 0;
     this.lastChecksum = '00000000';
-    this.resolveScratch = new Float64Array(4);
+    this.resolveScratch = new Float64Array(5);
+    this.bondSourceIds = [''];
+    this.bondSourceIndex = new Map();
     this.defenseAreas = map.defenseAreas;
 
     this.gridLeft = map.bounds.left;
@@ -136,13 +156,16 @@ export class EnemySwarm {
     this.indexById = growTypedArray(this.indexById, Int32Array, nextCapacity + 1, -1);
     this.generationById = growTypedArray(this.generationById, Uint32Array, nextCapacity + 1);
     this.reservedById = growTypedArray(this.reservedById, Uint8Array, nextCapacity + 1);
-    this.hpById = growTypedArray(this.hpById, Uint16Array, nextCapacity + 1);
-    this.maxHpById = growTypedArray(this.maxHpById, Uint16Array, nextCapacity + 1);
+    this.hpById = growTypedArray(this.hpById, Float64Array, nextCapacity + 1);
+    this.maxHpById = growTypedArray(this.maxHpById, Float64Array, nextCapacity + 1);
     this.slowUntilById = growTypedArray(this.slowUntilById, Uint32Array, nextCapacity + 1);
     this.slowFactorById = growTypedArray(this.slowFactorById, Float32Array, nextCapacity + 1, 1);
     this.stasisUntilById = growTypedArray(this.stasisUntilById, Uint32Array, nextCapacity + 1);
     this.recallDueById = growTypedArray(this.recallDueById, Uint32Array, nextCapacity + 1);
-    this.recallCooldownUntilById = growTypedArray(this.recallCooldownUntilById, Uint32Array, nextCapacity + 1);
+    for (const [name, Constructor] of Object.entries(CONTROL_ID_TABLES)) {
+      this[name] = growTypedArray(this[name], Constructor, nextCapacity + 1);
+    }
+    this.bondCandidateIds = growTypedArray(this.bondCandidateIds, Uint32Array, nextCapacity);
     this.recallXById = growTypedArray(this.recallXById, Float32Array, nextCapacity + 1);
     this.recallYById = growTypedArray(this.recallYById, Float32Array, nextCapacity + 1);
     this.statusCodeById = growTypedArray(this.statusCodeById, Uint8Array, nextCapacity + 1);
@@ -242,7 +265,7 @@ export class EnemySwarm {
 
   mergeSpawnUnits(source, unitCount, enemyHp) {
     const x = source.x + (this.random() - 0.5) * source.spreadX * 2;
-    const y = source.y + (this.random() - 0.5) * source.spreadY * 2;
+    const y = Math.min(this.map.bounds.bottom - 2, source.y + (this.random() - 0.5) * source.spreadY * 2);
     this.random();
     const index = this.findPacketMergeIndex(x, y, enemyHp);
     if (index < 0) return false;
@@ -255,7 +278,7 @@ export class EnemySwarm {
     return true;
   }
 
-  spawnAtRate(ratePerSecond, sources, enemyHp = this.defaultEnemyHp) {
+  spawnAtRate(ratePerSecond, sources, enemyHp = this.defaultEnemyHp, meanHp = null) {
     if (!sources?.length || !Number.isFinite(ratePerSecond) || ratePerSecond <= 0) return 0;
     this.spawnAccumulator += ratePerSecond / AUTHORITY_TICK_RATE;
     const spawnCount = Math.floor(this.spawnAccumulator);
@@ -263,10 +286,15 @@ export class EnemySwarm {
     let remaining = spawnCount;
     const mergedUnitsBySource = new Map();
     while (remaining > 0) {
-      const packetUnits = Math.min(remaining, this.packetSizeForPopulation(enemyHp));
+      if (meanHp !== null) {
+        this.spawnHpAccumulator += meanHp;
+        enemyHp = Math.max(1, Math.floor(this.spawnHpAccumulator));
+        this.spawnHpAccumulator -= enemyHp;
+      }
+      const packetUnits = meanHp !== null ? 1 : Math.min(remaining, this.packetSizeForPopulation(enemyHp));
       const source = this.selectSpawnSource(sources);
       this.spawnSourceCursor = (this.spawnSourceCursor + packetUnits) >>> 0;
-      if (enemyHp === 1 && this.count >= SWARM_RECORD_BUDGET) {
+      if (meanHp === null && enemyHp === 1 && this.count >= SWARM_RECORD_BUDGET) {
         mergedUnitsBySource.set(source, (mergedUnitsBySource.get(source) || 0) + packetUnits);
       } else {
         this.spawnOne(source, enemyHp, packetUnits);
@@ -283,7 +311,7 @@ export class EnemySwarm {
     this.ensureCapacity(this.count + 1);
     const id = this.allocateId();
     const generation = (this.generationById[id] + 1) >>> 0 || 1;
-    const hp = Math.max(1, Math.min(65535, Math.round(enemyHp)));
+    const hp = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.round(enemyHp)));
     const units = Math.max(1, Math.floor(unitCount));
     this.generationById[id] = generation;
     this.reservedById[id] = 0;
@@ -293,7 +321,7 @@ export class EnemySwarm {
     this.slowFactorById[id] = 1;
     this.stasisUntilById[id] = 0;
     this.recallDueById[id] = 0;
-    this.recallCooldownUntilById[id] = 0;
+    for (const name of CONTROL_ID_NAMES) this[name][id] = 0;
     this.recallXById[id] = 0;
     this.recallYById[id] = 0;
     this.statusCodeById[id] = STATUS_MARKER.none;
@@ -303,7 +331,7 @@ export class EnemySwarm {
     const index = this.count++;
     const offset = index * STATE_STRIDE;
     const x = source.x + (this.random() - 0.5) * source.spreadX * 2;
-    const y = source.y + (this.random() - 0.5) * source.spreadY * 2;
+    const y = Math.min(this.map.bounds.bottom - 2, source.y + (this.random() - 0.5) * source.spreadY * 2);
     const toBaseX = this.base.x - x;
     const toBaseY = this.base.y - y;
     const distance = Math.hypot(toBaseX, toBaseY) || 1;
@@ -335,6 +363,7 @@ export class EnemySwarm {
       this.remove(id, this.generationById[id]);
     }
     this.spawnAccumulator = 0;
+    this.spawnHpAccumulator = 0;
     this.activeUnitCount = 0;
     this.rebuildSpatialIndex();
   }
@@ -342,6 +371,7 @@ export class EnemySwarm {
   resetRunCounters() {
     this.tickNumber = 0;
     this.spawnAccumulator = 0;
+    this.spawnHpAccumulator = 0;
     this.spawnSourceCursor = 0;
     this.spawnedTotal = 0;
     this.updateChecksum();
@@ -375,7 +405,7 @@ export class EnemySwarm {
     for (let fieldIndex = 0; fieldIndex < forceFields.length; fieldIndex += 1) {
       const field = forceFields[fieldIndex];
       if (field.expiresTick <= this.tickNumber || !Number.isFinite(field.radius) || field.radius <= 0) continue;
-      if (field.kind === 'stasis_zone') continue;
+      if (field.kind === 'stasis_zone' || field.kind === 'bond_zone') continue;
       if (field.kind === 'singularity_force' && this.tickNumber % field.periodTicks >= field.activeTicks) continue;
       if (field.kind === 'breaker_wave' && this.tickNumber % field.periodTicks >= field.travelTicks) continue;
       const bounds = this.cellBounds(field.x - field.radius, field.y - field.radius, field.x + field.radius, field.y + field.radius);
@@ -609,7 +639,107 @@ export class EnemySwarm {
     return this.resolveScratch;
   }
 
-  applyForceFields(x, y, vx, vy, forceFields, dt, units) {
+  clearBond(id) {
+    const partner = this.bondPartnerById[id];
+    if (partner > 0 && partner < this.nextFreshId
+      && this.bondPartnerById[partner] === id
+      && this.bondGenerationById[partner] === this.generationById[id]) {
+      for (const name of BOND_TABLES) this[name][partner] = 0;
+      if (this.statusCodeById[partner] === STATUS_MARKER.bond) {
+        this.statusCodeById[partner] = STATUS_MARKER.none;
+        const index = this.indexById[partner];
+        if (index >= 0) this.statusByIndex[index] = STATUS_MARKER.none;
+      }
+    }
+    for (const name of BOND_TABLES) this[name][id] = 0;
+    if (this.statusCodeById[id] === STATUS_MARKER.bond) {
+      this.statusCodeById[id] = STATUS_MARKER.none;
+      const index = this.indexById[id];
+      if (index >= 0) this.statusByIndex[index] = STATUS_MARKER.none;
+    }
+  }
+
+  pulseBonds(field, tick) {
+    let source = this.bondSourceIndex.get(field.sourceTowerId);
+    if (source === undefined) {
+      source = this.bondSourceIds.length;
+      this.bondSourceIds.push(field.sourceTowerId);
+      this.bondSourceIndex.set(field.sourceTowerId, source);
+    }
+    const bounds = this.cellBounds(field.x - field.radius, field.y - field.radius, field.x + field.radius, field.y + field.radius);
+    const radiusSquared = field.radius * field.radius;
+    let count = 0;
+    for (let row = bounds.minimumRow; row <= bounds.maximumRow; row += 1) {
+      for (let column = bounds.minimumColumn; column <= bounds.maximumColumn; column += 1) {
+        let index = this.bucketHead[row * this.gridColumns + column];
+        while (index >= 0) {
+          const id = this.idByIndex[index];
+          const offset = index * STATE_STRIDE;
+          const dx = this.state[offset + X] - field.x;
+          const dy = this.state[offset + Y] - field.y;
+          if (dx * dx + dy * dy <= radiusSquared && this.bondUntilById[id] <= tick) {
+            if (this.bondPartnerById[id]) this.clearBond(id);
+            this.bondCandidateIds[count++] = id;
+          }
+          index = this.bucketNext[index];
+        }
+      }
+    }
+    // Spatially ordered neighbours, not an all-pairs nearest-neighbour search.
+    // Stable id ties make the matching identical on both peers.
+    const candidates = this.bondCandidateIds.subarray(0, count);
+    candidates.sort((left, right) => {
+      const a = this.indexById[left] * STATE_STRIDE;
+      const b = this.indexById[right] * STATE_STRIDE;
+      return Math.floor(this.state[a + Y] / CROWD_CELL_SIZE) - Math.floor(this.state[b + Y] / CROWD_CELL_SIZE)
+        || this.state[a + X] - this.state[b + X]
+        || this.state[a + Y] - this.state[b + Y]
+        || left - right;
+    });
+    let pairedUnits = 0;
+    for (let index = 0; index + 1 < count; index += 2) {
+      const a = candidates[index];
+      const b = candidates[index + 1];
+      const units = Math.min(this.unitsByIndex[this.indexById[a]], this.unitsByIndex[this.indexById[b]]);
+      this.bondPartnerById[a] = b;
+      this.bondPartnerById[b] = a;
+      this.bondGenerationById[a] = this.generationById[b];
+      this.bondGenerationById[b] = this.generationById[a];
+      this.bondUntilById[a] = this.bondUntilById[b] = tick + field.durationTicks;
+      this.bondSourceById[a] = this.bondSourceById[b] = source;
+      this.bondUnitsById[a] = this.bondUnitsById[b] = units;
+      pairedUnits += units * 2;
+    }
+    return pairedUnits;
+  }
+
+  consumeBond(id, killedUnits) {
+    const partnerId = this.bondPartnerById[id];
+    if (!partnerId) return null;
+    const generation = this.bondGenerationById[id];
+    const partnerIndex = this.indexById[partnerId];
+    if (this.bondUntilById[id] <= this.tickNumber || partnerIndex < 0
+      || this.generationById[partnerId] !== generation || this.bondPartnerById[partnerId] !== id) {
+      this.clearBond(id);
+      return null;
+    }
+    const units = Math.min(killedUnits, this.bondUnitsById[id], this.unitsByIndex[partnerIndex]);
+    const sourceTowerId = this.bondSourceIds[this.bondSourceById[id]];
+    this.bondUnitsById[id] -= units;
+    this.bondUnitsById[partnerId] -= units;
+    if (this.bondUnitsById[id] <= 0) this.clearBond(id);
+    return units > 0 ? { partnerId, generation, units, sourceTowerId } : null;
+  }
+
+  resolveBondKill(bond) {
+    if (!bond) return null;
+    // Raw removal intentionally bypasses damage/on-kill propagation. A bond can
+    // claim only its surviving paired units, never an entire compressed packet.
+    const hit = this.kill(bond.partnerId, bond.generation, { unitCount: bond.units });
+    return hit ? { ...hit, sourceTowerId: bond.sourceTowerId } : null;
+  }
+
+  applyForceFields(id, x, y, vx, vy, forceFields, dt, units, guideX, guideY, desiredSpeed) {
     const indices = this.forceFieldIndicesByCell[this.cellIndex(x, y)];
     let movementFactor = 1;
     let slowField = null;
@@ -637,6 +767,12 @@ export class EnemySwarm {
     let wallX = 0;
     let wallY = 0;
     let wallScore = -1;
+    let splitterField = null;
+    let splitterX = 0;
+    let splitterY = 0;
+    let splitterScore = -1;
+    let shoveX = 0;
+    let shoveY = 0;
     for (let fieldOffset = 0; fieldOffset < indices.length; fieldOffset += 1) {
       const field = forceFields[indices[fieldOffset]];
       if (field.expiresTick <= this.tickNumber) continue;
@@ -719,15 +855,16 @@ export class EnemySwarm {
       } else if (field.kind === 'breaker_wave') {
         const phase = this.tickNumber % field.periodTicks;
         if (phase >= field.travelTicks) continue;
+        const cycle = 1 + Math.floor(this.tickNumber / field.periodTicks);
+        if (this.breakerCycleById[id] === cycle) continue;
         const forward = dx * field.directionX + dy * field.directionY;
         const lateral = Math.abs(dx * -field.directionY + dy * field.directionX);
         const waveDistance = field.range * phase / Math.max(1, field.travelTicks - 1);
         const depth = Math.abs(forward - waveDistance);
         if (forward < 0 || lateral > field.halfWidth || depth > field.waveThickness * 0.5) continue;
-        const force = field.strength * (1 - depth / Math.max(1, field.waveThickness * 0.5)) * dt;
-        const forceX = field.directionX * force;
-        const forceY = field.directionY * force;
-        const score = forceX * forceX + forceY * forceY;
+        const forceX = field.directionX * field.shoveDistance;
+        const forceY = field.directionY * field.shoveDistance;
+        const score = 1 - depth / Math.max(1, field.waveThickness * 0.5);
         if (score > breakerScore) {
           breakerScore = score;
           breakerField = field;
@@ -744,6 +881,23 @@ export class EnemySwarm {
           crosswindField = field;
           crosswindX = forceX;
           crosswindY = forceY;
+        }
+      } else if (field.kind === 'splitter_force') {
+        const along = dx * field.wallAxisX + dy * field.wallAxisY;
+        const depth = dx * field.wallNormalX + dy * field.wallNormalY;
+        if (Math.abs(along) > field.halfLength || Math.abs(depth) > field.thickness) continue;
+        // Alternate stable enemy identities toward opposite ends.
+        const sign = (id & 1) ? 1 : -1;
+        const edge = Math.min(1, (field.halfLength - Math.abs(along)) / Math.max(1, field.thickness));
+        const force = field.strength * (1 - Math.abs(depth) / field.thickness) * edge * dt;
+        const forceX = field.wallAxisX * sign * force;
+        const forceY = field.wallAxisY * sign * force;
+        const score = forceX * forceX + forceY * forceY;
+        if (score > splitterScore) {
+          splitterScore = score;
+          splitterField = field;
+          splitterX = forceX;
+          splitterY = forceY;
         }
       } else if (field.kind === 'force_wall') {
         const along = dx * field.wallAxisX + dy * field.wallAxisY;
@@ -776,40 +930,53 @@ export class EnemySwarm {
       vy += vortexY;
       vortexField.affectedUnitsTick += units;
     }
-    if (singularityField) {
-      vx += singularityX;
-      vy += singularityY;
-      singularityField.affectedUnitsTick += units;
-    }
-    if (braidField) {
-      vx += braidX;
-      vy += braidY;
-      braidField.affectedUnitsTick += units;
-    }
-    if (breakerField) {
-      vx += breakerX;
-      vy += breakerY;
-      breakerField.affectedUnitsTick += units;
-    }
-    if (crosswindField) {
-      vx += crosswindX;
-      vy += crosswindY;
-      crosswindField.affectedUnitsTick += units;
-    }
     if (wallField) {
       vx += wallX;
       vy += wallY;
       wallField.affectedUnitsTick += units;
     }
+    if (braidField || crosswindField || splitterField) {
+      // Shapers can only add sideways motion relative to obstacle-aware flow.
+      // Project the *combined* change and bound its lateral speed so mixed kinds
+      // cannot become a disguised upstream wall or spin an enemy indefinitely.
+      const sideX = -guideY;
+      const sideY = guideX;
+      const lateralForce = (braidX + crosswindX + splitterX) * sideX
+        + (braidY + crosswindY + splitterY) * sideY;
+      const forward = Math.max(desiredSpeed * 0.68, vx * guideX + vy * guideY);
+      const lateralLimit = desiredSpeed * 1.2;
+      const lateral = Math.max(-lateralLimit, Math.min(lateralLimit, vx * sideX + vy * sideY + lateralForce));
+      vx = guideX * forward + sideX * lateral;
+      vy = guideY * forward + sideY * lateral;
+      if (braidField) braidField.affectedUnitsTick += units;
+      if (crosswindField) crosswindField.affectedUnitsTick += units;
+      if (splitterField) splitterField.affectedUnitsTick += units;
+    }
+    // Only the brief, globally phased gathering pulse may pull backwards.
+    if (singularityField) {
+      vx += singularityX;
+      vy += singularityY;
+      singularityField.affectedUnitsTick += units;
+    }
+    if (breakerField) {
+      // A wave grants one bounded displacement, never repeated acceleration.
+      // All breakers share this cycle, so overlapping waves cannot farm a queue.
+      this.breakerCycleById[id] = 1 + Math.floor(this.tickNumber / breakerField.periodTicks);
+      shoveX = breakerX;
+      shoveY = breakerY;
+      breakerField.triggeredUnitsTick += units;
+    }
     if (slowField) slowField.affectedUnitsTick += units;
     this.resolveScratch[0] = vx;
     this.resolveScratch[1] = vy;
     this.resolveScratch[2] = movementFactor;
+    this.resolveScratch[3] = shoveX;
+    this.resolveScratch[4] = shoveY;
     return this.resolveScratch;
   }
 
   applyRecallGates(id, generation, previousX, previousY, x, y, forceFields, units) {
-    if (this.recallCooldownUntilById[id] > this.tickNumber || this.recallDueById[id] > this.tickNumber) return false;
+    if (this.recallUsedById[id] || this.recallDueById[id] > this.tickNumber) return false;
     const indices = this.forceFieldIndicesByCell[this.cellIndex(x, y)];
     for (let fieldOffset = 0; fieldOffset < indices.length; fieldOffset += 1) {
       const field = forceFields[indices[fieldOffset]];
@@ -827,7 +994,7 @@ export class EnemySwarm {
       if (Math.abs(along) > field.halfLength) continue;
       if (this.generationById[id] !== generation || this.indexById[id] < 0) return false;
       this.recallDueById[id] = this.tickNumber + field.delayTicks;
-      this.recallCooldownUntilById[id] = this.tickNumber + field.cooldownTicks;
+      this.recallUsedById[id] = 1;
       this.recallXById[id] = Math.fround(crossX);
       this.recallYById[id] = Math.fround(crossY);
       if (this.stasisUntilById[id] <= this.tickNumber) this.statusCodeById[id] = STATUS_MARKER.recall;
@@ -837,9 +1004,9 @@ export class EnemySwarm {
     return false;
   }
 
-  tick(tick, { spawnRatePerSecond = 0, spawnSources = [], enemyHp = this.defaultEnemyHp, forceFields = [] } = {}) {
+  tick(tick, { spawnRatePerSecond = 0, spawnSources = [], enemyHp = this.defaultEnemyHp, meanHp = null, forceFields = [] } = {}) {
     this.tickNumber = tick;
-    const spawned = this.spawnAtRate(spawnRatePerSecond, spawnSources, enemyHp);
+    const spawned = this.spawnAtRate(spawnRatePerSecond, spawnSources, enemyHp, meanHp);
     this.rebuildCrowdField();
     this.rebuildForceFieldIndex(forceFields);
     let breachCandidateCount = 0;
@@ -855,10 +1022,13 @@ export class EnemySwarm {
     const maximumX = this.map.bounds.right - 2;
     const minimumY = this.map.bounds.top + 2;
     const maximumY = this.map.bounds.bottom - 2;
+    const activeBondSources = new Set(forceFields.filter((field) => field.kind === 'bond_zone').map((field) => field.sourceTowerId));
 
     for (let index = 0; index < this.count; index += 1) {
       const offset = index * STATE_STRIDE;
       const id = this.idByIndex[index];
+      if (this.bondPartnerById[id] && (this.bondUntilById[id] <= tick
+        || !activeBondSources.has(this.bondSourceIds[this.bondSourceById[id]]))) this.clearBond(id);
       let x = this.state[offset + X];
       let y = this.state[offset + Y];
       let vx = this.state[offset + VX];
@@ -929,11 +1099,15 @@ export class EnemySwarm {
       vy += (desiredY - vy) * velocityBlend;
 
       let fieldMovementFactor = 1;
+      let shoveX = 0;
+      let shoveY = 0;
       if (forceFields.length > 0) {
-        const forced = this.applyForceFields(x, y, vx, vy, forceFields, dt, this.unitsByIndex[index]);
+        const forced = this.applyForceFields(id, x, y, vx, vy, forceFields, dt, this.unitsByIndex[index], guideX, guideY, desiredSpeed);
         vx = forced[0];
         vy = forced[1];
         fieldMovementFactor = forced[2];
+        shoveX = forced[3];
+        shoveY = forced[4];
       }
 
       const slowed = this.slowUntilById[id] > tick;
@@ -954,11 +1128,13 @@ export class EnemySwarm {
         this.statusCodeById[id] = STATUS_MARKER.recall;
       } else if (movementFactor < 1) {
         this.statusCodeById[id] = STATUS_MARKER.slow;
+      } else if (this.bondPartnerById[id]) {
+        this.statusCodeById[id] = STATUS_MARKER.bond;
       } else {
         this.statusCodeById[id] = STATUS_MARKER.none;
       }
-      x += vx * dt * movementFactor;
-      y += vy * dt * movementFactor;
+      x += vx * dt * movementFactor + shoveX;
+      y += vy * dt * movementFactor + shoveY;
 
       const resolved = this.resolveDefenseAreas(id, x, y, vx, vy, guideX, guideY);
       x = resolved[0];
@@ -979,6 +1155,28 @@ export class EnemySwarm {
       } else if (y > maximumY) {
         y = maximumY;
         vy = -Math.max(12, Math.abs(vy) * 0.45);
+      }
+
+      // Solid, short-lived barricades stop crossings, with open ends and a
+      // tangential escape nudge. Swept depth prevents fast packets tunnelling.
+      for (const field of forceFields) {
+        if (field.kind !== 'barricade' || field.expiresTick <= tick) continue;
+        const oldDepth = (previousX-field.x)*field.normalX+(previousY-field.y)*field.normalY;
+        const depth = (x-field.x)*field.normalX+(y-field.y)*field.normalY;
+        const crossing = oldDepth * depth <= 0;
+        const fraction = crossing ? oldDepth / (oldDepth - depth || 1) : 1;
+        const contactX = previousX + (x-previousX)*fraction;
+        const contactY = previousY + (y-previousY)*fraction;
+        const along = (contactX-field.x)*field.axisX+(contactY-field.y)*field.axisY;
+        if (Math.abs(along) > field.halfLength + 2 || (oldDepth*depth > 0 && Math.abs(depth) >= field.thickness)) continue;
+        const side = Math.sign(oldDepth) || 1;
+        const correction = side*(field.thickness+1)-depth;
+        x += field.normalX*correction; y += field.normalY*correction;
+        const normalVelocity = vx*field.normalX+vy*field.normalY;
+        vx -= field.normalX*normalVelocity; vy -= field.normalY*normalVelocity;
+        const escape = Math.sign(along) || ((id&1)?1:-1);
+        x += field.axisX*escape*35*dt; y += field.axisY*escape*35*dt;
+        field.affectedUnitsTick += this.unitsByIndex[index];
       }
 
       if (forceFields.length > 0) {
@@ -1144,6 +1342,7 @@ export class EnemySwarm {
 
   applyStatus(targets, effect) {
     const affected = [];
+    const appliedTick = effect.appliedTick ?? this.tickNumber;
     for (const target of targets) {
       const current = this.enemy(target.id, target.generation);
       if (!current) continue;
@@ -1159,13 +1358,13 @@ export class EnemySwarm {
         }
       } else if (effect.status === 'stasis') {
         const durationTicks = Math.max(1, Math.round(effect.durationSeconds * AUTHORITY_TICK_RATE));
-        this.stasisUntilById[target.id] = Math.max(this.stasisUntilById[target.id], this.tickNumber + durationTicks);
+        this.stasisUntilById[target.id] = Math.max(this.stasisUntilById[target.id], appliedTick + durationTicks);
         this.statusCodeById[target.id] = STATUS_MARKER.stasis;
         this.statusByIndex[this.indexById[target.id]] = STATUS_MARKER.stasis;
       } else continue;
       affected.push(this.enemy(target.id, target.generation));
     }
-    this.slowedCount = this.countSlowed();
+    if (!effect.deferCount) this.slowedCount = this.countSlowed();
     return affected;
   }
 
@@ -1174,10 +1373,11 @@ export class EnemySwarm {
     const delayTicks = Math.max(1, Math.round(effect.delaySeconds * AUTHORITY_TICK_RATE));
     for (const target of targets) {
       const current = this.enemy(target.id, target.generation);
-      if (!current || this.recallDueById[target.id] > this.tickNumber) continue;
+      if (!current || this.recallUsedById[target.id] || this.recallDueById[target.id] > this.tickNumber) continue;
       const index = this.indexById[target.id];
       const offset = index * STATE_STRIDE;
       this.recallDueById[target.id] = this.tickNumber + delayTicks;
+      this.recallUsedById[target.id] = 1;
       this.recallXById[target.id] = this.state[offset + X];
       this.recallYById[target.id] = this.state[offset + Y];
       if (this.stasisUntilById[target.id] <= this.tickNumber) {
@@ -1328,12 +1528,13 @@ export class EnemySwarm {
   damage(id, generation, amount = 1, { packetWide = false } = {}) {
     const enemy = this.enemy(id, generation);
     if (!enemy) return null;
-    const applied = Math.max(0, Math.min(this.hpById[id], Math.round(amount)));
-    this.hpById[id] -= applied;
+    const applied = damageFixed(Math.min(this.hpById[id], amount));
+    this.hpById[id] = damageFixed(this.hpById[id] - applied);
     if (this.hpById[id] > 0) {
       return {
         ...enemy,
         damage: applied,
+        hpPopped: applied * (packetWide ? enemy.units : 1),
         remainingHp: this.hpById[id],
         killed: false,
         unitsKilled: 0,
@@ -1344,6 +1545,8 @@ export class EnemySwarm {
 
     const index = this.indexById[id];
     const unitsBefore = this.unitsByIndex[index];
+    const unitsKilled = packetWide ? unitsBefore : 1;
+    const bond = null; // Control bonds never propagate damage or kills.
     if (!packetWide && unitsBefore > 1) {
       this.unitsByIndex[index] = unitsBefore - 1;
       this.activeUnitCount -= 1;
@@ -1355,51 +1558,57 @@ export class EnemySwarm {
       return {
         ...enemy,
         damage: applied,
+        hpPopped: applied * (packetWide ? enemy.units : 1),
         remainingHp: this.hpById[id],
         killed: true,
         unitsKilled: 1,
         unitsRemaining: unitsBefore - 1,
         recordRemoved: false,
-        unitKey: `${id}:${generation}:${unitsBefore}`
+        unitKey: `${id}:${generation}:${unitsBefore}`,
+        bondKill: this.resolveBondKill(bond)
       };
     }
 
-    const unitsKilled = packetWide ? unitsBefore : 1;
     this.remove(id, generation);
     return {
       ...enemy,
       damage: applied,
+        hpPopped: applied * (packetWide ? enemy.units : 1),
       remainingHp: 0,
       killed: true,
       unitsKilled,
       unitsRemaining: 0,
       recordRemoved: true,
-      unitKey: `${id}:${generation}:${unitsBefore}`
+      unitKey: `${id}:${generation}:${unitsBefore}`,
+      bondKill: this.resolveBondKill(bond)
     };
   }
 
-  kill(id, generation, { packetWide = true } = {}) {
+  kill(id, generation, { packetWide = true, unitCount = null } = {}) {
     const enemy = this.enemy(id, generation);
     if (!enemy) return null;
-    const unitsKilled = packetWide ? enemy.units : 1;
-    if (!packetWide && enemy.units > 1) {
+    const unitsKilled = unitCount === null ? (packetWide ? enemy.units : 1) : Math.min(enemy.units, Math.max(0, Math.floor(unitCount)));
+    if (unitsKilled < 1) return null;
+    if (unitsKilled < enemy.units) {
       const index = this.indexById[id];
-      this.unitsByIndex[index] -= 1;
-      this.activeUnitCount -= 1;
+      this.unitsByIndex[index] -= unitsKilled;
+      this.activeUnitCount -= unitsKilled;
       if (this.slowUntilById[id] > this.tickNumber || this.stasisUntilById[id] > this.tickNumber) {
-        this.slowedCount = Math.max(0, this.slowedCount - 1);
+        this.slowedCount = Math.max(0, this.slowedCount - unitsKilled);
       }
       this.reservedById[id] = 0;
-      return { ...enemy, killed: true, unitsKilled, unitsRemaining: enemy.units - 1, recordRemoved: false };
+      this.hpById[id] = this.maxHpById[id];
+      return { ...enemy, hpPopped: enemy.hp + (unitsKilled - 1) * enemy.maxHp, killed: true, unitsKilled, unitsRemaining: enemy.units - unitsKilled, recordRemoved: false };
     }
     this.remove(id, generation);
-    return { ...enemy, killed: true, unitsKilled, unitsRemaining: 0, recordRemoved: true };
+    return { ...enemy, hpPopped: enemy.hp + (unitsKilled - 1) * enemy.maxHp, killed: true, unitsKilled, unitsRemaining: 0, recordRemoved: true };
   }
 
   remove(id, generation) {
     if (id < 1 || id >= this.nextFreshId || this.generationById[id] !== generation) return false;
     const index = this.indexById[id];
     if (index < 0) return false;
+    if (this.bondPartnerById[id]) this.clearBond(id);
     const removedUnits = this.unitsByIndex[index];
     const lastIndex = this.count - 1;
     if (index !== lastIndex) {
@@ -1431,7 +1640,7 @@ export class EnemySwarm {
     this.slowFactorById[id] = 1;
     this.stasisUntilById[id] = 0;
     this.recallDueById[id] = 0;
-    this.recallCooldownUntilById[id] = 0;
+    for (const name of CONTROL_ID_NAMES) this[name][id] = 0;
     this.recallXById[id] = 0;
     this.recallYById[id] = 0;
     this.statusCodeById[id] = STATUS_MARKER.none;
@@ -1453,7 +1662,8 @@ export class EnemySwarm {
       this.freeCount,
       this.spawnSourceCursor,
       this.spawnedTotal,
-      Math.round(this.spawnAccumulator * 1000000)
+      Math.round(this.spawnAccumulator * 1000000),
+      Math.round(this.spawnHpAccumulator * 1000000)
     ]) {
       checksum ^= value;
       checksum = Math.imul(checksum, 16777619);
@@ -1469,14 +1679,14 @@ export class EnemySwarm {
         Math.round(this.state[offset + VX] * 16),
         Math.round(this.state[offset + VY] * 16),
         this.unitsByIndex[index],
-        this.hpById[id],
+        Math.round(this.hpById[id] * 1000),
+        Math.floor(this.hpById[id] / 4294967296),
         this.maxHpById[id],
         this.reservedById[id],
         this.slowUntilById[id],
         Math.round(this.slowFactorById[id] * 1000),
         this.stasisUntilById[id],
         this.recallDueById[id],
-        this.recallCooldownUntilById[id],
         Math.round(this.recallXById[id] * 16),
         Math.round(this.recallYById[id] * 16),
         this.statusCodeById[id],
@@ -1486,10 +1696,19 @@ export class EnemySwarm {
         checksum ^= value;
         checksum = Math.imul(checksum, 16777619);
       }
+      for (const name of CONTROL_ID_NAMES) {
+        checksum = Math.imul(checksum ^ this[name][id], 16777619);
+      }
     }
     for (let index = 0; index < this.freeCount; index += 1) {
       checksum ^= this.freeIds[index];
       checksum = Math.imul(checksum, 16777619);
+    }
+    for (const source of this.bondSourceIds) {
+      for (let character = 0; character < source.length; character += 1) {
+        checksum = Math.imul(checksum ^ source.charCodeAt(character), 16777619);
+      }
+      checksum = Math.imul(checksum ^ 0xff, 16777619);
     }
     this.lastChecksum = (checksum >>> 0).toString(16).padStart(8, '0');
     return this.lastChecksum;
@@ -1507,6 +1726,7 @@ export class EnemySwarm {
       nextFreshId: this.nextFreshId,
       freeCount: this.freeCount,
       spawnAccumulator: this.spawnAccumulator,
+      spawnHpAccumulator: this.spawnHpAccumulator,
       spawnSourceCursor: this.spawnSourceCursor,
       spawnedTotal: this.spawnedTotal,
       state: this.state.slice(0, this.count * STATE_STRIDE),
@@ -1520,7 +1740,8 @@ export class EnemySwarm {
       slowFactorById: this.slowFactorById.slice(0, identityLength),
       stasisUntilById: this.stasisUntilById.slice(0, identityLength),
       recallDueById: this.recallDueById.slice(0, identityLength),
-      recallCooldownUntilById: this.recallCooldownUntilById.slice(0, identityLength),
+      ...Object.fromEntries(CONTROL_ID_NAMES.map((name) => [name, this[name].slice(0, identityLength)])),
+      bondSourceIds: [...this.bondSourceIds],
       recallXById: this.recallXById.slice(0, identityLength),
       recallYById: this.recallYById.slice(0, identityLength),
       statusCodeById: this.statusCodeById.slice(0, identityLength),
@@ -1549,6 +1770,13 @@ export class EnemySwarm {
     for (const table of ['stasisUntilById', 'recallDueById', 'recallCooldownUntilById', 'recallXById', 'recallYById']) {
       if (correction[table] && correction[table].length !== identityLength) throw new Error(`swarm correction ${table} is invalid`);
     }
+    for (const name of CONTROL_ID_NAMES) {
+      if (correction[name] && correction[name].length !== identityLength) throw new Error(`swarm correction ${name} is invalid`);
+    }
+    const bondSources = correction.bondSourceIds || [''];
+    if (!Array.isArray(bondSources) || bondSources[0] !== ''
+      || bondSources.some((source, index) => typeof source !== 'string' || (index > 0 && !source))
+      || new Set(bondSources).size !== bondSources.length) throw new Error('swarm correction bond sources are invalid');
     for (const table of ['obstacleAreaById', 'obstacleSideById']) {
       if (correction[table] && correction[table].length !== identityLength) throw new Error(`swarm correction ${table} is invalid`);
     }
@@ -1564,6 +1792,7 @@ export class EnemySwarm {
     this.nextFreshId = correction.nextFreshId;
     this.freeCount = correction.freeCount;
     this.spawnAccumulator = correction.spawnAccumulator;
+    this.spawnHpAccumulator = correction.spawnHpAccumulator || 0;
     this.spawnSourceCursor = correction.spawnSourceCursor;
     this.spawnedTotal = correction.spawnedTotal;
     this.state.fill(0);
@@ -1591,8 +1820,18 @@ export class EnemySwarm {
     if (correction.stasisUntilById) this.stasisUntilById.set(correction.stasisUntilById);
     this.recallDueById.fill(0);
     if (correction.recallDueById) this.recallDueById.set(correction.recallDueById);
-    this.recallCooldownUntilById.fill(0);
-    if (correction.recallCooldownUntilById) this.recallCooldownUntilById.set(correction.recallCooldownUntilById);
+    for (const name of CONTROL_ID_NAMES) {
+      this[name].fill(0);
+      if (correction[name]) this[name].set(correction[name]);
+    }
+    // Old saves retain spent recalls instead of quietly rearming every enemy.
+    if (!correction.recallUsedById) {
+      for (let id = 1; id < identityLength; id += 1) {
+        this.recallUsedById[id] = correction.recallCooldownUntilById?.[id] > 0 || this.recallDueById[id] > 0 ? 1 : 0;
+      }
+    }
+    this.bondSourceIds = [...bondSources];
+    this.bondSourceIndex = new Map(this.bondSourceIds.slice(1).map((source, index) => [source, index + 1]));
     this.recallXById.fill(0);
     if (correction.recallXById) this.recallXById.set(correction.recallXById);
     this.recallYById.fill(0);
@@ -1625,6 +1864,27 @@ export class EnemySwarm {
     if (correction.activeUnitCount !== undefined && correction.activeUnitCount !== this.activeUnitCount) {
       throw new Error('swarm correction active population is invalid');
     }
+    for (let index = 0; index < this.count; index += 1) {
+      const id = this.idByIndex[index];
+      const partner = this.bondPartnerById[id];
+      if (this.recallUsedById[id] > 1) throw new Error('swarm correction recall state is invalid');
+      if (!partner) {
+        if (BOND_TABLES.some((name) => this[name][id] !== 0)) throw new Error('swarm correction contains an orphaned bond');
+        continue;
+      }
+      if (partner === id || partner >= identityLength || this.indexById[partner] < 0
+        || this.bondPartnerById[partner] !== id
+        || this.bondGenerationById[id] !== this.generationById[partner]
+        || this.bondGenerationById[partner] !== this.generationById[id]
+        || this.bondUntilById[id] !== this.bondUntilById[partner]
+        || this.bondSourceById[id] !== this.bondSourceById[partner]
+        || this.bondSourceById[id] < 1 || this.bondSourceById[id] >= this.bondSourceIds.length
+        || !Number.isSafeInteger(this.bondUnitsById[id]) || this.bondUnitsById[id] < 1
+        || this.bondUnitsById[id] !== this.bondUnitsById[partner]
+        || this.bondUnitsById[id] > this.unitsByIndex[index]) {
+        throw new Error('swarm correction contains an invalid bond pair');
+      }
+    }
     this.rebuildSpatialIndex();
     this.slowedCount = this.countSlowed();
     this.updateChecksum();
@@ -1637,7 +1897,14 @@ export class EnemySwarm {
       count: this.count,
       activeUnitCount: this.activeUnitCount,
       capacity: this.capacity,
+      idByIndex: this.idByIndex,
+      indexById: this.indexById,
+      bondPartnerById: this.bondPartnerById,
+      bondUntilById: this.bondUntilById,
+      bondSourceById: this.bondSourceById,
+      bondSourceIds: this.bondSourceIds,
       state: this.state,
+      hpById: this.hpById,
       status: this.statusByIndex,
       units: this.unitsByIndex,
       checksum: this.lastChecksum
