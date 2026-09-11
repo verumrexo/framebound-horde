@@ -19,6 +19,7 @@ import {
   findDefenseAreaAt,
   getMapDefinition,
   playableMaps,
+  relayEligibleAreaIds,
   spawnRateAt
 } from './world-config.js';
 import { EnemySwarm, SWARM_RECORD_BUDGET } from './enemy-swarm.js';
@@ -71,6 +72,11 @@ function hashText(value) {
 
 function deterministicUnit(seed) {
   return mix32(seed) / 0x100000000;
+}
+
+// Established relay links outlive their connector towers once the network is complete.
+function freshRelayNetwork() {
+  return { completedTick: null, links: [], retired: [] };
 }
 
 function initialStats() {
@@ -166,6 +172,7 @@ export class EmbeddedAuthority {
     this.state.forceFields = [];
     this.state.deployables = [];
     this.state.supportCounters = {};
+    this.state.relayNetwork = freshRelayNetwork();
     this.state.research = freshResearch();
     this.state.disconnectWait = null;
     this.state.stats = initialStats();
@@ -201,6 +208,7 @@ export class EmbeddedAuthority {
       forceFields: [],
       deployables: [],
       supportCounters: {},
+      relayNetwork: freshRelayNetwork(),
       research: freshResearch(),
       economyByPlayer: {},
       towerCatalog: Object.values(this.towerDefinitions),
@@ -381,6 +389,9 @@ export class EmbeddedAuthority {
 
   simulateGameplay() {
     if (!this.modifierCache) this.rebuildModifierCache();
+    if (this.settleRelayNetwork()) {
+      this.rebuildModifierCache();
+    }
     this.syncTowerStats();
     const spawn = this.spawnSettings();
     pruneResearchCombat(this.state.research, this.swarm, this.state.runTick);
@@ -504,6 +515,12 @@ export class EmbeddedAuthority {
       .filter((tower) => this.towerDefinitions[tower.definitionId]?.supportEffects?.some((effect) => effect.type === 'area_link'))
       .sort(compareStableIds);
     const occupied = new Set(relayTowers.map((tower) => this.validRelayTargetAreaId(tower, tower.relayTargetAreaId)).filter(Boolean));
+    // Completed networks keep their established links without physical connectors.
+    for (const [areaA, areaB] of this.state.relayNetwork?.links || []) {
+      if (!adjacency.has(areaA) || !adjacency.has(areaB)) continue;
+      adjacency.get(areaA).add(areaB);
+      adjacency.get(areaB).add(areaA);
+    }
     for (const tower of relayTowers) {
       let targetAreaId = this.validRelayTargetAreaId(tower, tower.relayTargetAreaId);
       if (!targetAreaId) {
@@ -546,6 +563,55 @@ export class EmbeddedAuthority {
         delete tower.relayTargetAreaId;
       }
     }
+  }
+
+  // Once every eligible nebula shares one relay network, the links are written into
+  // authoritative state and the ordinary connector relays retire: they collapse into
+  // the established network, refund like a sale, and free their placement footprint.
+  // Amplifier, echo and hardpoint keep their bodies because their mechanics need them.
+  // This runs once per run on a fixed tick, so every peer and save reproduces it.
+  settleRelayNetwork() {
+    const network = this.state.relayNetwork ||= freshRelayNetwork();
+    if (network.completedTick !== null) return false;
+    // The sandbox test field keeps its single inspectable tower; completion is a run mechanic.
+    if (this.state.test) return false;
+    const eligible = relayEligibleAreaIds(this.map);
+    if (eligible.length < 2) return false;
+    const component = this.networkAreasByArea.get(eligible[0]);
+    if (!component || component.length < eligible.length) return false;
+    const covered = new Set(component);
+    if (!eligible.every((areaId) => covered.has(areaId))) return false;
+    const links = new Map();
+    for (const tower of this.state.towers) {
+      const targetAreaId = this.relayTargetByTowerId.get(tower.id);
+      if (!targetAreaId) continue;
+      const pair = [tower.areaId, targetAreaId].sort();
+      links.set(pair.join('|'), pair);
+    }
+    network.links = [...links.keys()].sort().map((key) => links.get(key));
+    network.completedTick = this.state.runTick;
+    const retired = [];
+    const survivors = [];
+    for (const tower of [...this.state.towers].sort(compareStableIds)) {
+      if (tower.definitionId !== 'relay') { survivors.push(tower); continue; }
+      const economy = this.state.economyByPlayer[tower.ownerId];
+      const refund = economy ? saleRefund(this.state, tower) : 0;
+      if (economy) economy.credits += refund;
+      const record = {
+        towerId: tower.id, ownerId: tower.ownerId, areaId: tower.areaId,
+        targetAreaId: this.relayTargetByTowerId.get(tower.id) || null,
+        x: tower.x, y: tower.y, totalInvestment: tower.totalInvestment, kills: tower.kills || 0,
+        formHistory: [...(tower.formHistory || [])], refund
+      };
+      network.retired.push(record);
+      retired.push(record);
+    }
+    this.state.towers = this.state.towers.filter((tower) => tower.definitionId !== 'relay');
+    this.modifierCache = null;
+    this.emit(EVENT.RELAY_NETWORK_COMPLETED, {
+      tick: this.state.runTick, areaIds: [...eligible], links: network.links.map((pair) => [...pair]), retired
+    });
+    return true;
   }
 
   addModifier(cache, target, modifier, source) {
@@ -2109,7 +2175,7 @@ export class EmbeddedAuthority {
   }
 
   applyCorrectionSnapshot(correction) {
-    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
+    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
       throw new Error('session correction is incompatible');
     }
     const correctionSeed = correction.state?.seed;
@@ -2127,6 +2193,7 @@ export class EmbeddedAuthority {
     this.state = cloneSerializable(correction.state);
     this.state.protocolVersion = PROTOCOL_VERSION;
     this.state.research = { ...freshResearch(), ...(this.state.research || {}) };
+    this.state.relayNetwork = { ...freshRelayNetwork(), ...(this.state.relayNetwork || {}) };
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
     this.state.mapCatalog = playableMaps().map((map) => ({ id: map.id, label: map.label }));

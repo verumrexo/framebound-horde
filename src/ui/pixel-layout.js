@@ -23,10 +23,14 @@ export function pixelHudLayout(width, mode = 'game') {
   };
 }
 
+// Each item may reserve a fixed minimum character width per line (item.minChars),
+// so a value that gains or loses digits (credits, timers, counts) never shifts its
+// own column or any column after it - only the drawn text changes, not the layout.
 export function fitPixelTelemetry(items, left, right, gap = 12) {
   let x = left;
   return items.flatMap((item) => {
-    const width = Math.max(...item.lines.map((line) => String(line).length * 6));
+    const width = Math.max(...item.lines.map((line, index) =>
+      Math.max(String(line).length, item.minChars?.[index] || 0) * 6));
     if (x + width > right) return [];
     const placed = { ...item, x, width };
     x += width + gap;

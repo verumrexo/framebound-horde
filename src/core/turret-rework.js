@@ -78,19 +78,25 @@ export function fireReworked(a, tower, attack) {
   if (!candidates.length) return true;
   const preferred = !attack.supportOnly ? a.researchTarget(tower, attack) : null;
   const target = preferred || candidates[0];
+  const tuning = attack.rework || {};
   if (attack.mechanic === 'shotgun') {
-    const g = null; // Shotgun tracks the selected enemy like other weapons.
-    const angle = Math.atan2(g?.dy ?? target.y-tower.y, g?.dx ?? target.x-tower.x);
-    if (!candidates.some((e) => Math.cos(Math.atan2(e.y-tower.y,e.x-tower.x)-angle) >= Math.cos(.65))) return true;
+    // Manual facing: the owner's strike point fixes the fan direction; otherwise the fan
+    // follows the target chosen by the tower's targeting mode. Either way the volley only
+    // fires when a live enemy sits inside the fan, so a held facing never wastes reloads.
+    const aim = tower.strikePoint && Number.isFinite(tower.strikePoint.x) && Number.isFinite(tower.strikePoint.y)
+      && (tower.strikePoint.x !== tower.x || tower.strikePoint.y !== tower.y) ? tower.strikePoint : target;
+    const angle = Math.atan2(aim.y-tower.y, aim.x-tower.x);
+    const fan = tuning.fanRadians || 1.3;
+    if (!candidates.some((e) => Math.cos(Math.atan2(e.y-tower.y,e.x-tower.x)-angle) >= Math.cos(fan*.5))) return true;
     const count = attack.volley.count;
     for (let i = 0; i < count; i++) {
-      const theta = angle + (i / Math.max(1,count-1) - .5) * 1.3;
-      shot(a,tower,attack,{ x:tower.x+Math.cos(theta), y:tower.y+Math.sin(theta) }, { type:'pellet', dx:Math.cos(theta),dy:Math.sin(theta),speed:attack.delivery.speed });
+      const theta = angle + (i / Math.max(1,count-1) - .5) * fan;
+      shot(a,tower,attack,{ x:tower.x+Math.cos(theta), y:tower.y+Math.sin(theta) }, { type:'pellet', dx:Math.cos(theta),dy:Math.sin(theta),speed:attack.delivery.speed,contactsLeft:tuning.contacts||1 });
     }
   } else if (attack.mechanic === 'orbit') {
     for (let i=0;i<attack.volley.count;i++) {
       const theta=i*Math.PI*2/attack.volley.count;
-      shot(a,tower,attack,target,{type:'orbit',angle:theta,dx:Math.cos(theta),dy:Math.sin(theta),speed:attack.delivery.speed,releaseTick:a.state.runTick+60});
+      shot(a,tower,attack,target,{type:'orbit',angle:theta,dx:Math.cos(theta),dy:Math.sin(theta),speed:attack.delivery.speed,releaseTick:a.state.runTick+(tuning.chargeTicks||60),orbitRadius:tuning.orbitRadius||24,contactsLeft:tuning.contacts||1});
     }
   } else if (attack.mechanic === 'freeze_ray') {
     tower.freezeTarget = key(target);
@@ -169,16 +175,18 @@ export function tickReworked(a) {
     if(s.expiresTick<=tick) {a.state.stats.shotsResolved++;continue;}
     if(s.type==='embedded') {
       if(tick<s.burstTick){survivors.push(s);continue;}
-      for(const side of [-1,1]) for(let i=-2;i<=2;i++) {
-        const angle=Math.atan2(s.dy,s.dx)+side*Math.PI/2+i*.13;
-        spawned.push({...s,type:'splinter',dx:Math.cos(angle),dy:Math.sin(angle),speed:440*(s.attack.delivery.speed/550),distance:0,range:110,hitKeys:[],expiresTick:tick+60});
+      const tuning=s.attack.rework||{};
+      const perSide=Math.max(1,Math.round((tuning.splinters||10)/2)), spread=tuning.splinterSpread||.13;
+      for(const side of [-1,1]) for(let i=0;i<perSide;i++) {
+        const angle=Math.atan2(s.dy,s.dx)+side*Math.PI/2+(i-(perSide-1)/2)*spread;
+        spawned.push({...s,type:'splinter',dx:Math.cos(angle),dy:Math.sin(angle),speed:440*(s.attack.delivery.speed/550),distance:0,range:tuning.splinterRange||110,hitKeys:[],contactsLeft:tuning.splinterContacts||1,expiresTick:tick+60});
       }
-      a.state.stats.shotsResolved++; a.state.stats.shotsFired+=10;
+      a.state.stats.shotsResolved++; a.state.stats.shotsFired+=perSide*2;
       continue;
     }
     if(s.type==='orbit' && tick<s.releaseTick) {
-      const theta=s.angle+(tick-s.createdTick)*.05;
-      s.x=s.originX+Math.cos(theta)*24;s.y=s.originY+Math.sin(theta)*24;
+      const theta=s.angle+(tick-s.createdTick)*.05, orbitRadius=s.orbitRadius||24;
+      s.x=s.originX+Math.cos(theta)*orbitRadius;s.y=s.originY+Math.sin(theta)*orbitRadius;
       s.dx=Math.cos(theta);s.dy=Math.sin(theta);survivors.push(s);continue;
     }
     const physical=['pellet','orbit','nail','splinter'].includes(s.type);
@@ -190,11 +198,13 @@ export function tickReworked(a) {
     let done=false;
     if(physical){
       const hits=a.swarm.enemiesAlongSegment(s.x,s.y,nx,ny,4,new Set()).filter((e)=>!s.hitKeys.includes(key(e))).sort((x,y)=>Math.hypot(x.x-s.x,x.y-s.y)-Math.hypot(y.x-s.x,y.y-s.y)||x.id-y.id);
-      for(const hit of hits){s.hitKeys.push(key(hit));impact(a,s,hit);if(s.type!=='nail'){done=true;break;}}
+      // Nails pierce everything on their line; pellets, storm bullets and splinters carry
+      // a bounded contact budget and stop once it is spent.
+      for(const hit of hits){s.hitKeys.push(key(hit));impact(a,s,hit);if(s.type!=='nail'){s.contactsLeft=(s.contactsLeft||1)-1;if(s.contactsLeft<=0){done=true;break;}}}
     }else if(target&&Math.hypot(target.x-s.x,target.y-s.y)<=step+5){impact(a,s,target);done=true;}
     s.x=nx;s.y=ny;s.distance+=step;
     if(!done&&s.distance>=s.range && (physical || s.landing)){
-      if(s.type==='nail'){s.type='embedded';s.burstTick=tick+30;s.expiresTick=tick+90;survivors.push(s);continue;}
+      if(s.type==='nail'){const embed=s.attack.rework?.embedTicks||30;s.type='embedded';s.burstTick=tick+embed;s.expiresTick=tick+embed+60;survivors.push(s);continue;}
       done=true;
     }
     if(done)a.state.stats.shotsResolved++;else survivors.push(s);

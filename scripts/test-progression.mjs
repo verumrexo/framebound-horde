@@ -130,7 +130,10 @@ for (const world of playableMaps()) {
     assert.ok(spots.length >= 6, `${world.id}/${area.id}: fewer than six placements`);
   }
   for (const source of world.spawnSources) {
-    assert.ok(world.sideWalls ? source.y <= -950 : Math.abs(source.x) >= 3000 || source.y <= -2600, 'rift must sit beyond the defense field');
+    const beyondField = world.arena
+      ? Math.abs(source.x) >= 1700 || Math.abs(source.y) >= 1700
+      : world.sideWalls ? source.y <= -950 : Math.abs(source.x) >= 3000 || source.y <= -2600;
+    assert.ok(beyondField, 'rift must sit beyond the defense field');
     assert.ok(source.x - source.spreadX >= world.bounds.left);
     assert.ok(source.x + source.spreadX <= world.bounds.right);
     assert.ok(source.y - source.spreadY >= world.bounds.top);

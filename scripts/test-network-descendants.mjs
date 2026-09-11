@@ -4,6 +4,7 @@ import { TEST_FIELD_SESSION_CONFIG } from '../src/core/session-config.js';
 import { TOWER_DEFINITIONS, validateTowerCatalog } from '../src/core/tower-catalog.js';
 import { createAttackSnapshot } from '../src/core/effect-system.js';
 import { DEFAULT_MAP_ID } from '../src/core/world-config.js';
+import { PROTOCOL_VERSION } from '../src/core/protocol.js';
 import { NETWORK_DESCENDANT_IDS, purchaseCost, saleRefund, socketPoint } from '../src/core/network-descendants.js';
 
 let checks = 0;
@@ -177,7 +178,7 @@ test('protocol 14 solo saves remain loadable', () => {
   const correction = a.correctionSnapshot(); correction.protocolVersion = 14;
   const b = new EmbeddedAuthority(TEST_FIELD_SESSION_CONFIG);
   b.applyCorrectionSnapshot(correction); b.tick();
-  assert.equal(b.state.protocolVersion, 20);
+  assert.equal(b.state.protocolVersion, PROTOCOL_VERSION);
   assert.equal(b.state.towers.length, 1);
 });
 

@@ -26,6 +26,7 @@ fresh runs choose one of three authored layouts. all use the same survival rules
 - `map 01 // clusters`: 47 mixed-size areas, including the original seven large hubs, arranged into loose irregular groups for braided flow and mixed tower capacity.
 - `map 02 // shards`: 50 small isolated areas spread unevenly across the field, creating a wider, less centralized front.
 - `map 03 // continents`: 30 large areas with broad spaces between them, creating fewer but heavier channels without fixed lanes.
+- `map 07 // crucible`: an enclosed square arena with the base at the exact centre and 34 areas in three gapped concentric rings plus four corner bastions. 32 rifts sit around the whole frame and open every 50 seconds, widening from the north around both flanks until the last rift opens due south; by the end the player must hold all 360 degrees.
 
 the map choice is part of the authoritative start or restart command, correction snapshot, autosave, and multiplayer session state. it is not a local visual preference.
 
@@ -198,3 +199,11 @@ this section supersedes the earlier one-hp-only and forced low-resolution render
 ## arsenal and reactor / protocol 17
 
 this supersedes earlier salvage/foundry descriptions: salvage migrates to reactor and foundry to arsenal. arsenal offers 39 unique global research nodes in a 3/9/27 tree, with one path per station and free traversal of owned ancestors. tiers cost 10 million, 100 million and 1 billion. reactor offers 12 globally priced rank categories. research survives station sale and never contributes to its refund. purchases use the payer wallet; benefits are shared. see [the approved station design](arsenal-reactor-proposal.md) for effects and caps. fractional damage pays accumulated whole hp, without overkill rewards; secondary attacks cannot recursively trigger research. automated checks cover authority behavior; manual gameplay and multiplayer acceptance remain pending.
+
+## september 11 follow-up
+
+- map 07 // crucible adds multidirectional survival: central base, ring defence geometry, rifts on every side with a widening unlock order.
+- broadside can be aimed manually (`a` / `3 aim point`, `0 auto`) or left tracking its targeting mode. broadside, flechette and cyclone received pierce budgets, damage, cadence and range tuning; see `turret-rework.md`.
+- reactor damage ranks are +10% each and stack additively; reactor ranks grow x1.25 per rank per category; arsenal tiers cost 100k / 1m / 10m. see `arsenal-reactor-proposal.md`.
+- once every nebula on a map shares one relay network, ordinary connector relays collapse and upload themselves into the network: they are refunded like a sale, their footprints become buildable again, and the established links persist through saves and multiplayer corrections. amplifier, echo and hardpoint keep their bodies; relays built later remain available as stepping stones to those forms.
+- pixel rings (explosions, ranges, control fields) are rasterised on the gpu with identical pixels at a fraction of the previous frame cost.

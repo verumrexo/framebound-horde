@@ -103,3 +103,9 @@ status: implemented under protocol 17. all 39 arsenal choices and 12 reactor cat
 ## station controls
 
 select an arsenal or reactor and open its research action. select a choice with the pointer or number keys, inspect its description and price, then buy with the button or enter. tab pages reactor categories; escape returns to tower actions. already-owned ancestors cost zero when traversing another arsenal.
+
+## september 11 pricing and stacking revision
+
+- live arsenal prices are one decimal order above the previous schedule: 100,000 at tier 1, 1,000,000 at tier 2, 10,000,000 at tier 3. all 39 nodes cost 279.3 million; a single root-to-leaf path costs 11.1 million.
+- reactor ranks: 10,000 for the first rank of any category, then x1.25 per additional rank of that category (`ceil(10,000 x 1.25^rank)`). categories still price independently; damage no longer uses its own growth factor.
+- damage output ranks add +10% of base weapon damage each and never compound: rank n gives `base x (1 + 0.1n)`. that rank-adjusted value is the baseline every arsenal percentage is measured against, so root, conditional and reactor contributions stay a single additive bucket around one baseline. caps and effects of the other eleven categories are unchanged.

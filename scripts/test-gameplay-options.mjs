@@ -34,12 +34,12 @@ function setup(){
  for(const node of RESEARCH_NODES)a.purchaseResearch(command({towerId:station.id,researchId:node.id,expectedCost:node.cost}),player);
  assert.equal(a.state.research.unlocked.length,39,'one arsenal unlocks every branch');
  const wallet=a.state.economyByPlayer[player.id].credits;
- a.purchaseResearch(command({towerId:station.id,researchId:1,expectedCost:10000}),player);
+ a.purchaseResearch(command({towerId:station.id,researchId:1,expectedCost:100000}),player);
  assert.equal(a.state.economyByPlayer[player.id].credits,wallet);
  for(const category of REACTOR_CATEGORIES){
   a.state.research.reactor[category.id]=0;assert.equal(reactorQuote(a.state,category.id).cost,10000);
-  a.state.research.reactor[category.id]=1;assert.equal(reactorQuote(a.state,category.id).cost,11000);
-  a.state.research.reactor[category.id]=2;assert.equal(reactorQuote(a.state,category.id).cost,12100);
+  a.state.research.reactor[category.id]=1;assert.equal(reactorQuote(a.state,category.id).cost,12500);
+  a.state.research.reactor[category.id]=2;assert.equal(reactorQuote(a.state,category.id).cost,15625);
  }
 }
 for(const id of ['laser','cutter','prism','sweeper']){
@@ -68,7 +68,7 @@ for(const id of ['laser','cutter','prism','sweeper']){
  for(let i=0;i<60;i++){a.tick();b.tick();}
  assert.ok(a.state.stats.spawned>0);
  const {lastEventId: ignoredA,...left}=a.snapshot(),{lastEventId: ignoredB,...right}=b.snapshot();assert.deepEqual(left,right);
- assert.equal(playableMaps().length,6);
+ assert.equal(playableMaps().length,7);
  const corridor=getMapDefinition('map_04');assert.ok(corridor.sideWalls);assert.ok(corridor.spawnSources.every((s)=>s.y<-900));
  assert.equal(corridor.defenseAreas.filter((area)=>area.shape.x===0).length,2);
  const walled=getMapDefinition('map_06');assert.ok(walled.sideWalls);

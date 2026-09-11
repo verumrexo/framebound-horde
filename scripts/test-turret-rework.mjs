@@ -36,19 +36,57 @@ test('shotgun automatically tracks targets and fires a real divergent fan; nail 
  fire(gun); // Stale manual geometry must not override automatic targeting.
  assert.equal(reworkState(a).shots.length,17);
  assert.ok(new Set(reworkState(a).shots.map((s)=>s.dy)).size>10);
+ assert.ok(reworkState(a).shots.every((s)=>s.dx>0),'auto fan faces the tracked enemy');
  advance(30);assert.ok(a.state.stats.hpPopped>0);
  const b=setup(),nail=b.add('flechette');const one=b.enemy(nail.x+45,nail.y),two=b.enemy(nail.x+90,nail.y);
  b.fire(nail);b.advance(28);
  assert.ok(b.a.swarm.enemy(one.id,one.generation).hp<100);assert.ok(b.a.swarm.enemy(two.id,two.generation).hp<100);
  assert.ok(reworkState(b.a).shots.some((s)=>s.type==='embedded'));
  b.advance(30);const splinters=reworkState(b.a).shots.filter((s)=>s.type==='splinter');
- assert.equal(splinters.length,10);assert.ok(splinters.some((s)=>s.dy>.9)&&splinters.some((s)=>s.dy<-.9));
+ assert.equal(splinters.length,12);assert.ok(splinters.some((s)=>s.dy>.9)&&splinters.some((s)=>s.dy<-.9));
+ assert.ok(splinters.every((s)=>s.contactsLeft===2&&s.range===140),'splinters carry their tuned pierce budget and reach');
 });
 test('cyclone orbits without damage while charging, then expands outward',()=>{
  const {a,add,enemy,fire,advance}=setup();const t=add('cyclone');enemy(t.x+50,t.y);fire(t);advance(30);
- assert.equal(a.state.stats.hpPopped || 0,0);assert.equal(reworkState(a).shots.length,24);
- assert.ok(reworkState(a).shots.every((s)=>Math.abs(Math.hypot(s.x-t.x,s.y-t.y)-24)<.001));
+ assert.equal(a.state.stats.hpPopped || 0,0);assert.equal(reworkState(a).shots.length,32);
+ assert.ok(reworkState(a).shots.every((s)=>Math.abs(Math.hypot(s.x-t.x,s.y-t.y)-26)<.001));
  advance(50);assert.ok(reworkState(a).shots.some((s)=>Math.hypot(s.x-t.x,s.y-t.y)>70));
+});
+test('pellets and storm bullets spend a bounded pierce budget; nails pierce everything on their line',()=>{
+ const {a,add,enemy,fire,advance}=setup();const gun=add('broadside');
+ // Four bodies stacked on one line: a two-contact pellet must stop after the second.
+ const line=[30,44,58,72].map((dx)=>enemy(gun.x+dx,gun.y,100));
+ gun.strikePoint={x:gun.x+100,y:gun.y};fire(gun);advance(20);
+ const hp=line.map((e)=>a.swarm.enemy(e.id,e.generation).hp);
+ assert.ok(hp[0]<100&&hp[1]<100,'first two bodies on the centre line take pellets');
+ assert.ok(reworkState(a).shots.every((s)=>s.type!=='pellet'||s.contactsLeft>=1));
+ const b=setup(),nail=b.add('flechette');const stack=[30,50,70,90,110,130].map((dx)=>b.enemy(nail.x+dx,nail.y,100));
+ b.fire(nail);b.advance(20);
+ assert.ok(stack.every((e)=>b.a.swarm.enemy(e.id,e.generation).hp<100),'the nail passes through all six');
+ const c=setup(),storm=c.add('cyclone');c.enemy(storm.x+50,storm.y,100);
+ c.fire(storm);c.advance(53);const lead=reworkState(c.a).shots[0];
+ const ring=[60,80,100,120,140].map((d)=>c.enemy(storm.x+lead.dx*d,storm.y+lead.dy*d,100));
+ c.advance(80);
+ const stormHp=ring.map((e)=>c.a.swarm.enemy(e.id,e.generation).hp);
+ assert.equal(stormHp.filter((v)=>v<100).length,4,'a four-contact storm bullet reaches four bodies and the fifth is beyond the pierce budget');
+});
+test('broadside manual facing holds direction, respects range, waits for a fan target and restores auto',()=>{
+ const {a,add,enemy,fire,advance,player}=setup();const gun=add('broadside');
+ const command=(payload)=>({clientId:'test',playerId:player.id,sequence:1,payload});
+ assert.equal(a.setTowerStrikePoint(command({towerId:gun.id,x:gun.x+gun.effectiveRange+50,y:gun.y}),player)?.type,undefined);
+ assert.equal(gun.strikePoint,null,'facing outside range is rejected');
+ a.setTowerStrikePoint(command({towerId:gun.id,x:gun.x-80,y:gun.y}),player);
+ assert.deepEqual(gun.strikePoint,{x:gun.x-80,y:gun.y});
+ const east=enemy(gun.x+60,gun.y);
+ fire(gun);assert.equal(reworkState(a).shots.length,0,'a westward fan does not fire at an eastern enemy');
+ const west=enemy(gun.x-60,gun.y);fire(gun);
+ assert.equal(reworkState(a).shots.length,17);assert.ok(reworkState(a).shots.every((s)=>s.dx<0),'held facing wins over the closer automatic target');
+ advance(30);assert.equal(a.swarm.enemy(east.id,east.generation).hp,100);assert.ok(a.swarm.enemy(west.id,west.generation).hp<100);
+ const saved=a.correctionSnapshot();const b=new EmbeddedAuthority(TEST_FIELD_SESSION_CONFIG);b.applyCorrectionSnapshot(saved);
+ assert.deepEqual(b.state.towers.find((t)=>t.id===gun.id).strikePoint,{x:gun.x-80,y:gun.y},'manual facing survives correction');
+ a.setTowerStrikePoint(command({towerId:gun.id,x:null,y:null}),player);assert.equal(gun.strikePoint,null);
+ gun.targetingMode='farthest_base';fire(gun);
+ assert.ok(reworkState(a).shots.filter((s)=>s.createdTick===a.state.runTick).every((s)=>s.dx>0||s.dx<0),'automatic mode resumes with the targeting mode');
 });
 test('glue prefers an untreated enemy; freeze ray builds chill then switches targets',()=>{
  const {a,add,enemy,fire,advance}=setup();const t=add('tether');const first=enemy(t.x+40,t.y),second=enemy(t.x+65,t.y);

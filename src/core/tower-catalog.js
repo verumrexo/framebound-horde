@@ -694,18 +694,29 @@ const BASE_TOWER_DEFINITIONS = Object.freeze({
 
 // Every support descendant is explicitly non-damaging, including copied controls.
 export const CONTROL_FORMS = Object.freeze(['tether', 'anchor', 'stasis', 'recall', 'dragnet', 'knot', 'singularity', 'bond', 'braid', 'backwash', 'breaker', 'crosswind', 'breakwater']);
-const reworkAttack = (mechanic, cadence, damage = 0) => ({
+// `rework` carries the mechanic's authoritative tuning so shots serialize it and
+// turret-rework.js never hardcodes per-form numbers.
+const reworkAttack = (mechanic, cadence, damage = 0, rework = {}) => ({
   ...projectileAttack({ cadencePerSecond: cadence,
     speed: ({ shotgun: 600, nail: 550, orbit: 180, freeze_shell: 210, gravity_seed: 220 })[mechanic] || 340,
-    volleyCount: ({ shotgun: 17, orbit: 24 })[mechanic] || 1 }), mechanic,
+    volleyCount: rework.count || ({ shotgun: 17, orbit: 24 })[mechanic] || 1,
+    manualStrikePoint: rework.manualAim === true }), mechanic,
   effects: damage ? [{ type: 'damage', amount: damage }] : [], triggers: [],
-  supportOnly: !damage
+  supportOnly: !damage,
+  rework: Object.freeze({ ...rework })
 });
 const reworks = {
-  broadside: { range: 145, description: ['tracking shotgun fan', 'heavy burst / 2.5s', 'automatic targeting'],
-    attack: reworkAttack('shotgun', .4, 2) },
-  flechette: { range: 240, description: ['heavy piercing dart', 'plants a delayed nail', 'bursts sideways'], attack: reworkAttack('nail', .5, 3) },
-  cyclone: { range: 175, description: ['orbiting bullet ring', 'charges then expands', 'one storm / 4s'], attack: reworkAttack('orbit', .25, 2) },
+  // broadside: wide 17-pellet fan; each pellet punches through two bodies. auto-tracks
+  // the targeting mode, or holds a player-chosen facing (strike point) like the lasers.
+  broadside: { range: 160, description: ['17-pellet shotgun fan', 'pellets pierce 2 / 2s reload', 'aim fan or auto-track'],
+    attack: reworkAttack('shotgun', .5, 3, { contacts: 2, fanRadians: 1.3, manualAim: true }) },
+  // flechette: heavy dart pierces everything on its line, embeds, then throws two
+  // opposing sprays of six splinters that each pass through two bodies.
+  flechette: { range: 240, description: ['heavy piercing dart', 'plants a delayed nail', 'bursts 12 sideways splinters'],
+    attack: reworkAttack('nail', .75, 4, { splinters: 12, splinterRange: 140, splinterContacts: 2, splinterSpread: .11, embedTicks: 24 }) },
+  // cyclone: 32 bullets charge around the turret, then expand as a piercing storm.
+  cyclone: { range: 190, description: ['32-bullet orbiting ring', 'charges then expands', 'storm pierces 4 / 3s'],
+    attack: reworkAttack('orbit', 1 / 3, 3, { count: 32, contacts: 4, chargeTicks: 54, orbitRadius: 26 }) },
   tether: { description: ['sticky projectiles', 'heavy single-target slow', 'prefers unglued enemies'], attack: reworkAttack('glue', 2) },
   anchor: { description: ['continuous freeze ray', 'build chill to freeze', 'switches frozen targets'], attack: reworkAttack('freeze_ray', 10) },
   stasis: { description: ['lobbed freeze shell', 'freezes a whole group', 'long reload'], attack: reworkAttack('freeze_shell', .2), control: null },
