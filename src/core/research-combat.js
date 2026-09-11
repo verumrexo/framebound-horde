@@ -1,4 +1,4 @@
-import { hasResearch, reactorRank } from './research.js';
+import { hasResearch, reactorRank, reactorDamageFactor } from './research.js';
 import { cloneSerializable } from './protocol.js';
 
 export const damageFixed = (value) => Math.max(0, Math.round(value * 1000) / 1000);
@@ -8,7 +8,9 @@ export const physicalBullet = (attack) => attack.delivery.type === 'projectile' 
 export function decorateResearchAttack(state, tower, attack) {
   const ids = attack.supportOnly ? [] : [...(state.research?.unlocked || [])];
   const has = (id) => ids.includes(id);
-  const factor = 1.5 ** reactorRank(state, 'damage');
+  // Reactor damage ranks stack additively (+10% each) to form the baseline that
+  // arsenal percentages are measured against; nothing here compounds.
+  const factor = reactorDamageFactor(state);
   let baseDamage = 0;
   for (const effect of attack.effects || []) {
     if (effect.type !== 'damage') continue;

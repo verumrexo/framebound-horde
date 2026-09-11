@@ -69,6 +69,9 @@ const freezeSpawn = (source) => Object.freeze({
 });
 
 function freezeMap(map) {
+  // Southern-wall maps push perimeter rifts away from the bottom wall and out past the
+  // camera-safe bounds. Arena maps author their rifts directly on every edge instead.
+  const relocate = map.playable && !map.arena;
   return Object.freeze({
     ...map,
     menuLines: Object.freeze([...(map.menuLines || [])]),
@@ -79,11 +82,11 @@ function freezeMap(map) {
     spawnCurve: Object.freeze({ ...map.spawnCurve }),
     defenseAreas: Object.freeze(map.defenseAreas.map(freezeArea)),
     spawnSources: Object.freeze(map.spawnSources.map((source) => freezeSpawn(
-      map.playable && source.y + (source.spreadY || 8) > map.bounds.bottom - 12
+      relocate && source.y + (source.spreadY || 8) > map.bounds.bottom - 12
         ? { ...source, x: source.x < 0 ? -1690 : 1690, y: 720,
           spreadX: 34, spreadY: 140 }
         : source
-    )).map((source) => freezeSpawn(map.playable ? { ...source,
+    )).map((source) => freezeSpawn(relocate ? { ...source,
       x: Math.abs(source.x) >= 1500 ? source.x + Math.sign(source.x) * 1600 : source.x,
       y: source.y < -1000 ? source.y - 1600 : source.y
     } : source)))
@@ -203,6 +206,20 @@ const MAP_03_AREAS = areasFromSpecs('continent_', 1, [
   [720,680,120,76,4],[1060,650,120,74,2]
 ]);
 
+// map 07: the base sits at the exact centre. three concentric, deliberately gapped
+// nebula rings (6 / 10 / 14) plus four corner bastions give radial defence lines in every
+// direction instead of a southern wall; every gap is at least 60 units so the flow never
+// pockets, and every neighbouring ring sits inside relay link range.
+const MAP_07_AREAS = areasFromSpecs('crucible_', 1, [
+  [181,-299,94,64,4],[332,22,91,68,4],[203,305,89,61,3],[-170,324,82,61,0],[-331,-21,92,61,3],[-157,-294,91,59,2],
+  [103,-680,109,73,0],[469,-453,98,73,0],[647,-112,100,70,0],[581,336,102,76,0],[255,595,97,76,4],
+  [-95,676,100,76,0],[-509,481,99,78,3],[-653,102,99,69,2],[-595,-326,107,70,3],[-320,-587,102,71,4],
+  [23,-1049,108,83,3],[418,-930,115,74,0],[751,-616,114,82,2],[930,-276,113,81,0],[969,232,108,77,1],
+  [795,579,108,74,2],[480,863,116,78,3],[1,1008,116,83,4],[-413,887,111,73,1],[-790,722,118,83,3],
+  [-992,247,106,80,3],[-997,-290,108,76,2],[-796,-641,103,73,2],[-500,-915,114,83,1],
+  [-1050,-1040,96,70,0],[1040,-1050,96,70,1],[1000,985,96,70,2],[-1040,1050,96,70,3]
+]);
+
 const TEST_FIELD_AREAS = [
   nebulaArea('test_area', 0, 270, 210, 140, 2),
   nebulaArea('test_link_area', 560, 270, 168, 116, 1)
@@ -271,6 +288,48 @@ const MAP_03_SPAWN_ORDER = [
   'e_mid_a','w_mid_b','e_mid_b','w_low','sw_outer','e_low','se_outer','w_gap',
   'sw_mid','e_gap','se_mid','n_extreme_w','sw_inner','n_extreme_e','se_inner','s_last'
 ];
+
+// thirty-two rift slots spaced evenly around the arena's outer frame, indexed clockwise
+// from due north. slot 16 is due south.
+const ARENA_RIFT_COUNT = 32;
+function arenaRiftSlot(index, bounds) {
+  const angle = index / ARENA_RIFT_COUNT * Math.PI * 2;
+  const halfWidth = (bounds.right - bounds.left) * 0.5 - 110;
+  const halfHeight = (bounds.bottom - bounds.top) * 0.5 - 110;
+  const centerX = (bounds.left + bounds.right) * 0.5;
+  const centerY = (bounds.top + bounds.bottom) * 0.5;
+  const dx = Math.sin(angle);
+  const dy = -Math.cos(angle);
+  // Project the direction onto the rectangular frame.
+  const scale = Math.min(halfWidth / Math.max(0.0001, Math.abs(dx)), halfHeight / Math.max(0.0001, Math.abs(dy)));
+  const x = Math.round(centerX + dx * scale);
+  const y = Math.round(centerY + dy * scale);
+  const onVertical = Math.abs(dx * scale) >= halfWidth - 0.5;
+  const onHorizontal = Math.abs(dy * scale) >= halfHeight - 0.5;
+  const corner = onVertical && onHorizontal;
+  return {
+    x, y,
+    spreadX: corner ? 90 : onVertical ? 30 : 150,
+    spreadY: corner ? 90 : onVertical ? 150 : 30
+  };
+}
+
+// unlock order widens from the northern rift around both flanks until the two fronts
+// meet in the south: manageable at first, unavoidable 360-degree pressure by the end.
+const MAP_07_RIFT_ORDER = [
+  0, 1, -1, 2, -2, 4, -3, 3, -4, 5, -5, 7, -6, 6, -7, 8,
+  -8, 9, -9, 11, -10, 10, -11, 12, -12, 13, -13, 15, -14, 14, -15, 16
+].map((offset) => (offset + ARENA_RIFT_COUNT) % ARENA_RIFT_COUNT);
+
+function arenaSpawns(prefix, bounds, order, secondsPerRift) {
+  return order.map((slot, index) => ({
+    id: `${prefix}_rift_${String(slot).padStart(2, '0')}`,
+    ...arenaRiftSlot(slot, bounds),
+    unlockSeconds: index * secondsPerRift
+  }));
+}
+
+const MAP_07_BOUNDS = Object.freeze({ left: -2000, right: 2000, top: -2000, bottom: 2000 });
 
 const COMMON_MAP = Object.freeze({
   bounds: { left: -3600, right: 3600, top: -3300, bottom: 900 },
@@ -353,6 +412,20 @@ export const MAP_DEFINITIONS = Object.freeze({
       .filter((source) => source.id.startsWith('walled_n_')
         && Math.abs(source.x) + source.spreadX < 1420)
   }),
+  map_07: freezeMap({
+    ...COMMON_MAP,
+    id: 'map_07',
+    label: 'map 07 // crucible',
+    menuLines: ['central base / 34 ring areas', 'rifts open on every side'],
+    playable: true,
+    arena: true,
+    bounds: MAP_07_BOUNDS,
+    cameraBounds: { left: -1450, right: 1450, top: -1450, bottom: 1450 },
+    camera: { x: 0, y: 0, scale: 4 },
+    base: { id: 'base_7', x: 0, y: 0, reachRadius: 30 },
+    defenseAreas: MAP_07_AREAS,
+    spawnSources: arenaSpawns('crucible', MAP_07_BOUNDS, MAP_07_RIFT_ORDER, 50)
+  }),
   test_field: freezeMap({
     id: 'test_field',
     label: 'test field',
@@ -393,6 +466,59 @@ export function getMapDefinition(mapId = DEFAULT_MAP_ID, seed = 0) {
     return Object.freeze({...source,x,y,spreadX:24,spreadY:24});
   });
   return Object.freeze({...map,layoutSeed:seed>>>0,spawnSources:Object.freeze(sources)});
+}
+
+// Relay eligibility is a static property of the map: two areas are linkable when a
+// relay standing somewhere inside one can reach the other's field within link range.
+// The largest linkable component is the set a complete relay network must cover; every
+// production map is fully linkable, so completion means "every nebula joined". The
+// sample lattice is deterministic, so every peer derives the same set.
+const relayEligibleCache = new Map();
+export function relayEligibleAreaIds(map, linkRange = 360) {
+  const cacheKey = `${map.id}:${linkRange}`;
+  if (relayEligibleCache.has(cacheKey)) return relayEligibleCache.get(cacheKey);
+  const areas = map.defenseAreas;
+  const interior = areas.map((area) => {
+    const points = [];
+    for (let ring = 0; ring <= 6; ring += 1) {
+      for (let step = 0; step < 24; step += 1) {
+        const angle = step / 24 * Math.PI * 2;
+        const fraction = ring * 0.15;
+        const x = area.shape.x + Math.cos(angle) * area.shape.radiusX * fraction;
+        const y = area.shape.y + Math.sin(angle) * area.shape.radiusY * fraction;
+        if (defenseAreaField(area, x, y) <= 0) points.push(x, y);
+      }
+    }
+    return points;
+  });
+  const linkable = (from, to) => {
+    const points = interior[from];
+    for (let index = 0; index < points.length; index += 2) {
+      if (defenseAreaField(areas[to], points[index], points[index + 1], linkRange) <= 0) return true;
+    }
+    return false;
+  };
+  const componentOf = new Map();
+  let best = [];
+  for (let start = 0; start < areas.length; start += 1) {
+    if (componentOf.has(start)) continue;
+    const seen = new Set([start]);
+    const queue = [start];
+    while (queue.length) {
+      const current = queue.shift();
+      for (let other = 0; other < areas.length; other += 1) {
+        if (seen.has(other) || !(linkable(current, other) || linkable(other, current))) continue;
+        seen.add(other);
+        queue.push(other);
+      }
+    }
+    for (const index of seen) componentOf.set(index, start);
+    const ids = [...seen].map((index) => areas[index].id).sort();
+    if (ids.length > best.length || (ids.length === best.length && ids[0] < best[0])) best = ids;
+  }
+  const result = Object.freeze(best);
+  relayEligibleCache.set(cacheKey, result);
+  return result;
 }
 
 export function playableMaps() {

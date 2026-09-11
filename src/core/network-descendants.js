@@ -8,11 +8,25 @@ export const NETWORK_DESCENDANT_IDS = Object.freeze([
 export const RELAY_FORMS = Object.freeze(['relay', 'amplifier', 'echo', 'hardpoint']);
 export const isRelayForm = (id) => RELAY_FORMS.includes(id);
 
+// Every relay-family edge on the map, including links a completed network retains
+// after its connector relays retired.
+export function relayLinkPairs(snapshot) {
+  const pairs = [];
+  for (const [areaA, areaB] of snapshot?.relayNetwork?.links || []) pairs.push([areaA, areaB]);
+  for (const tower of snapshot?.towers || []) {
+    if (isRelayForm(tower.definitionId) && tower.relayTargetAreaId) pairs.push([tower.areaId, tower.relayTargetAreaId]);
+  }
+  return pairs;
+}
+
 export function networkSources(snapshot, areaId, id) {
   const areas = new Set([areaId]);
   let changed = true;
   while (changed) {
     changed = false;
+    for (const [areaA, areaB] of snapshot.relayNetwork?.links || []) {
+      if (areas.has(areaA) !== areas.has(areaB)) { areas.add(areaA); areas.add(areaB); changed = true; }
+    }
     for (const tower of snapshot.towers) {
       if (!isRelayForm(tower.definitionId) || !tower.relayTargetAreaId) continue;
       if (areas.has(tower.areaId) || areas.has(tower.relayTargetAreaId)) {

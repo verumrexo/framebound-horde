@@ -10,7 +10,7 @@ import { PROTOTYPE_SESSION_CONFIG, TEST_FIELD_SESSION_CONFIG } from './core/sess
 import { strikeImpactPoints, supportsStrikePoint } from './core/strike-pattern.js';
 import { normalizeControlGeometry } from './core/control-system.js';
 import { towerBuildQuote } from './core/tower-catalog.js';
-import { NETWORK_DESCENDANT_IDS, controlSource, isRelayForm, purchaseCost, saleRefund, socketPoint } from './core/network-descendants.js';
+import { NETWORK_DESCENDANT_IDS, controlSource, isRelayForm, networkSources, purchaseCost, saleRefund, socketPoint } from './core/network-descendants.js';
 import { defenseAreaBounds, defenseAreaField, findDefenseAreaAt, getMapDefinition, playableMaps } from './core/world-config.js';
 import { loadSoloRun, saveSoloRun } from './core/persistence.js';
 import { P2PGuestSession, P2PHostSession } from './core/p2p-session.js';
@@ -299,6 +299,11 @@ float hash21(vec2 p) {
   return fract(p.x * p.y);
 }
 
+vec3 networkHueTint(float hue) {
+  vec3 p = abs(fract(hue + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+  return clamp(p - 1.0, 0.0, 1.0);
+}
+
 void main() {
   vec2 screen = vec2(gl_FragCoord.x / u_renderScale, u_resolution.y - gl_FragCoord.y / u_renderScale);
   vec2 world = (screen - u_resolution * 0.5) * u_viewScale + u_camera;
@@ -344,7 +349,11 @@ void main() {
     if (edgeScar > 0.955) color = vec3(0.333, 1.0, 0.761);
   }
   if (v_style.z > 0.5) {
-    color = mix(color, vec3(color.r * 0.65, color.g * 1.15, color.g * 1.5), 0.45);
+    // Isolated relay nodes (no confirmed link yet) read as a dim amber "pending" tint;
+    // confirmed networks each get a stable hue derived from their canonical area id so
+    // separate networks are visually distinguishable and never flicker or recolor.
+    vec3 tint = v_style.z > 1.5 ? networkHueTint(v_style.w) : vec3(0.85, 0.55, 0.22);
+    color = mix(color, color * (tint * 0.9 + 0.35), 0.5);
     // World-aligned buried traces: sparse, static and confined to the interior.
     // Suppress detail at far zoom instead of turning small fields into bright noise.
     vec2 circuit = mod(world + vec2(8000.0), 96.0);
@@ -354,11 +363,11 @@ void main() {
       || (abs(circuit.x - 48.0) < traceWidth && circuit.y < 24.0);
     if (edgeDepth > u_viewScale * 3.0 && u_viewScale <= 5.0
         && hash21(cell) > 0.65 && trace) {
-      color = vec3(0.025, 0.095, 0.085);
+      color = mix(vec3(0.025, 0.095, 0.085), tint, 0.4);
       float arrival = distance(world, u_researchWave.xy) / 1800.0;
       float age = u_researchWave.z - arrival;
       if (u_researchWave.z >= 0.0 && age >= 0.0 && age < 0.18)
-        color = vec3(0.045, 0.17, 0.145);
+        color = mix(vec3(0.045, 0.17, 0.145), tint, 0.65);
     }
   }
   outColor = vec4(color, 1.0);
@@ -435,25 +444,53 @@ void main() {
 }
 `;
 
+// Shape vertices carry an optional ring descriptor (centre, integer pixel radius, flag).
+// Plain rectangles leave the flag at zero. Ring quads/annuli cover the pixel ring's
+// footprint and the fragment shader keeps exactly the midpoint-circle pixels, so one
+// ring costs a handful of vertices instead of one rectangle per pixel.
 const SHAPE_VERTEX = `#version 300 es
 precision highp float;
 layout(location=0) in vec2 a_position;
 layout(location=1) in vec4 a_color;
+layout(location=2) in vec4 a_ring;
 uniform vec2 u_resolution;
 uniform float u_renderScale;
 out vec4 v_color;
+flat out vec4 v_ring;
 void main() {
   vec2 snapped = a_position;
   gl_Position = vec4(snapped.x / u_resolution.x * 2.0 - 1.0, 1.0 - snapped.y / u_resolution.y * 2.0, 0.0, 1.0);
   v_color = a_color;
+  v_ring = a_ring;
 }
 `;
 
 const SHAPE_FRAGMENT = `#version 300 es
 precision highp float;
 in vec4 v_color;
+flat in vec4 v_ring;
+uniform vec2 u_resolution;
+uniform float u_renderScale;
 out vec4 outColor;
-void main() { outColor = v_color; }
+void main() {
+  if (v_ring.w > 0.5) {
+    // Logical pixel offset from the ring centre, matching a 1x1 rect placed at
+    // (centre + offset): the fragment belongs to that rect when floor(L - c) == offset.
+    vec2 logical = vec2(gl_FragCoord.x, u_resolution.y * u_renderScale - gl_FragCoord.y) / u_renderScale;
+    float dx = abs(floor(logical.x - v_ring.x));
+    float dy = abs(floor(logical.y - v_ring.y));
+    float major = max(dx, dy);
+    float minor = min(dx, dy);
+    float radius = v_ring.z;
+    // Midpoint-circle membership in exact integers: major == round(sqrt(r^2 - minor^2))
+    // <=> (2*major-1)^2 <= 4*(r^2 - minor^2) < (2*major+1)^2.
+    float q = 4.0 * (radius * radius - minor * minor);
+    float low = (2.0 * major - 1.0) * (2.0 * major - 1.0);
+    float high = (2.0 * major + 1.0) * (2.0 * major + 1.0);
+    if (q < low || q >= high) discard;
+  }
+  outColor = v_color;
+}
 `;
 
 const TEXT_VERTEX = `#version 300 es
@@ -566,38 +603,120 @@ class EnemyRenderer {
   }
 }
 
+// Growable typed-array vertex store shared by the shape and glyph batches: no per-vertex
+// array allocation, no spread, and one subarray upload per flush.
+class VertexStore {
+  constructor(floatsPerVertex, initialVertices = 4096) {
+    this.stride = floatsPerVertex;
+    this.data = new Float32Array(floatsPerVertex * initialVertices);
+    this.length = 0;
+  }
+
+  reserve(vertexCount) {
+    const needed = this.length + vertexCount * this.stride;
+    if (needed <= this.data.length) return;
+    let capacity = this.data.length * 2;
+    while (capacity < needed) capacity *= 2;
+    const grown = new Float32Array(capacity);
+    grown.set(this.data.subarray(0, this.length));
+    this.data = grown;
+  }
+
+  get vertexCount() {
+    return this.length / this.stride;
+  }
+
+  view() {
+    return this.data.subarray(0, this.length);
+  }
+
+  clear() {
+    this.length = 0;
+  }
+}
+
+const SHAPE_FLOATS = 10;
+// Unit-circle tables per segment count, built once and reused by every ring.
+const ringPolygonCache = new Map();
+function ringPolygon(segments) {
+  let table = ringPolygonCache.get(segments);
+  if (!table) {
+    table = new Float32Array((segments + 1) * 2);
+    for (let index = 0; index <= segments; index += 1) {
+      const angle = index / segments * Math.PI * 2;
+      table[index * 2] = Math.cos(angle);
+      table[index * 2 + 1] = Math.sin(angle);
+    }
+    ringPolygonCache.set(segments, table);
+  }
+  return table;
+}
+
 class ShapeBatch {
   constructor() {
     this.program = createProgram(SHAPE_VERTEX, SHAPE_FRAGMENT);
     this.buffer = gl.createBuffer();
     this.vao = gl.createVertexArray();
-    this.data = [];
+    this.store = new VertexStore(SHAPE_FLOATS, 8192);
+    this.uniforms = {
+      resolution: gl.getUniformLocation(this.program, 'u_resolution'),
+      renderScale: gl.getUniformLocation(this.program, 'u_renderScale')
+    };
+    this.bufferCapacity = 0;
+    this.ringsDrawn = 0;
+    this.ringsCulled = 0;
+    this.lastFlushFloats = 0;
+    this.frameFloats = 0;
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, SHAPE_FLOATS * 4, 0);
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 24, 8);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, SHAPE_FLOATS * 4, 8);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, SHAPE_FLOATS * 4, 24);
     gl.bindVertexArray(null);
   }
 
+  // Writes one vertex; callers reserve space first.
+  put(x, y, color, ringX = 0, ringY = 0, ringRadius = 0, ringFlag = 0) {
+    const data = this.store.data;
+    let offset = this.store.length;
+    data[offset++] = x;
+    data[offset++] = y;
+    data[offset++] = color[0];
+    data[offset++] = color[1];
+    data[offset++] = color[2];
+    data[offset++] = color[3];
+    data[offset++] = ringX;
+    data[offset++] = ringY;
+    data[offset++] = ringRadius;
+    data[offset++] = ringFlag;
+    this.store.length = offset;
+  }
+
   vertex(x, y, color) {
-    this.data.push(x, y, ...color);
+    this.store.reserve(1);
+    this.put(x, y, color);
   }
 
   triangle(a, b, c, color) {
-    this.vertex(a.x, a.y, color);
-    this.vertex(b.x, b.y, color);
-    this.vertex(c.x, c.y, color);
+    this.store.reserve(3);
+    this.put(a.x, a.y, color);
+    this.put(b.x, b.y, color);
+    this.put(c.x, c.y, color);
   }
 
   rect(x, y, width, height, color) {
-    const a = { x, y };
-    const b = { x: x + width, y };
-    const c = { x: x + width, y: y + height };
-    const d = { x, y: y + height };
-    this.triangle(a, b, c, color);
-    this.triangle(a, c, d, color);
+    this.store.reserve(6);
+    const right = x + width;
+    const bottom = y + height;
+    this.put(x, y, color);
+    this.put(right, y, color);
+    this.put(right, bottom, color);
+    this.put(x, y, color);
+    this.put(right, bottom, color);
+    this.put(x, bottom, color);
   }
 
   line(x1, y1, x2, y2, width, color) {
@@ -606,22 +725,86 @@ class ShapeBatch {
     const length = Math.hypot(dx, dy) || 1;
     const nx = -dy / length * width * 0.5;
     const ny = dx / length * width * 0.5;
-    this.triangle({ x: x1 + nx, y: y1 + ny }, { x: x2 + nx, y: y2 + ny }, { x: x2 - nx, y: y2 - ny }, color);
-    this.triangle({ x: x1 + nx, y: y1 + ny }, { x: x2 - nx, y: y2 - ny }, { x: x1 - nx, y: y1 - ny }, color);
+    this.store.reserve(6);
+    this.put(x1 + nx, y1 + ny, color);
+    this.put(x2 + nx, y2 + ny, color);
+    this.put(x2 - nx, y2 - ny, color);
+    this.put(x1 + nx, y1 + ny, color);
+    this.put(x2 - nx, y2 - ny, color);
+    this.put(x1 - nx, y1 - ny, color);
+  }
+
+  // One-pixel-thick midpoint-circle ring of integer pixel radius around a logical-pixel
+  // centre. Geometry is a thin annulus (or a quad for tiny radii) whose fragments are
+  // filtered to the exact ring pixels on the GPU. Rings entirely outside the viewport
+  // are skipped; on-screen cost is a few dozen vertices regardless of radius.
+  ring(centerX, centerY, radius, color) {
+    const reach = radius + 3;
+    if (centerX + reach < 0 || centerX - reach > logicalWidth || centerY + reach < 0 || centerY - reach > logicalHeight) {
+      this.ringsCulled += 1;
+      return;
+    }
+    this.ringsDrawn += 1;
+    if (radius < 7) {
+      this.store.reserve(6);
+      const left = centerX - reach, top = centerY - reach, right = centerX + reach, bottom = centerY + reach;
+      this.put(left, top, color, centerX, centerY, radius, 1);
+      this.put(right, top, color, centerX, centerY, radius, 1);
+      this.put(right, bottom, color, centerX, centerY, radius, 1);
+      this.put(left, top, color, centerX, centerY, radius, 1);
+      this.put(right, bottom, color, centerX, centerY, radius, 1);
+      this.put(left, bottom, color, centerX, centerY, radius, 1);
+      return;
+    }
+    const segments = radius < 24 ? 12 : radius < 64 ? 16 : radius < 160 ? 24 : radius < 400 ? 32 : 48;
+    const table = ringPolygon(segments);
+    // The ring pixels lie within radius +/- ~1.5 of the true circle; pad both sides and
+    // circumscribe the outer polygon so every ring pixel is covered by the band.
+    const inner = Math.max(0, radius - 2.5);
+    const outer = (radius + 2.5) / Math.cos(Math.PI / segments) + 0.5;
+    this.store.reserve(segments * 6);
+    for (let index = 0; index < segments; index += 1) {
+      const c0 = table[index * 2], s0 = table[index * 2 + 1];
+      const c1 = table[index * 2 + 2], s1 = table[index * 2 + 3];
+      const ox0 = centerX + c0 * outer, oy0 = centerY + s0 * outer;
+      const ox1 = centerX + c1 * outer, oy1 = centerY + s1 * outer;
+      const ix0 = centerX + c0 * inner, iy0 = centerY + s0 * inner;
+      const ix1 = centerX + c1 * inner, iy1 = centerY + s1 * inner;
+      this.put(ox0, oy0, color, centerX, centerY, radius, 1);
+      this.put(ox1, oy1, color, centerX, centerY, radius, 1);
+      this.put(ix0, iy0, color, centerX, centerY, radius, 1);
+      this.put(ix0, iy0, color, centerX, centerY, radius, 1);
+      this.put(ox1, oy1, color, centerX, centerY, radius, 1);
+      this.put(ix1, iy1, color, centerX, centerY, radius, 1);
+    }
   }
 
   flush() {
-    if (!this.data.length) return;
-    const vertices = new Float32Array(this.data);
+    if (!this.store.length) return;
+    const vertices = this.store.view();
     gl.useProgram(this.program);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'u_renderScale'), renderScale);
+    gl.uniform2f(this.uniforms.resolution, logicalWidth, logicalHeight);
+    gl.uniform1f(this.uniforms.renderScale, renderScale);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 6);
+    // Grow the GPU buffer geometrically and stream into it; no per-flush reallocation.
+    if (this.store.data.byteLength > this.bufferCapacity) {
+      this.bufferCapacity = this.store.data.byteLength;
+      gl.bufferData(gl.ARRAY_BUFFER, this.bufferCapacity, gl.DYNAMIC_DRAW);
+    }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices);
+    gl.drawArrays(gl.TRIANGLES, 0, this.store.vertexCount);
     gl.bindVertexArray(null);
-    this.data.length = 0;
+    this.frameFloats += this.store.length;
+    this.store.clear();
+  }
+
+  // Called once per rendered frame so diagnostics report per-frame ring and vertex work.
+  endFrame() {
+    this.lastFlushFloats = this.frameFloats;
+    this.frameFloats = 0;
+    this.ringsDrawn = 0;
+    this.ringsCulled = 0;
   }
 }
 
@@ -673,6 +856,13 @@ const GLYPHS = Object.freeze({
   '=':glyph('00000','00000','11111','00000','11111','00000','00000'),
   '%':glyph('11001','11010','00100','01000','10110','00110','00000'),
   '?':glyph('01110','10001','00001','00110','00100','00000','00100'),
+  ',':glyph('00000','00000','00000','00000','00110','00100','01000'),
+  ';':glyph('00000','00110','00110','00000','00110','00100','01000'),
+  '<':glyph('00001','00010','00100','01000','00100','00010','00001'),
+  '>':glyph('10000','01000','00100','00010','00100','01000','10000'),
+  '(':glyph('00010','00100','01000','01000','01000','00100','00010'),
+  ')':glyph('01000','00100','00010','00010','00010','00100','01000'),
+  "'":glyph('00100','00100','01000','00000','00000','00000','00000'),
   ' ':glyph('00000','00000','00000','00000','00000','00000','00000')
 });
 
@@ -712,7 +902,13 @@ class BitmapText {
     this.program = createProgram(TEXT_VERTEX, TEXT_FRAGMENT);
     this.buffer = gl.createBuffer();
     this.vao = gl.createVertexArray();
-    this.data = [];
+    this.store = new VertexStore(8, 4096);
+    this.bufferCapacity = 0;
+    this.uniforms = {
+      resolution: gl.getUniformLocation(this.program, 'u_resolution'),
+      renderScale: gl.getUniformLocation(this.program, 'u_renderScale'),
+      atlas: gl.getUniformLocation(this.program, 'u_atlas')
+    };
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.enableVertexAttribArray(0);
@@ -725,51 +921,138 @@ class BitmapText {
   }
 
   glyphVertex(x, y, u, v, color) {
-    this.data.push(x, y, u, v, ...color);
+    const data = this.store.data;
+    let offset = this.store.length;
+    data[offset++] = x;
+    data[offset++] = y;
+    data[offset++] = u;
+    data[offset++] = v;
+    data[offset++] = color[0];
+    data[offset++] = color[1];
+    data[offset++] = color[2];
+    data[offset++] = color[3];
+    this.store.length = offset;
   }
 
   draw(text, x, y, color, scale = 1) {
     let cursor = Math.round(x);
-    for (const rawCharacter of String(text).toLowerCase()) {
+    const characters = String(text).toLowerCase();
+    this.store.reserve(characters.length * 6);
+    const atlasWidth = this.columns * this.cellWidth;
+    const atlasHeight = this.rows * this.cellHeight;
+    for (const rawCharacter of characters) {
       const character = this.index.has(rawCharacter) ? rawCharacter : '?';
       const index = this.index.get(character);
       const column = index % this.columns;
       const row = Math.floor(index / this.columns);
-      const u0 = column * this.cellWidth / (this.columns * this.cellWidth);
-      const v0 = row * this.cellHeight / (this.rows * this.cellHeight);
-      const u1 = (column * this.cellWidth + 5) / (this.columns * this.cellWidth);
-      const v1 = (row * this.cellHeight + 7) / (this.rows * this.cellHeight);
+      const u0 = column * this.cellWidth / atlasWidth;
+      const v0 = row * this.cellHeight / atlasHeight;
+      const u1 = (column * this.cellWidth + 5) / atlasWidth;
+      const v1 = (row * this.cellHeight + 7) / atlasHeight;
       const width = 5 * scale;
       const height = 7 * scale;
-      const a = [cursor, y, u0, v0];
-      const b = [cursor + width, y, u1, v0];
-      const c = [cursor + width, y + height, u1, v1];
-      const d = [cursor, y + height, u0, v1];
-      for (const point of [a, b, c, a, c, d]) this.glyphVertex(point[0], point[1], point[2], point[3], color);
+      this.glyphVertex(cursor, y, u0, v0, color);
+      this.glyphVertex(cursor + width, y, u1, v0, color);
+      this.glyphVertex(cursor + width, y + height, u1, v1, color);
+      this.glyphVertex(cursor, y, u0, v0, color);
+      this.glyphVertex(cursor + width, y + height, u1, v1, color);
+      this.glyphVertex(cursor, y + height, u0, v1, color);
       cursor += this.cellWidth * scale;
     }
     return cursor;
   }
 
   flush() {
-    if (!this.data.length) return;
-    const vertices = new Float32Array(this.data);
+    if (!this.store.length) return;
+    const vertices = this.store.view();
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.program);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'u_renderScale'), renderScale);
+    gl.uniform2f(this.uniforms.resolution, logicalWidth, logicalHeight);
+    gl.uniform1f(this.uniforms.renderScale, renderScale);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.uniform1i(gl.getUniformLocation(this.program, 'u_atlas'), 0);
+    gl.uniform1i(this.uniforms.atlas, 0);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.TRIANGLES, 0, vertices.length / 8);
+    if (this.store.data.byteLength > this.bufferCapacity) {
+      this.bufferCapacity = this.store.data.byteLength;
+      gl.bufferData(gl.ARRAY_BUFFER, this.bufferCapacity, gl.DYNAMIC_DRAW);
+    }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices);
+    gl.drawArrays(gl.TRIANGLES, 0, this.store.vertexCount);
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
-    this.data.length = 0;
+    this.store.clear();
   }
+}
+
+function hashString32(str) {
+  let hash = 2166136261;
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function networkHueFromId(id) {
+  return (hashString32(id) * 0.6180339887498949) % 1;
+}
+
+// Presentation-only: derives stable per-network nebula colors from already-synced relay
+// links (tower.areaId / relayTargetAreaId). Pure function of authoritative snapshot state,
+// recomputed every frame on every client identically - never mutates or feeds back into
+// game state, so it cannot desync multiplayer.
+function relayNetworkPresentation(snapshot) {
+  const presentation = new Map();
+  if (!snapshot) return presentation;
+  const parent = new Map();
+  const ensure = (id) => { if (!parent.has(id)) parent.set(id, id); };
+  const find = (id) => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root);
+    let current = id;
+    while (parent.get(current) !== root) {
+      const next = parent.get(current);
+      parent.set(current, root);
+      current = next;
+    }
+    return root;
+  };
+  const union = (a, b) => {
+    const rootA = find(a), rootB = find(b);
+    if (rootA === rootB) return;
+    // The lexicographically smaller id always becomes the shared root, so a merged
+    // network's canonical id (and therefore its color) never depends on merge order.
+    if (rootA < rootB) parent.set(rootB, rootA); else parent.set(rootA, rootB);
+  };
+  for (const tower of snapshot.towers || []) {
+    if (!isRelayForm(tower.definitionId)) continue;
+    ensure(tower.areaId);
+    if (tower.relayTargetAreaId) {
+      ensure(tower.relayTargetAreaId);
+      union(tower.areaId, tower.relayTargetAreaId);
+    }
+  }
+  // A completed network keeps its established links after the connector relays retire.
+  for (const [areaA, areaB] of snapshot.relayNetwork?.links || []) {
+    ensure(areaA); ensure(areaB); union(areaA, areaB);
+  }
+  const members = new Map();
+  for (const id of parent.keys()) {
+    const root = find(id);
+    if (!members.has(root)) members.set(root, new Set());
+    members.get(root).add(id);
+  }
+  for (const [root, ids] of members) {
+    // tier 2 = confirmed multi-area network (stable hue); tier 1 = a relay placed but
+    // not yet linked to anything, flagged distinctly so a missed connection stands out.
+    const tier = ids.size >= 2 ? 2 : 1;
+    const hue = tier === 2 ? networkHueFromId(root) : 0;
+    for (const id of ids) presentation.set(id, { tier, hue });
+  }
+  return presentation;
 }
 
 class NebulaRenderer {
@@ -790,18 +1073,20 @@ class NebulaRenderer {
     gl.bindVertexArray(null);
   }
 
-  setMap(map, linkedAreas) {
-    const key = `${map.id}:${[...linkedAreas].sort().join(',')}`;
+  setMap(map, presentation) {
+    const key = `${map.id}:${[...presentation.entries()].sort(([a], [b]) => a < b ? -1 : 1)
+      .map(([id, info]) => `${id}=${info.tier}:${info.hue.toFixed(3)}`).join(',')}`;
     if (this.mapId === key) return;
     const data = [];
     for (const area of map.defenseAreas) {
       const bounds = defenseAreaBounds(area, 12);
       const shape = area.shape;
+      const info = presentation.get(area.id) || { tier: 0, hue: 0 };
       data.push(bounds.left, bounds.top, bounds.right, bounds.bottom);
       data.push(shape.x, shape.y, shape.radiusX, shape.radiusY);
       data.push(shape.cosRotation, shape.sinRotation, shape.amplitude2, shape.amplitude3);
       data.push(shape.amplitude5, shape.notchDepth, shape.notchX, shape.notchY);
-      data.push(shape.styleSeed, shape.family, linkedAreas.has(area.id) ? 1 : 0, 0);
+      data.push(shape.styleSeed, shape.family, info.tier, info.hue);
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
@@ -810,13 +1095,7 @@ class NebulaRenderer {
   }
 
   draw(map, viewCamera) {
-    const linkedAreas = new Set();
-    for (const tower of sessionSnapshot?.towers || []) {
-      if (isRelayForm(tower.definitionId) && tower.relayTargetAreaId) {
-        linkedAreas.add(tower.areaId); linkedAreas.add(tower.relayTargetAreaId);
-      }
-    }
-    this.setMap(map, linkedAreas);
+    this.setMap(map, relayNetworkPresentation(sessionSnapshot));
     if (!this.count) return;
     gl.useProgram(this.program);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
@@ -883,6 +1162,13 @@ let statusUntil = 0;
 const projectilePresentation = new Map();
 const impactBursts = [];
 const attackFlashes = [];
+// Relay completion transition: retired connectors upload themselves along their own link.
+// Purely presentational and derived from the authoritative event payload plus elapsed
+// time, so it cannot influence simulation or diverge between peers.
+let relayCollapse = null;
+const RELAY_COLLAPSE_SECONDS = 2.2;
+// Rolling render-cost telemetry for the diagnostics object (last / average / worst ms).
+const frameTiming = { last: 0, average: 0, worst: 0 };
 const uiHitboxes = [];
 const telemetryByMode = new Map();
 const gameplayPreferences = loadGameplayPreferences();
@@ -890,6 +1176,7 @@ let uiDrag = null;
 let controlDrag = null;
 let showAllRanges = false;
 let showKps = true;
+let showStatsPanel = false;
 let testKeepSwarm = false;
 let lastAutosaveAt = performance.now();
 let saveInFlight = false;
@@ -1715,6 +2002,9 @@ addEventListener('keydown', (event) => {
   } else if (key === 'g') {
     showAllRanges = !showAllRanges;
     setStatus(`all ranges ${showAllRanges ? 'shown' : 'hidden'}`);
+  } else if (key === 'i' && frontEndScreen === 'game') {
+    showStatsPanel = !showStatsPanel;
+    setStatus(`modifier summary ${showStatsPanel ? 'shown' : 'hidden'}`);
   } else if (sessionMode === 'test' && ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(event.key)) {
     switchTestTowerForm({
       0: 'backwash',
@@ -2333,6 +2623,35 @@ function drawNetworkLinks(snapshot) {
     }
   }
 
+  // Established links of a completed network: drawn from the retired relay's last
+  // position when known, so the geometry the player built stays legible.
+  const retiredByPair = new Map();
+  for (const record of snapshot.relayNetwork?.retired || []) {
+    if (record.targetAreaId) retiredByPair.set([record.areaId, record.targetAreaId].sort().join(':'), record);
+  }
+  const persistedLinks = snapshot.relayNetwork?.links || [];
+  for (let index = 0; index < persistedLinks.length; index += 1) {
+    const [areaA, areaB] = persistedLinks[index];
+    const pair = [areaA, areaB].sort().join(':');
+    if (relayPairs.has(pair)) continue;
+    relayPairs.add(pair);
+    const record = retiredByPair.get(pair);
+    const sourceCenter = record ? { x: record.x, y: record.y } : defenseAreaCenterById(areaA);
+    const targetCenter = defenseAreaCenterById(record ? record.targetAreaId : areaB);
+    if (!sourceCenter || !targetCenter) continue;
+    const from = project(sourceCenter.x, sourceCenter.y);
+    const to = project(targetCenter.x, targetCenter.y);
+    if (Math.max(from.x, to.x) < 0 || Math.min(from.x, to.x) > logicalWidth || Math.max(from.y, to.y) < 0 || Math.min(from.y, to.y) > logicalHeight) continue;
+    drawDashedLink(from, to, quietNetwork);
+    shapes.rect(from.x - 1, from.y - 1, 2, 2, quietPulse);
+    shapes.rect(to.x - 1, to.y - 1, 2, 2, quietPulse);
+    const phase = (pulseClock + index * 0.37) % 8;
+    if (!reducedNetworkMotion.matches && relays.length === 0 && phase < 2 && index === Math.floor(pulseClock / 8) % persistedLinks.length) {
+      const progress = phase / 2;
+      shapes.rect(from.x + (to.x - from.x) * progress, from.y + (to.y - from.y) * progress, 2, 1, quietPulse);
+    }
+  }
+
   const selected = snapshot.towers.find((tower) => tower.id === selectedTowerId);
   if (!selected || !definitions.get(selected.definitionId)?.networkNode) return;
   const linkedAreas = new Set(selected.networkAreaIds || [selected.areaId]);
@@ -2508,9 +2827,10 @@ function drawReworkedCombat(snapshot) {
 
 function drawControlFields(snapshot) {
   for (const field of snapshot.forceFields || []) {
+    const fieldSelected = selectedTowerId === field.sourceTowerId;
     if (field.kind === 'barricade') {
       const a=project(field.x1,field.y1), b=project(field.x2,field.y2);
-      shapes.line(a.x,a.y,b.x,b.y,Math.max(2,field.thickness*2/camera.scale),COLOR.cyan);
+      shapes.line(a.x,a.y,b.x,b.y,Math.max(2,field.thickness*2/camera.scale),fieldSelected?COLOR.cyan:COLOR.dimMint);
       shapes.line(a.x,a.y,b.x,b.y,1,COLOR.black);
       continue;
     }
@@ -2521,13 +2841,15 @@ function drawControlFields(snapshot) {
       : Math.max(0, Math.min(1, (snapshot.runTick - field.createdTick) / durationTicks));
     if (!persistent && phase >= 1) continue;
     const center = project(field.x, field.y);
-    const activeColor = persistent || phase < 0.72 ? COLOR.cyan : COLOR.dimMint;
+    // Ambient battlefield rendering stays subdued; the selected tower gets the brighter preview.
+    const activeColor = !fieldSelected && persistent ? COLOR.dimMint : persistent || phase < 0.72 ? COLOR.cyan : COLOR.dimMint;
+    const ringColor = fieldSelected ? COLOR.cyan : COLOR.dimMint;
 
     if (field.kind === 'stasis_zone') {
       const pulsePhase = (snapshot.runTick % field.periodTicks) / field.periodTicks;
       const freezing = snapshot.runTick % field.periodTicks < field.durationTicks
         && snapshot.runTick - snapshot.runTick % field.periodTicks >= field.activeFromTick;
-      drawWorldRing(field.x, field.y, field.radius, COLOR.cyan);
+      drawWorldRing(field.x, field.y, field.radius, ringColor);
       drawWorldRing(field.x, field.y, field.radius * (0.22 + pulsePhase * 0.72), freezing ? COLOR.mint : COLOR.dimMint);
       const radiusPixels = Math.max(4, Math.round(field.radius / camera.scale));
       for (const angle of [0, Math.PI * 0.5, Math.PI, Math.PI * 1.5]) {
@@ -2535,7 +2857,7 @@ function drawControlFields(snapshot) {
         const outerY = center.y + Math.round(Math.sin(angle) * radiusPixels);
         const innerX = center.x + Math.round(Math.cos(angle) * (radiusPixels - 7));
         const innerY = center.y + Math.round(Math.sin(angle) * (radiusPixels - 7));
-        shapes.line(outerX, outerY, innerX, innerY, 2, freezing ? COLOR.amber : COLOR.mint);
+        shapes.line(outerX, outerY, innerX, innerY, freezing ? 2 : 1, freezing ? COLOR.amber : COLOR.dimMint);
       }
       shapes.rect(center.x - 1, center.y - 1, 3, 3, COLOR.amber);
       continue;
@@ -2555,13 +2877,16 @@ function drawControlFields(snapshot) {
     }
 
     if (field.kind === 'slow_field') {
-      drawWorldRing(field.x, field.y, field.radius, activeColor);
+      drawWorldRing(field.x, field.y, field.radius, ringColor);
+      // Ambient net stays a faint centre mark; the full crosshatch net only shows for the selected tower.
       const radiusPixels = Math.max(3, Math.round(field.radius / camera.scale));
-      for (const offsetFraction of [-0.5, 0, 0.5]) {
+      const offsets = fieldSelected ? [-0.5, 0, 0.5] : [0];
+      for (const offsetFraction of offsets) {
         const offset = Math.round(radiusPixels * offsetFraction);
         const span = Math.round(Math.sqrt(Math.max(0, radiusPixels * radiusPixels - offset * offset)) * 0.82);
-        shapes.line(center.x + offset, center.y - span, center.x + offset, center.y + span, 1, offset === 0 ? COLOR.mint : COLOR.dimMint);
-        shapes.line(center.x - span, center.y + offset, center.x + span, center.y + offset, 1, offset === 0 ? COLOR.mint : COLOR.dimMint);
+        const lineColor = offset === 0 && fieldSelected ? COLOR.mint : COLOR.dimMint;
+        shapes.line(center.x + offset, center.y - span, center.x + offset, center.y + span, 1, lineColor);
+        shapes.line(center.x - span, center.y + offset, center.x + span, center.y + offset, 1, lineColor);
       }
       continue;
     }
@@ -2569,14 +2894,15 @@ function drawControlFields(snapshot) {
     if (field.kind === 'radial_force') {
       const singularity = field.sourceFormId === 'singularity';
       const pulse = singularity ? 1 - phase * 0.45 : 1 - phase * 0.25;
-      drawWorldRing(field.x, field.y, field.radius * pulse, singularity ? COLOR.green : activeColor);
-      drawWorldRing(field.x, field.y, Math.max(6, field.radius * pulse * 0.48), singularity ? COLOR.cyan : COLOR.green);
+      drawWorldRing(field.x, field.y, field.radius * pulse, fieldSelected ? (singularity ? COLOR.green : activeColor) : COLOR.dimMint);
+      drawWorldRing(field.x, field.y, Math.max(6, field.radius * pulse * 0.48), fieldSelected ? (singularity ? COLOR.cyan : COLOR.green) : COLOR.dimMint);
       const reach = Math.max(3, Math.round(field.radius * pulse / camera.scale));
       const inset = singularity ? Math.max(2, Math.round(reach * 0.18)) : 2;
-      shapes.line(center.x - reach, center.y, center.x - inset, center.y, singularity ? 2 : 1, COLOR.mint);
-      shapes.line(center.x + reach, center.y, center.x + inset, center.y, singularity ? 2 : 1, COLOR.mint);
-      shapes.line(center.x, center.y - reach, center.x, center.y - inset, singularity ? 2 : 1, COLOR.mint);
-      shapes.line(center.x, center.y + reach, center.x, center.y + inset, singularity ? 2 : 1, COLOR.mint);
+      const spokeColor = fieldSelected ? COLOR.mint : COLOR.dimMint;
+      shapes.line(center.x - reach, center.y, center.x - inset, center.y, singularity && fieldSelected ? 2 : 1, spokeColor);
+      shapes.line(center.x + reach, center.y, center.x + inset, center.y, singularity && fieldSelected ? 2 : 1, spokeColor);
+      shapes.line(center.x, center.y - reach, center.x, center.y - inset, singularity && fieldSelected ? 2 : 1, spokeColor);
+      shapes.line(center.x, center.y + reach, center.x, center.y + inset, singularity && fieldSelected ? 2 : 1, spokeColor);
       shapes.rect(center.x - 1, center.y - 1, 3, 3, singularity ? COLOR.amber : COLOR.cyan);
       continue;
     }
@@ -2614,21 +2940,21 @@ function drawControlFields(snapshot) {
     }
 
     if (field.kind === 'vortex_force') {
-      drawWorldRing(field.x, field.y, field.radius, phase < 0.75 ? COLOR.green : COLOR.dimMint);
-      drawWorldRing(field.x, field.y, field.radius * 0.45, COLOR.cyan);
+      drawWorldRing(field.x, field.y, field.radius, fieldSelected && phase < 0.75 ? COLOR.green : COLOR.dimMint);
+      drawWorldRing(field.x, field.y, field.radius * 0.45, ringColor);
       const orbitRadius = field.radius * (0.68 - phase * 0.12);
       const spin = field.spin || 1;
       for (let index = 0; index < 6; index += 1) {
         const angle = spin * phase * Math.PI * 4 + index * Math.PI / 3;
         const satellite = project(field.x + Math.cos(angle) * orbitRadius, field.y + Math.sin(angle) * orbitRadius);
-        shapes.rect(satellite.x - 1, satellite.y - 1, 3, 3, index % 2 ? COLOR.cyan : COLOR.mint);
+        shapes.rect(satellite.x - 1, satellite.y - 1, 3, 3, index % 2 ? COLOR.dimMint : (fieldSelected ? COLOR.mint : COLOR.dimMint));
       }
       shapes.rect(center.x - 1, center.y - 1, 3, 3, COLOR.amber);
       continue;
     }
 
     if (field.kind === 'pinch_force') {
-      drawWorldRing(field.x, field.y, field.radius, phase < 0.75 ? COLOR.green : COLOR.dimMint);
+      drawWorldRing(field.x, field.y, field.radius, fieldSelected && phase < 0.75 ? COLOR.green : COLOR.dimMint);
       const perpendicularX = -field.axisY;
       const perpendicularY = field.axisX;
       const axisFrom = project(field.x - field.axisX * field.radius, field.y - field.axisY * field.radius);
@@ -2643,7 +2969,7 @@ function drawControlFields(snapshot) {
           field.x + perpendicularX * field.radius * 0.12 * side,
           field.y + perpendicularY * field.radius * 0.12 * side
         );
-        shapes.line(outside.x, outside.y, inside.x, inside.y, 2, side < 0 ? COLOR.cyan : COLOR.mint);
+        shapes.line(outside.x, outside.y, inside.x, inside.y, fieldSelected ? 2 : 1, fieldSelected ? (side < 0 ? COLOR.cyan : COLOR.mint) : COLOR.dimMint);
         shapes.rect(outside.x - 2, outside.y - 2, 5, 5, COLOR.amber);
       }
       continue;
@@ -2658,9 +2984,9 @@ function drawControlFields(snapshot) {
       const edgeA2 = project(field.x2 + nx, field.y2 + ny);
       const edgeB1 = project(field.x1 - nx, field.y1 - ny);
       const edgeB2 = project(field.x2 - nx, field.y2 - ny);
-      shapes.line(edgeA1.x, edgeA1.y, edgeA2.x, edgeA2.y, 2, COLOR.green);
-      shapes.line(edgeB1.x, edgeB1.y, edgeB2.x, edgeB2.y, 2, COLOR.cyan);
-      drawDashedLink(first, second, COLOR.mint);
+      shapes.line(edgeA1.x, edgeA1.y, edgeA2.x, edgeA2.y, fieldSelected ? 2 : 1, fieldSelected ? COLOR.green : COLOR.dimMint);
+      shapes.line(edgeB1.x, edgeB1.y, edgeB2.x, edgeB2.y, fieldSelected ? 2 : 1, fieldSelected ? COLOR.cyan : COLOR.dimMint);
+      drawDashedLink(first, second, fieldSelected ? COLOR.mint : COLOR.dimMint);
       for (const travel of [0.18, 0.5, 0.82]) {
         const midX = field.x1 + (field.x2 - field.x1) * travel;
         const midY = field.y1 + (field.y2 - field.y1) * travel;
@@ -2684,10 +3010,10 @@ function drawControlFields(snapshot) {
         const endX = field.x + field.axisX * field.halfLength * side;
         const endY = field.y + field.axisY * field.halfLength * side;
         const end = project(endX, endY);
-        shapes.line(start.x, start.y, end.x, end.y, 1, COLOR.amber);
+        shapes.line(start.x, start.y, end.x, end.y, 1, fieldSelected ? COLOR.amber : COLOR.dimMint);
         for (const wing of [-1, 1]) {
           const tip = project(endX - field.axisX * side * 13 + normalX * wing * 9, endY - field.axisY * side * 13 + normalY * wing * 9);
-          shapes.line(end.x, end.y, tip.x, tip.y, 1, COLOR.mint);
+          shapes.line(end.x, end.y, tip.x, tip.y, 1, fieldSelected ? COLOR.mint : COLOR.dimMint);
           const edgeStart = project(field.x1 + normalX * field.thickness * wing, field.y1 + normalY * field.thickness * wing);
           const edgeEnd = project(field.x2 + normalX * field.thickness * wing, field.y2 + normalY * field.thickness * wing);
           if (side === 1) drawDashedLink(edgeStart, edgeEnd, COLOR.dimMint);
@@ -2708,9 +3034,9 @@ function drawControlFields(snapshot) {
       );
       const screenOffsetX = Math.round((field.wallNormalX ?? field.pushX) * field.thickness / camera.scale);
       const screenOffsetY = Math.round((field.wallNormalY ?? field.pushY) * field.thickness / camera.scale);
-      shapes.line(wallFrom.x - screenOffsetX, wallFrom.y - screenOffsetY, wallTo.x - screenOffsetX, wallTo.y - screenOffsetY, 2, COLOR.amber);
-      shapes.line(wallFrom.x + screenOffsetX, wallFrom.y + screenOffsetY, wallTo.x + screenOffsetX, wallTo.y + screenOffsetY, 2, activeColor);
-      drawDashedLink(wallFrom, wallTo, COLOR.mint);
+      shapes.line(wallFrom.x - screenOffsetX, wallFrom.y - screenOffsetY, wallTo.x - screenOffsetX, wallTo.y - screenOffsetY, fieldSelected ? 2 : 1, fieldSelected ? COLOR.amber : COLOR.dimMint);
+      shapes.line(wallFrom.x + screenOffsetX, wallFrom.y + screenOffsetY, wallTo.x + screenOffsetX, wallTo.y + screenOffsetY, fieldSelected ? 2 : 1, fieldSelected ? activeColor : COLOR.dimMint);
+      drawDashedLink(wallFrom, wallTo, fieldSelected ? COLOR.mint : COLOR.dimMint);
       for (const along of [-0.55, 0, 0.55]) {
         const arrowStart = project(
           field.x + field.wallAxisX * field.halfLength * along - field.pushX * field.thickness,
@@ -2720,7 +3046,7 @@ function drawControlFields(snapshot) {
           field.x + field.wallAxisX * field.halfLength * along + field.pushX * field.thickness * 1.8,
           field.y + field.wallAxisY * field.halfLength * along + field.pushY * field.thickness * 1.8
         );
-        shapes.line(arrowStart.x, arrowStart.y, arrowEnd.x, arrowEnd.y, 1, COLOR.cyan);
+        shapes.line(arrowStart.x, arrowStart.y, arrowEnd.x, arrowEnd.y, 1, fieldSelected ? COLOR.cyan : COLOR.dimMint);
       }
       continue;
     }
@@ -2744,10 +3070,10 @@ function drawControlFields(snapshot) {
     }
 
     if (field.kind === 'crosswind_force') {
-      drawWorldRing(field.x, field.y, field.radius, COLOR.cyan);
+      drawWorldRing(field.x, field.y, field.radius, ringColor);
       const perpendicularX = -field.directionY;
       const perpendicularY = field.directionX;
-      for (const offset of [-0.48, 0, 0.48]) {
+      for (const offset of fieldSelected ? [-0.48, 0, 0.48] : [0]) {
         const start = project(
           field.x + perpendicularX * field.radius * offset - field.directionX * field.radius * 0.48,
           field.y + perpendicularY * field.radius * offset - field.directionY * field.radius * 0.48
@@ -2756,14 +3082,14 @@ function drawControlFields(snapshot) {
           field.x + perpendicularX * field.radius * offset + field.directionX * field.radius * 0.48,
           field.y + perpendicularY * field.radius * offset + field.directionY * field.radius * 0.48
         );
-        shapes.line(start.x, start.y, end.x, end.y, offset === 0 ? 2 : 1, offset === 0 ? COLOR.mint : COLOR.amber);
+        shapes.line(start.x, start.y, end.x, end.y, offset === 0 && fieldSelected ? 2 : 1, offset === 0 ? (fieldSelected ? COLOR.mint : COLOR.dimMint) : COLOR.amber);
       }
       continue;
     }
 
     if (field.kind === 'directional_force') {
       const breaker = field.sourceFormId === 'breaker';
-      drawWorldRing(field.x, field.y, field.radius, breaker ? COLOR.amber : activeColor);
+      drawWorldRing(field.x, field.y, field.radius, fieldSelected ? (breaker ? COLOR.amber : activeColor) : COLOR.dimMint);
       const perpendicularX = -field.directionY;
       const perpendicularY = field.directionX;
       const lineCount = breaker ? 5 : 3;
@@ -2777,7 +3103,7 @@ function drawControlFields(snapshot) {
           field.x + perpendicularX * offset + field.directionX * field.radius * (0.45 + phase * 0.38),
           field.y + perpendicularY * offset + field.directionY * field.radius * (0.45 + phase * 0.38)
         );
-        shapes.line(start.x, start.y, end.x, end.y, breaker && index === 2 ? 2 : 1, index % 2 ? COLOR.amber : COLOR.mint);
+        shapes.line(start.x, start.y, end.x, end.y, breaker && index === 2 && fieldSelected ? 2 : 1, !fieldSelected ? COLOR.dimMint : index % 2 ? COLOR.amber : COLOR.mint);
       }
     }
   }
@@ -2911,6 +3237,68 @@ function drawAttackFlashes(dt) {
   attackFlashes.length = write;
 }
 
+function startRelayCollapse(event) {
+  const links = event.payload.retired
+    .map((record) => ({ ...record, target: record.targetAreaId ? defenseAreaCenterById(record.targetAreaId) : null }));
+  relayCollapse = { age: 0, links, areaIds: event.payload.areaIds || [], mapId: currentMap.id };
+}
+
+function drawRelayCollapse(dt) {
+  if (!relayCollapse) return;
+  relayCollapse.age += dt;
+  if (relayCollapse.age >= RELAY_COLLAPSE_SECONDS || relayCollapse.mapId !== currentMap.id) { relayCollapse = null; return; }
+  const age = relayCollapse.age;
+  for (const record of relayCollapse.links) {
+    const from = project(record.x, record.y);
+    if (from.x < -80 || from.x > logicalWidth + 80 || from.y < -80 || from.y > logicalHeight + 80) continue;
+    const seed = hashString32(record.towerId);
+    // Phase 1 (0-0.5s): the relay mast collapses into its socket. Phase 2 (0.3-1.6s):
+    // eight pixel packets climb the link line and vanish into the linked nebula.
+    const collapse = Math.min(1, age / 0.5);
+    const mastHeight = Math.round(15 * (1 - collapse));
+    if (mastHeight > 0) {
+      shapes.rect(from.x, from.y - 8 + (15 - mastHeight), 1, mastHeight, collapse < 0.5 ? COLOR.cyan : COLOR.dimMint);
+      shapes.rect(from.x - 5 + Math.round(collapse * 4), from.y + 4, 11 - Math.round(collapse * 8), 2, COLOR.green);
+    }
+    if (collapse >= 1) {
+      const fade = Math.max(0, 1 - (age - 0.5) / 0.6);
+      const halo = Math.round(2 + (1 - fade) * 6);
+      if (fade > 0) {
+        shapes.rect(from.x - halo, from.y, 2, 1, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
+        shapes.rect(from.x + halo - 1, from.y, 2, 1, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
+        shapes.rect(from.x, from.y - halo, 1, 2, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
+        shapes.rect(from.x, from.y + halo - 1, 1, 2, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
+      }
+    }
+    if (!record.target) continue;
+    const to = project(record.target.x, record.target.y);
+    for (let packet = 0; packet < 8; packet += 1) {
+      const start = 0.3 + packet * 0.11 + ((seed >>> (packet * 3)) & 7) * 0.01;
+      const progress = (age - start) / 0.75;
+      if (progress < 0 || progress >= 1) continue;
+      const eased = progress * progress * (3 - 2 * progress);
+      const wobble = (((seed >>> packet) & 3) - 1.5) * (1 - eased);
+      const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy) || 1;
+      const x = Math.round(from.x + dx * eased - dy / length * wobble);
+      const y = Math.round(from.y + dy * eased + dx / length * wobble);
+      const size = progress < 0.85 ? 2 : 1;
+      shapes.rect(x, y, size, size, packet % 3 === 0 ? COLOR.cyan : packet % 3 === 1 ? COLOR.mint : COLOR.green);
+    }
+  }
+  // Phase 3 (1.2-2.2s): every joined nebula answers with one expanding ring.
+  const ringAge = age - 1.2;
+  if (ringAge >= 0 && !reducedNetworkMotion.matches) {
+    for (const areaId of relayCollapse.areaIds) {
+      const center = defenseAreaCenterById(areaId);
+      if (!center) continue;
+      const area = currentMap.defenseAreas.find((candidate) => candidate.id === areaId);
+      const reach = Math.max(area?.shape.radiusX || 60, area?.shape.radiusY || 40) * 0.9;
+      const radius = Math.max(4, reach * Math.min(1, ringAge / 0.8));
+      drawWorldRing(center.x, center.y, radius, ringAge < 0.4 ? COLOR.mint : COLOR.dimMint);
+    }
+  }
+}
+
 function addImpactBurst(event) {
   if (!Number.isFinite(event.payload.x) || !Number.isFinite(event.payload.y)) return;
   impactBursts.push({
@@ -2957,27 +3345,39 @@ function drawImpactBursts(dt) {
   impactBursts.length = write;
 }
 
-function drawWorldRing(x, y, radius, color) {
-  const center = project(x, y);
-  let pixelX = Math.max(1, Math.round(radius / camera.scale));
-  let pixelY = 0;
-  let error = 1 - pixelX;
-  while (pixelX >= pixelY) {
-    shapes.rect(center.x + pixelX, center.y + pixelY, 1, 1, color);
-    shapes.rect(center.x + pixelY, center.y + pixelX, 1, 1, color);
-    shapes.rect(center.x - pixelY, center.y + pixelX, 1, 1, color);
-    shapes.rect(center.x - pixelX, center.y + pixelY, 1, 1, color);
-    shapes.rect(center.x - pixelX, center.y - pixelY, 1, 1, color);
-    shapes.rect(center.x - pixelY, center.y - pixelX, 1, 1, color);
-    shapes.rect(center.x + pixelY, center.y - pixelX, 1, 1, color);
-    shapes.rect(center.x + pixelX, center.y - pixelY, 1, 1, color);
-    pixelY += 1;
-    if (error < 0) error += pixelY * 2 + 1;
-    else {
-      pixelX -= 1;
-      error += (pixelY - pixelX) * 2 + 1;
-    }
+// Arena maps are enclosed on every side: the same hazard-striped wall frames all four
+// edges because pressure arrives from every direction instead of over a southern wall.
+function drawArenaFrame(map) {
+  const topLeft = project(map.bounds.left, map.bounds.top);
+  const bottomRight = project(map.bounds.right, map.bounds.bottom);
+  const left = Math.round(topLeft.x), top = Math.round(topLeft.y);
+  const right = Math.round(bottomRight.x), bottom = Math.round(bottomRight.y);
+  const x0 = Math.max(0, left), x1 = Math.min(logicalWidth, right);
+  const y0 = Math.max(0, top), y1 = Math.min(logicalHeight, bottom);
+  if (x1 <= x0 || y1 <= y0) return;
+  if (bottom <= logicalHeight) {
+    shapes.rect(x0, bottom - 3, x1 - x0, 3, COLOR.dimMint);
+    for (let x = x0 - ((x0 - left) % 24); x < x1; x += 24) shapes.rect(Math.max(x0, x), bottom - 3, 12, 1, COLOR.amber);
   }
+  if (top >= 0) {
+    shapes.rect(x0, top, x1 - x0, 3, COLOR.dimMint);
+    for (let x = x0 - ((x0 - left) % 24); x < x1; x += 24) shapes.rect(Math.max(x0, x), top + 2, 12, 1, COLOR.amber);
+  }
+  if (left >= 0) {
+    shapes.rect(left, y0, 3, y1 - y0, COLOR.dimMint);
+    for (let y = y0 - ((y0 - top) % 24); y < y1; y += 24) shapes.rect(left + 2, Math.max(y0, y), 1, 12, COLOR.amber);
+  }
+  if (right <= logicalWidth) {
+    shapes.rect(right - 3, y0, 3, y1 - y0, COLOR.dimMint);
+    for (let y = y0 - ((y0 - top) % 24); y < y1; y += 24) shapes.rect(right - 3, Math.max(y0, y), 1, 12, COLOR.amber);
+  }
+}
+
+// Pixelated world-space ring. The visible result is the classic midpoint circle (one
+// pixel thick, eight-way symmetric); the pixels themselves are selected on the GPU.
+function drawWorldRing(x, y, radius, color) {
+  const pixelRadius = Math.max(1, Math.round(radius / camera.scale));
+  shapes.ring((x - camera.x) / camera.scale + logicalWidth * 0.5, (y - camera.y) / camera.scale + logicalHeight * 0.5, pixelRadius, color);
 }
 
 function drawAreaTargetBrackets(area, color) {
@@ -3028,6 +3428,18 @@ function strikeAttackForDisplay(tower, definition) {
 
 function drawStrikePointPattern(tower, definition, point, color) {
   const attack = strikeAttackForDisplay(tower, definition);
+  if (attack.mechanic === 'shotgun') {
+    // Broadside aims a facing, not an impact: show the fan edges and centre line.
+    const from = project(tower.x, tower.y), range = attack.range;
+    const angle = Math.atan2(point.y - tower.y, point.x - tower.x);
+    const half = (attack.rework?.fanRadians || 1.3) * 0.5;
+    for (const offset of [-half, 0, half]) {
+      drawDashedLink(from, project(tower.x + Math.cos(angle + offset) * range, tower.y + Math.sin(angle + offset) * range), color);
+    }
+    const tip = project(tower.x + Math.cos(angle) * range * 0.6, tower.y + Math.sin(angle) * range * 0.6);
+    shapes.rect(tip.x - 1, tip.y - 1, 3, 3, color);
+    return;
+  }
   if (['hitscan','persistent'].includes(attack.delivery.type)) {
     const from=project(tower.x,tower.y),range=attack.range;
     const angle=Math.atan2(point.y-tower.y,point.x-tower.x);
@@ -3877,6 +4289,32 @@ function wrapResearchText(text, columns) {
   if (line) lines.push(line);
   return lines;
 }
+// Every research node maps to one small thematic icon kind, code-rendered from
+// rectangles only (no image assets) so its function reads at a glance.
+const RESEARCH_ICON_KIND = Object.freeze({
+  1: 'damage', 2: 'cadence', 3: 'range', 4: 'damage', 5: 'damage', 6: 'network', 7: 'magazine',
+  8: 'targeting', 9: 'burst', 10: 'range', 11: 'range', 12: 'control', 13: 'chain', 14: 'damage',
+  15: 'damage', 16: 'targeting', 17: 'chain', 18: 'blast', 19: 'network', 20: 'network', 21: 'network',
+  22: 'magazine', 23: 'magazine', 24: 'magazine', 25: 'chain', 26: 'targeting', 27: 'targeting',
+  28: 'burst', 29: 'burst', 30: 'burst', 31: 'blast', 32: 'cadence', 33: 'control', 34: 'targeting',
+  35: 'speed', 36: 'network', 37: 'control', 38: 'control', 39: 'control'
+});
+
+function drawResearchIcon(kind, x, y, color, scale = 1) {
+  const px = (dx, dy, w = 1, h = 1) => shapes.rect(x + dx * scale, y + dy * scale, w * scale, h * scale, color);
+  if (kind === 'damage') { px(3, 0); px(0, 3); px(6, 3); px(3, 6); px(2, 2, 3, 3); return; }
+  if (kind === 'cadence') { px(2, 0, 3, 1); px(2, 6, 3, 1); px(0, 2, 1, 3); px(6, 2, 1, 3); px(3, 3, 1, 3); px(3, 3, 3, 1); return; }
+  if (kind === 'range') { px(3, 0); px(3, 6); px(0, 3); px(6, 3); px(3, 3); return; }
+  if (kind === 'network') { px(0, 1, 2, 2); px(5, 4, 2, 2); px(2, 2); px(3, 3); px(4, 4); return; }
+  if (kind === 'magazine') { px(1, 1, 5, 1); px(1, 3, 5, 1); px(1, 5, 5, 1); return; }
+  if (kind === 'targeting') { px(0, 0, 2, 1); px(0, 0, 1, 2); px(5, 0, 2, 1); px(6, 0, 1, 2); px(0, 5, 1, 2); px(0, 6, 2, 1); px(5, 6, 2, 1); px(6, 5, 1, 2); px(3, 3); return; }
+  if (kind === 'burst') { px(1, 4, 1, 3); px(3, 2, 1, 5); px(5, 4, 1, 3); return; }
+  if (kind === 'chain') { px(0, 2, 3, 1); px(0, 2, 1, 3); px(0, 4, 3, 1); px(4, 1, 3, 1); px(6, 1, 1, 3); px(4, 3, 3, 1); return; }
+  if (kind === 'blast') { px(3, 0); px(1, 1); px(5, 1); px(0, 3); px(6, 3); px(1, 5); px(5, 5); px(3, 6); px(2, 2, 3, 3); return; }
+  if (kind === 'control') { px(3, 0, 1, 7); px(0, 3, 7, 1); px(1, 1); px(5, 1); px(1, 5); px(5, 5); return; }
+  if (kind === 'speed') { px(0, 3, 2, 1); px(2, 2); px(2, 4); px(3, 1); px(3, 5); px(4, 0); px(4, 6); return; }
+}
+
 function drawArsenalTree(snapshot,tower) {
   uiHitboxes.length=0;
   const width=Math.min(620,logicalWidth-16),height=Math.min(330,logicalHeight-16);
@@ -3896,13 +4334,16 @@ function drawArsenalTree(snapshot,tower) {
       const p=positions.get(item.id),parent=positions.get(item.parent);
       if(parent){shapes.line(parent.x+2,parent.y+5,parent.x+2,p.y+5,1,COLOR.dimMint);shapes.line(parent.x+2,p.y+5,p.x,p.y+5,1,COLOR.dimMint);}
       const color=item.id===selected.id?COLOR.amber:item.owned?COLOR.mint:item.locked?COLOR.dimMint:COLOR.cyan;
-      drawButton(`tree_${item.id}`,`${item.owned?'+':item.locked?'-':'>'} ${clippedUiText(item.label,column-30)}`,p.x,p.y,column-18-(item.tier-1)*7,true,color,()=>{researchSelection=item.id;researchDetailPage=0;});
+      const itemWidth=column-18-(item.tier-1)*7;
+      drawButton(`tree_${item.id}`,`${item.owned?'+':item.locked?'-':'>'} ${clippedUiText(item.label,column-38)}`,p.x,p.y,itemWidth,true,color,()=>{researchSelection=item.id;researchDetailPage=0;});
+      drawResearchIcon(RESEARCH_ICON_KIND[item.id],p.x+itemWidth-9,p.y+3,color);
     }
   }
   const detailY=y+238;
-  bitmapText.draw(clippedUiText(selected.label,width-24),x+12,detailY,COLOR.amber,1);
-  const text=(selected.parent?`requires ${researchNode(selected.parent).label}. `:'')+selected.description;
-  const lines=wrapResearchText(text,Math.floor((width-24)/6));
+  drawResearchIcon(RESEARCH_ICON_KIND[selected.id],x+12,detailY,COLOR.amber);
+  bitmapText.draw(clippedUiText(selected.label,width-38),x+22,detailY,COLOR.amber,1);
+  // The tree above already draws a connector line to the prerequisite node; no need to restate it here.
+  const lines=wrapResearchText(selected.description,Math.floor((width-24)/6));
   lines.slice(0,3).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+12+i*9,COLOR.ink,1));
   const wallet=snapshot.economyByPlayer[session.playerId]?.credits||0;
   const available=!selected.owned&&!selected.locked&&(snapshot.dev?.infiniteMoney||wallet>=selected.cost)&&tower.ownerId===session.playerId;
@@ -3911,8 +4352,101 @@ function drawArsenalTree(snapshot,tower) {
   drawMenuButton('tree_back','back // esc',x+12,y+height-21,width-24,COLOR.cyan,()=>towerMenuMode='actions');
 }
 
+function drawReactorTile(id, item, x, y, width, height, color, selected, action) {
+  const hovered = pointInside(x, y, width, height);
+  const rimColor = selected || hovered ? color : COLOR.dimMint;
+  shapes.rect(x, y, width, height, COLOR.black);
+  shapes.rect(x, y, width, 1, rimColor);
+  shapes.rect(x, y + height - 1, width, 1, rimColor);
+  shapes.rect(x, y, selected ? 3 : 1, height, rimColor);
+  shapes.rect(x + width - 1, y, 1, height, rimColor);
+  bitmapText.draw(clippedUiText(item.label, width - 8), x + 4, y + 4, selected || hovered ? color : COLOR.ink, 1);
+  bitmapText.draw(item.maxRank === null ? `rank ${item.rank}` : `${item.rank}/${item.maxRank}`, x + 4, y + height - 11, COLOR.dimMint, 1);
+  const meterX = x + 4, meterY = y + height - 6, meterW = width - 8;
+  shapes.rect(meterX, meterY, meterW, 3, COLOR.black);
+  const ratio = item.maxRank ? Math.min(1, item.rank / item.maxRank) : Math.min(1, item.rank / 20);
+  shapes.rect(meterX, meterY, Math.max(0, Math.round(meterW * ratio)), 3, item.cost === null ? COLOR.mint : color);
+  registerHitbox(id, x, y, width, height, { action });
+}
+
+function drawReactorGrid(snapshot, tower) {
+  uiHitboxes.length = 0;
+  const width = Math.min(560, logicalWidth - 16), height = Math.min(300, logicalHeight - 16);
+  const x = (logicalWidth - width) / 2, y = (logicalHeight - height) / 2;
+  const items = stationItems(snapshot, tower);
+  if (!items.some((item) => item.id === researchSelection)) researchSelection = items[0]?.id ?? null;
+  const selected = items.find((item) => item.id === researchSelection) || items[0];
+  const wallet = snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0;
+  drawTechPanel(x, y, width, height, COLOR.amber);
+  bitmapText.draw('reactor // global ranks', x + 12, y + 10, COLOR.amber, 2);
+  bitmapText.draw(`credits ${snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(wallet)}`, x + 12, y + 30, COLOR.ink, 1);
+  const cols = 3, rows = Math.ceil(items.length / cols);
+  const detailHeight = 66;
+  const gridTop = y + 44, gridWidth = width - 24;
+  const tileW = (gridWidth - (cols - 1) * 4) / cols;
+  const tileH = Math.max(28, (height - 44 - detailHeight - (rows - 1) * 4) / rows);
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const col = i % cols, row = Math.floor(i / cols);
+    const tx = x + 12 + col * (tileW + 4), ty = gridTop + row * (tileH + 4);
+    const capped = item.cost === null;
+    const color = item.id === selected.id ? COLOR.amber : capped ? COLOR.mint : COLOR.cyan;
+    drawReactorTile(`reactor_tile_${item.id}`, item, tx, ty, tileW, tileH, color, item.id === selected.id, () => { researchSelection = item.id; });
+  }
+  const detailY = gridTop + rows * (tileH + 4) + 4;
+  bitmapText.draw(clippedUiText(selected.label, width - 24), x + 12, detailY, COLOR.amber, 1);
+  const lines = wrapResearchText(selected.description, Math.floor((width - 24) / 6));
+  lines.slice(0, 1).forEach((line, i) => bitmapText.draw(line, x + 12, detailY + 11 + i * 9, COLOR.ink, 1));
+  const available = selected.cost !== null && (snapshot.dev?.infiniteMoney || wallet >= selected.cost) && tower.ownerId === session.playerId;
+  const label = selected.cost === null ? 'rank capped' : `rank ${selected.rank} -> ${selected.rank + 1} // ${compactMetric(selected.cost)} cr // enter`;
+  drawMenuButton('reactor_buy', label, x + 12, y + height - 42, width - 24, available ? COLOR.mint : COLOR.red, () => { if (available) purchaseStationItem(tower, selected); }, available);
+  drawMenuButton('reactor_back', 'back // esc', x + 12, y + height - 21, width - 24, COLOR.cyan, () => towerMenuMode = 'actions');
+}
+
+function drawStatsPanel(snapshot) {
+  const reactorLines = REACTOR_CATEGORIES
+    .map((category) => ({ category, rank: reactorRank(snapshot, category.id) }))
+    .filter(({ rank }) => rank > 0)
+    .map(({ category, rank }) => `${category.label} // rank ${rank}${category.maxRank !== null ? `/${category.maxRank}` : ''}`);
+  const unlocked = snapshot.research?.unlocked || [];
+  const scopeCounts = new Map();
+  for (const node of RESEARCH_NODES) {
+    if (!hasResearch(snapshot, node.id)) continue;
+    const scope = researchScope(node.id).replace('affects ', '');
+    scopeCounts.set(scope, (scopeCounts.get(scope) || 0) + 1);
+  }
+  const mints = snapshot.towers.filter((tower) => tower.definitionId === 'mint');
+  const forges = snapshot.towers.filter((tower) => tower.definitionId === 'forge');
+  const constructionDiscount = Math.round((1 - Math.max(0.5, 0.98 ** reactorRank(snapshot, 'construction'))) * 100);
+  const economy = snapshot.economyByPlayer[session.playerId];
+  const lines = [
+    { text: 'reactor ranks', color: COLOR.amber },
+    ...(reactorLines.length ? reactorLines : ['no ranks purchased']).map((text) => ({ text, color: COLOR.ink })),
+    { text: 'arsenal research', color: COLOR.amber },
+    { text: `${unlocked.length}/39 unlocked`, color: COLOR.ink },
+    ...[...scopeCounts.entries()].map(([scope, count]) => ({ text: `${scope} // ${count}`, color: COLOR.ink })),
+    { text: 'economy', color: COLOR.amber },
+    { text: `+${constructionDiscount}% build discount // construction rank ${reactorRank(snapshot, 'construction')}`, color: COLOR.ink },
+    { text: `${mints.length} mint-s // ${forges.length} forge-s deployed`, color: COLOR.ink },
+    { text: `${compactMetric(snapshot.stats?.bonusCredits || 0)}cr shared economy bonus // ${compactMetric(economy?.totalEarned || 0)}cr earned`, color: COLOR.ink }
+  ];
+  const width = Math.min(280, logicalWidth - 16);
+  const height = Math.min(20 + lines.length * 10 + 6, logicalHeight - HUD_TOP_HEIGHT - 20);
+  const x = logicalWidth - width - 8, y = HUD_TOP_HEIGHT + 8;
+  drawTechPanel(x, y, width, height, COLOR.cyan);
+  bitmapText.draw('modifier summary // i to close', x + 8, y + 6, COLOR.cyan, 1);
+  let row = 0;
+  for (const line of lines) {
+    const lineY = y + 20 + row * 10;
+    if (lineY > y + height - 8) break;
+    bitmapText.draw(clippedUiText(line.text, width - 16), x + 8, lineY, line.color, 1);
+    row += 1;
+  }
+}
+
 function drawResearchStation(snapshot, tower) {
   if(tower.definitionId==='arsenal' && logicalWidth>=400 && logicalHeight>=346) return drawArsenalTree(snapshot,tower);
+  if(tower.definitionId==='reactor' && logicalWidth>=400 && logicalHeight>=300) return drawReactorGrid(snapshot,tower);
   uiHitboxes.length = 0;
   const width = Math.min(420, logicalWidth - 20), height = Math.min(288, logicalHeight - 16);
   const x = (logicalWidth - width) / 2, y = (logicalHeight - height) / 2;
@@ -3934,9 +4468,10 @@ function drawResearchStation(snapshot, tower) {
   for (let i=0;i<visible.length;i++) {
     const item=visible[i];
     const cost=item.cost===null?'capped':item.cost===0?'owned':compactMetric(item.cost);
-    drawMenuButton(`research_select_${item.id}`,`${i+1} ${clippedUiText(item.label, width - 110)}`,x+12,y+48+i*20,width-24,COLOR.mint,() => {
+    drawMenuButton(`research_select_${item.id}`,`${i+1} ${clippedUiText(item.label, width - 120)}`,x+12,y+48+i*20,width-24,COLOR.mint,() => {
       researchSelection=item.id; researchDetailPage=0;
     },selected?.id===item.id);
+    if (RESEARCH_ICON_KIND[item.id]) drawResearchIcon(RESEARCH_ICON_KIND[item.id],x+width-108,y+53+i*20,COLOR.mint);
     const wallet = (snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.economyByPlayer[session.playerId]?.credits || 0);
     bitmapText.draw(cost, x + width - 18 - cost.length * 6, y + 53 + i * 20, item.cost !== null && wallet >= item.cost ? COLOR.amber : COLOR.red, 1);
   }
@@ -3957,6 +4492,23 @@ function drawResearchStation(snapshot, tower) {
     },canBuy);
   } else bitmapText.draw('all research complete',x+12,y+70,COLOR.mint,1);
   drawMenuButton('research_back','back // esc',x+12,y+height-21,width-24,COLOR.cyan,()=>towerMenuMode='actions');
+}
+
+function economyNetworkSummary(snapshot, tower) {
+  // The authority only ever credits one representative tower per network for a shared
+  // bonus (see recordAttackResult / applyKillIncomeSupport); presenting the summed total
+  // across the whole network - not this one tower's own field - is what actually matches
+  // the shared mechanic, without touching the underlying accounting.
+  const networkTowers = networkSources(snapshot, tower.areaId);
+  const mints = networkTowers.filter((candidate) => candidate.definitionId === 'mint');
+  const forges = networkTowers.filter((candidate) => candidate.definitionId === 'forge');
+  return {
+    mintCount: mints.length,
+    mintBonusPercent: mints.length ? 20 + mints.length - 1 : 0,
+    mintCredits: mints.reduce((total, candidate) => total + (candidate.bonusCredits || 0), 0),
+    forgeCount: forges.length,
+    forgeCredits: forges.reduce((total, candidate) => total + (candidate.bonusCredits || 0), 0)
+  };
 }
 
 function towerActionView(snapshot, tower) {
@@ -3983,6 +4535,7 @@ function towerActionView(snapshot, tower) {
   const canControl = Boolean(effectiveControl?.input && effectiveControl.input !== 'none');
   const relayForm = isRelayForm(definition.id);
   const hasManualControl = canAim || canControl || relayForm;
+  const isEconomyNode = ['mint', 'forge'].includes(definition.id);
   const width = 150;
   const height = definition.id === 'echo' && (canAim || canControl) ? 97 : ['echo', 'hardpoint'].includes(definition.id) ? 81 : hasManualControl ? 65 : 49;
   const supportLabel = tower.bonusCredits > 0 ? ` +${compactMetric(tower.bonusCredits)} cr` : '';
@@ -4001,7 +4554,12 @@ function towerActionView(snapshot, tower) {
   const controlValue = discreteControl
     ? tower.controlStats?.affectedUnits || 0
     : Math.floor((tower.controlStats?.affectedUnitTicks || 0) / AUTHORITY_TICK_RATE);
-  const metricLabel = isPureControl && weaponView(snapshot, tower)?.attack
+  const economy = isEconomyNode ? economyNetworkSummary(snapshot, tower) : null;
+  const metricLabel = isEconomyNode
+    ? (definition.id === 'mint'
+      ? `+${economy.mintBonusPercent}% income // ${compactMetric(economy.mintCredits)}cr shared // ${economy.mintCount} mint-s`
+      : `base income // ${compactMetric(economy.forgeCredits)}cr shared // ${economy.forgeCount} forge-s`)
+    : isPureControl && weaponView(snapshot, tower)?.attack
     ? `casts // ${compactMetric(tower.controlStats?.activations || 0)}`
     : isPureControl
     ? `${controlLabels[definition.control?.type] || 'affected'} // ${compactMetric(controlValue)}${discreteControl ? '' : ' unit-s'}`
@@ -4084,7 +4642,7 @@ function drawTowerActionMenu(snapshot, tower) {
   const panel = towerPanelPosition(tower, view.width, view.height);
   drawTechPanel(panel.x, panel.y, view.width, view.height, view.accent);
   bitmapText.draw(view.station ? view.title : `${view.title} // ${view.investment} cr`, panel.x + 7, panel.y + 5, view.accent, 1);
-  bitmapText.draw(view.metric, panel.x + 7, panel.y + (view.station ? 54 : 16), view.station ? COLOR.dimMint : view.recentlyActive ? COLOR.mint : COLOR.ink, 1);
+  bitmapText.draw(clippedUiText(view.metric, view.width - 14), panel.x + 7, panel.y + (view.station ? 54 : 16), view.station ? COLOR.dimMint : view.recentlyActive ? COLOR.mint : COLOR.ink, 1);
   if (!view.station) {
     shapes.rect(panel.x + view.width - 16, panel.y + 17, 8, 1, view.recentlyActive ? COLOR.amber : COLOR.dimMint);
     if (view.recentlyActive) {
@@ -4239,8 +4797,10 @@ function drawStrikeTargetMenu(snapshot, tower) {
   const height = 43;
   const panel = towerPanelPosition(tower, width, height);
   drawTechPanel(panel.x, panel.y, width, height, COLOR.cyan);
-  bitmapText.draw('rocket aim // click strike point', panel.x + 7, panel.y + 6, COLOR.cyan, 1);
-  bitmapText.draw(`${tower.effectiveRange || definition?.range || 0}u // exact authority airburst`, panel.x + 7, panel.y + 18, COLOR.ink, 1);
+  const shotgun = definition?.attack?.mechanic === 'shotgun';
+  const beam = ['hitscan', 'persistent'].includes(definition?.attack?.delivery?.type);
+  bitmapText.draw(shotgun ? 'fan aim // click a facing' : beam ? 'beam aim // click a direction' : 'rocket aim // click strike point', panel.x + 7, panel.y + 6, COLOR.cyan, 1);
+  bitmapText.draw(`${tower.effectiveRange || definition?.range || 0}u // ${shotgun ? 'fires when the fan has a target' : beam ? 'authority-aimed beam' : 'exact authority airburst'}`, panel.x + 7, panel.y + 18, COLOR.ink, 1);
   drawButton(`strike_auto_${tower.id}`, '0 auto', panel.x + width - 82, panel.y + 27, 40, Boolean(tower.strikePoint), COLOR.amber, clearSelectedStrikePoint);
   drawButton(`strike_back_${tower.id}`, '2 back', panel.x + width - 39, panel.y + 27, 34, false, COLOR.cyan, () => {
     towerMenuMode = sessionMode === 'game' ? 'actions' : null;
@@ -4382,22 +4942,25 @@ function drawGameTopHud(fps, snapshot, telemetry) {
   bitmapText.draw('framebound', 11, 5, COLOR.mint, 1);
   bitmapText.draw('//horde', 11, 17, COLOR.uiMuted, 1);
   let x = layout.brandWidth + 12;
+  // minValueChars reserves layout space for each metric's worst-case width (e.g. compactMetric's
+  // longest form, "999.9t") so gaining or losing a digit never shifts this or later metrics.
   const metrics = [
-    { label: 'lives', value: snapshot.dev?.infiniteHealth ? 'inf' : String(snapshot.base.lives).padStart(3, '0'), color: COLOR.ink },
-    { label: 'credits', value: snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(economy.credits), color: COLOR.amber },
-    { label: rift ? 'next rift' : 'rifts live', value: rift ? `${Math.ceil(rift.unlockSeconds - elapsed)}s` : String(snapshot.swarm.activeSpawnPoints), color: COLOR.cyan }
+    { label: 'lives', value: snapshot.dev?.infiniteHealth ? 'inf' : String(snapshot.base.lives).padStart(3, '0'), color: COLOR.ink, minValueChars: 3 },
+    { label: 'credits', value: snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(economy.credits), color: COLOR.amber, minValueChars: 6 },
+    { label: rift ? 'next rift' : 'rifts live', value: rift ? `${Math.ceil(rift.unlockSeconds - elapsed)}s` : String(snapshot.swarm.activeSpawnPoints), color: COLOR.cyan, minValueChars: 4 }
   ];
   for (const metric of metrics) {
     bitmapText.draw(metric.label, x, 4, COLOR.uiMuted, 1);
     bitmapText.draw(metric.value, x, 15, metric.color, layout.valueScale);
-    x += Math.max(metric.label.length * 6, metric.value.length * 6 * layout.valueScale) + 16;
+    const valueWidth = Math.max(metric.value.length, metric.minValueChars) * 6 * layout.valueScale;
+    x += Math.max(metric.label.length * 6, valueWidth) + 16;
   }
   const connected = snapshot.players.filter((player) => player.connected && !player.spectator).length;
   const columns = [
-    { lines: [`time ${formatRunTimer(snapshot.runTick)}`, `horde ${compactMetric(snapshot.swarm.activeEnemies)}`] },
-    { lines: [`gold ${compactMetric(telemetry.goldPerSecond)}/s`, `spawn ${Math.round(snapshot.swarm.spawnRatePerSecond)}/s`] },
-    ...(session.networkRole ? [{ lines: [`p2p ${connected}/4`, session.networkRole] }] : []),
-    { lines: [`fps ${fps}`, `rifts ${snapshot.swarm.activeSpawnPoints}`] }
+    { lines: [`time ${formatRunTimer(snapshot.runTick)}`, `horde ${compactMetric(snapshot.swarm.activeEnemies)}`], minChars: [13, 12] },
+    { lines: [`gold ${compactMetric(telemetry.goldPerSecond)}/s`, `spawn ${Math.round(snapshot.swarm.spawnRatePerSecond)}/s`], minChars: [13, 13] },
+    ...(session.networkRole ? [{ lines: [`p2p ${connected}/4`, session.networkRole], minChars: [7, 7] }] : []),
+    { lines: [`fps ${fps}`, `rifts ${snapshot.swarm.activeSpawnPoints}`], minChars: [7, 8] }
   ];
   for (const column of fitPixelTelemetry(columns, x + 4, logicalWidth - 8)) {
     bitmapText.draw(column.lines[0], column.x, 5, COLOR.ink, 1);
@@ -4441,11 +5004,11 @@ function drawGameHud(snapshot, telemetry) {
   bitmapText.draw(clippedUiText(combatStatus(snapshot), logicalWidth - 16), 8, y + layout.statusY,
     performance.now() < statusUntil ? COLOR.amber : COLOR.ink, 1);
   const items = [
-    { lines: [`gold ${compactMetric(telemetry.goldPerSecond)}/s`] },
-    { lines: [`kills ${compactMetric(snapshot.stats.kills)}`] },
-    ...(showKps ? [{ lines: [`kps ${compactMetric(telemetry.oneSecond)}`] }] : []),
-    { lines: [`shots ${compactMetric(snapshot.stats.shotsResolved)}/${compactMetric(snapshot.stats.shotsFired)}`] },
-    ...(showKps ? [{ lines: [`10s ${compactMetric(telemetry.tenSecond)} // peak ${compactMetric(telemetry.peak)}`] }] : [])
+    { lines: [`gold ${compactMetric(telemetry.goldPerSecond)}/s`], minChars: [13] },
+    { lines: [`kills ${compactMetric(snapshot.stats.kills)}`], minChars: [12] },
+    ...(showKps ? [{ lines: [`kps ${compactMetric(telemetry.oneSecond)}`], minChars: [10] }] : []),
+    { lines: [`shots ${compactMetric(snapshot.stats.shotsResolved)}/${compactMetric(snapshot.stats.shotsFired)}`], minChars: [19] },
+    ...(showKps ? [{ lines: [`10s ${compactMetric(telemetry.tenSecond)} // peak ${compactMetric(telemetry.peak)}`], minChars: [24] }] : [])
   ];
   for (const item of fitPixelTelemetry(items, 8, logicalWidth - 8)) {
     bitmapText.draw(item.lines[0], item.x, y + layout.statsY, COLOR.uiMuted, 1);
@@ -4729,6 +5292,8 @@ function syncDiagnostics(snapshot = sessionSnapshot) {
     slowedEnemies: snapshot.swarm.slowedEnemies || 0,
     spawnRatePerSecond: snapshot.swarm.spawnRatePerSecond,
     fps,
+    frameMs: { ...frameTiming },
+    rings: { drawnPerFrame: shapes.ringsDrawn, culledPerFrame: shapes.ringsCulled, shapeFloatsPerFrame: shapes.lastFlushFloats },
     logicalResolution: `${logicalWidth}x${logicalHeight}`,
     nativeRenderScale: renderScale,
     textureMinFilter: 'nearest',
@@ -4878,6 +5443,13 @@ function frame(now) {
       towerMenuMode = sessionMode === 'game' ? 'actions' : null;
       controlDrag = null;
       setStatus('control locked // rebooting 1s');
+    } else if (event.type === EVENT.RELAY_NETWORK_COMPLETED) {
+      if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) startRelayCollapse(event);
+      if (event.payload.retired.some((record) => record.towerId === selectedTowerId)) { selectedTowerId = null; towerMenuMode = null; }
+      const mine = event.payload.retired.filter((record) => record.ownerId === session.playerId);
+      const refund = mine.reduce((sum, record) => sum + (record.refund || 0), 0);
+      setStatus(`relay network complete // ${event.payload.retired.length} connector-s uploaded${refund > 0 ? ` // +${compactMetric(refund)} cr` : ''}`);
+      void saveGameBundle();
     } else if (event.type === EVENT.TOWER_RELAY_TARGET_CHANGED && event.payload.towerId === selectedTowerId) {
       towerMenuMode = 'actions';
       setStatus(`relay linked // ${event.payload.targetAreaId}`);
@@ -4886,6 +5458,7 @@ function frame(now) {
       projectilePresentation.clear();
       impactBursts.length = 0;
       attackFlashes.length = 0;
+      relayCollapse = null;
       selectedTowerId = null;
       towerMenuMode = null;
       placementArmed = false;
@@ -4966,10 +5539,14 @@ function frame(now) {
     gl.disable(gl.BLEND);
     drawImpactBursts(dt);
     for (const tower of sessionSnapshot.towers) drawTower(tower);
+    drawRelayCollapse(dt);
     drawBase(time, sessionSnapshot.base);
-    const wall = project(0, currentMap.bounds.bottom);
-    shapes.rect(0, wall.y - 3, logicalWidth, 3, COLOR.dimMint);
-    for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, wall.y - 3, 12, 1, COLOR.amber);
+    if (currentMap.arena) drawArenaFrame(currentMap);
+    else {
+      const wall = project(0, currentMap.bounds.bottom);
+      shapes.rect(0, wall.y - 3, logicalWidth, 3, COLOR.dimMint);
+      for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, wall.y - 3, 12, 1, COLOR.amber);
+    }
     drawBuildState(sessionSnapshot);
     drawHud(fps, sessionSnapshot);
   } else {
@@ -4993,11 +5570,15 @@ function frame(now) {
       ({ infiniteMoney: 'money', infiniteHealth: 'health', paused: 'paused', stopSpawns: 'no spawns' })[key]).filter(Boolean);
     bitmapText.draw(enabled.length ? `dev // ${enabled.join(' / ')} // f2` : 'f2 dev tools', 8, HUD_TOP_HEIGHT + 5, enabled.length ? COLOR.amber : COLOR.dimMint, 1);
     if (devToolsOpen) drawDevTools(sessionSnapshot);
+    if (showStatsPanel) drawStatsPanel(sessionSnapshot);
   }
   drawCursor();
   shapes.flush();
   bitmapText.flush();
-
+  const frameCost = performance.now() - now;
+  frameTiming.last = frameCost;
+  frameTiming.average += (frameCost - frameTiming.average) * 0.05;
+  frameTiming.worst = Math.max(frameCost, frameTiming.worst * 0.98);
   if (now - lastGpuCheck > 1000) {
     const error = gl.getError();
     if (error !== gl.NO_ERROR) {
@@ -5007,6 +5588,7 @@ function frame(now) {
     lastGpuCheck = now;
     syncDiagnostics();
   }
+  shapes.endFrame();
 
   requestAnimationFrame(frame);
 }

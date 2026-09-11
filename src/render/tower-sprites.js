@@ -16,10 +16,7 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
     box(x + 1, y + 1, w - 2, h - 2, COLOR.black);
   };
 
-  shapes.rect(p.x - 4, p.y - 4, 9, 9, COLOR.black);
-
   if (tower.definitionId === 'assault') {
-    shapes.rect(p.x - 4, p.y - 3, 9, 7, COLOR.black);
     shapes.rect(p.x - 3, p.y - 3, 7, 1, override?.accent || palette.amber);
     shapes.rect(p.x - 3, p.y + 3, 7, 1, override?.accent || palette.amber);
     shapes.rect(p.x - 3, p.y - 2, 1, 5, accent);
@@ -32,7 +29,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'barrage') {
-    shapes.rect(p.x - 6, p.y - 4, 13, 9, COLOR.black);
     shapes.rect(p.x - 5, p.y - 3, 11, 1, palette.amber);
     shapes.rect(p.x - 5, p.y + 3, 11, 1, palette.amber);
     shapes.rect(p.x - 5, p.y - 2, 1, 5, palette.mint);
@@ -46,7 +42,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   if (tower.definitionId === 'broadside') {
     const familyAccent = override?.accent || palette.amber;
     const familyCore = override?.core || palette.mint;
-    shapes.rect(p.x - 9, p.y - 5, 19, 11, COLOR.black);
     shapes.rect(p.x - 8, p.y - 4, 17, 1, familyAccent);
     shapes.rect(p.x - 8, p.y + 4, 17, 1, familyAccent);
     shapes.rect(p.x - 8, p.y - 3, 2, 7, familyCore);
@@ -85,7 +80,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'rocket') {
-    shapes.rect(p.x - 5, p.y - 7, 11, 13, COLOR.black);
     shapes.rect(p.x - 4, p.y - 3, 9, 7, palette.amber);
     shapes.rect(p.x - 3, p.y - 2, 7, 5, COLOR.black);
     shapes.rect(p.x - 1, p.y - 8, 3, 9, palette.amber);
@@ -99,7 +93,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   if (tower.definitionId === 'warhead') {
     const familyAccent = override?.accent || palette.amber;
     const familyCore = override?.core || palette.mint;
-    shapes.rect(p.x - 7, p.y - 10, 15, 18, COLOR.black);
     shapes.rect(p.x - 3, p.y - 12, 7, 17, familyAccent);
     shapes.rect(p.x - 2, p.y - 14, 5, 3, override?.accent || palette.red);
     shapes.rect(p.x - 1, p.y - 15, 3, 2, familyCore);
@@ -116,7 +109,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   if (tower.definitionId === 'cluster') {
     const familyAccent = override?.accent || palette.amber;
     const familyCore = override?.core || palette.mint;
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
     for (const [nodeX, nodeY] of [[-7, -7], [0, -7], [7, -7], [-7, 7], [0, 7], [7, 7]]) {
       shapes.rect(p.x + nodeX - 2, p.y + nodeY - 2, 5, 5, COLOR.black);
       shapes.rect(p.x + nodeX - 1, p.y + nodeY - 1, 3, 3, familyAccent);
@@ -132,7 +124,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   if (tower.definitionId === 'salvo') {
     const familyAccent = override?.accent || palette.amber;
     const familyCore = override?.core || palette.mint;
-    shapes.rect(p.x - 8, p.y - 8, 17, 15, COLOR.black);
     for (const missileX of [-6, 0, 6]) {
       shapes.rect(p.x + missileX - 2, p.y - 9, 5, 13, COLOR.black);
       shapes.rect(p.x + missileX - 1, p.y - 10, 3, 11, familyAccent);
@@ -213,7 +204,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'anchor') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
     shapes.rect(p.x - 4, p.y - 4, 9, 1, palette.cyan);
     shapes.rect(p.x - 4, p.y + 4, 9, 1, palette.cyan);
     shapes.rect(p.x - 4, p.y - 3, 1, 7, palette.cyan);
@@ -235,7 +225,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'backwash') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
     shapes.rect(p.x - 4, p.y + 3, 9, 2, palette.amber);
     shapes.rect(p.x - 3, p.y, 7, 2, palette.cyan);
     shapes.rect(p.x - 2, p.y - 3, 5, 2, palette.mint);
@@ -247,7 +236,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'stasis') {
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
     shapes.rect(p.x - 6, p.y - 6, 5, 2, palette.cyan);
     shapes.rect(p.x + 2, p.y - 6, 5, 2, palette.cyan);
     shapes.rect(p.x - 6, p.y + 5, 5, 2, palette.cyan);
@@ -273,7 +261,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'dragnet') {
-    shapes.rect(p.x - 7, p.y - 7, 15, 15, COLOR.black);
     for (const offset of [-5, 0, 5]) {
       box(offset, -6, 1, 13, offset === 0 ? palette.mint : palette.cyan);
       box(-6, offset, 13, 1, offset === 0 ? palette.mint : palette.cyan);
@@ -371,7 +358,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   if (NETWORK_DESCENDANT_IDS.includes(tower.definitionId)) {
     const id = tower.definitionId;
     const color = override?.accent || palette.green;
-    shapes.rect(p.x - 8, p.y - 8, 17, 17, COLOR.black);
     if (['redline', 'metronome', 'aperture'].includes(id)) {
       housing(-7, -6, 15, 13, color);
       for (const x of [-8, 6]) {
@@ -424,7 +410,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'overclock') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
     shapes.rect(p.x, p.y - 7, 1, 15, palette.green);
     shapes.rect(p.x - 7, p.y, 15, 1, palette.green);
     shapes.rect(p.x - 4, p.y - 5, 2, 4, palette.amber);
@@ -438,7 +423,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'forge') {
-    shapes.rect(p.x - 6, p.y - 5, 13, 11, COLOR.black);
     shapes.rect(p.x - 5, p.y - 3, 11, 3, palette.amber);
     shapes.rect(p.x - 3, p.y, 7, 3, palette.amber);
     shapes.rect(p.x - 1, p.y + 3, 3, 4, palette.green);
@@ -450,7 +434,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'relay') {
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
     shapes.rect(p.x, p.y - 8, 1, 15, palette.cyan);
     shapes.rect(p.x - 5, p.y + 4, 11, 2, palette.green);
     shapes.rect(p.x - 3, p.y + 2, 7, 2, palette.green);
@@ -464,7 +447,6 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   }
 
   if (tower.definitionId === 'network') {
-    shapes.rect(p.x - 3, p.y - 3, 7, 7, COLOR.black);
     shapes.rect(p.x, p.y - 5, 1, 11, override?.accent || palette.green);
     shapes.rect(p.x - 5, p.y, 11, 1, override?.accent || palette.green);
     shapes.rect(p.x - 3, p.y - 3, 2, 2, core);

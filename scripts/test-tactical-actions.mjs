@@ -6,7 +6,7 @@ import { TEST_FIELD_SESSION_CONFIG } from '../src/core/session-config.js';
 import { TOWER_DEFINITIONS } from '../src/core/tower-catalog.js';
 import { compactMetric } from '../src/core/format.js';
 import { supportsStrikePoint } from '../src/core/strike-pattern.js';
-import { isRelayForm, saleRefund } from '../src/core/network-descendants.js';
+import { isRelayForm, networkSources, saleRefund } from '../src/core/network-descendants.js';
 import { AUTHORITY_TICK_RATE } from '../src/core/protocol.js';
 
 // Exercise the actual shared view builder without booting WebGL or automating gameplay.
@@ -18,7 +18,7 @@ const extract = (name) => {
 };
 const calls = [];
 const context = vm.createContext({
-  compactMetric, supportsStrikePoint, isRelayForm, saleRefund, AUTHORITY_TICK_RATE,
+  compactMetric, supportsStrikePoint, isRelayForm, networkSources, saleRefund, AUTHORITY_TICK_RATE,
   session: { playerId: 'owner', networkRole: 'host' },
   COLOR: Object.fromEntries(['amber', 'cyan', 'mint', 'green', 'red', 'ink', 'dimMint'].map((key) => [key, key])),
   towerMenuMode: 'actions',
@@ -26,7 +26,7 @@ const context = vm.createContext({
     'openControlGeometryMenu', 'openStrikeTargetMenu', 'clearSelectedStrikePoint', 'resetSelectedControlGeometry', 'setStatus']
     .map((name) => [name, (...args) => calls.push({ name, args })]))
 });
-vm.runInContext([extract('towerAccent'), extract('weaponView'), extract('towerActionView')].join('\n'), context);
+vm.runInContext([extract('towerAccent'), extract('weaponView'), extract('economyNetworkSummary'), extract('towerActionView')].join('\n'), context);
 const authority = new EmbeddedAuthority(TEST_FIELD_SESSION_CONFIG);
 authority.join({ clientId: 'owner', payload: { label: 'owner' } });
 const snapshot = { ...authority.state, towerCatalog: Object.values(TOWER_DEFINITIONS), players: [{ id: 'owner', label: 'owner' }, { id: 'peer', label: 'peer' }] };

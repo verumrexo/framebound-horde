@@ -1,0 +1,59 @@
+<!doctype html><meta charset="utf-8"><title>ring bench</title>
+<!-- Isolated renderer micro-benchmark: open http://127.0.0.1:4173/scripts/ring-bench.html while `npm run dev` runs.
+     Compares the retired per-pixel JS-array ring path, per-pixel rects in a typed store, and the shipped GPU annulus ring. -->
+<canvas id="c" style="width:800px;height:600px;image-rendering:pixelated"></canvas>
+<pre id="out"></pre>
+<script>
+const VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 a_position;layout(location=1) in vec4 a_color;layout(location=2) in vec4 a_ring;
+uniform vec2 u_resolution;uniform float u_renderScale;out vec4 v_color;flat out vec4 v_ring;
+void main(){gl_Position=vec4(a_position.x/u_resolution.x*2.0-1.0,1.0-a_position.y/u_resolution.y*2.0,0.0,1.0);v_color=a_color;v_ring=a_ring;}`;
+const FS = `#version 300 es
+precision highp float;in vec4 v_color;flat in vec4 v_ring;uniform vec2 u_resolution;uniform float u_renderScale;out vec4 outColor;
+void main(){ if(v_ring.w>0.5){vec2 logical=vec2(gl_FragCoord.x,u_resolution.y*u_renderScale-gl_FragCoord.y)/u_renderScale;
+float dx=abs(floor(logical.x-v_ring.x));float dy=abs(floor(logical.y-v_ring.y));float major=max(dx,dy);float minor=min(dx,dy);float r=v_ring.z;
+float q=4.0*(r*r-minor*minor);float low=(2.0*major-1.0)*(2.0*major-1.0);float high=(2.0*major+1.0)*(2.0*major+1.0);if(q<low||q>=high)discard;} outColor=v_color;}`;
+const W=800,H=600,scale=2;const c=document.getElementById('c');c.width=W*scale;c.height=H*scale;
+const gl=c.getContext('webgl2',{antialias:false,alpha:false});
+const mk=(t,s)=>{const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;};
+const p=gl.createProgram();gl.attachShader(p,mk(gl.VERTEX_SHADER,VS));gl.attachShader(p,mk(gl.FRAGMENT_SHADER,FS));gl.linkProgram(p);gl.useProgram(p);gl.viewport(0,0,c.width,c.height);
+gl.uniform2f(gl.getUniformLocation(p,'u_resolution'),W,H);gl.uniform1f(gl.getUniformLocation(p,'u_renderScale'),scale);
+const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,40,0);gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,4,gl.FLOAT,false,40,8);gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,4,gl.FLOAT,false,40,24);
+// typed store
+let data=new Float32Array(1<<20),len=0;function reserve(n){if(len+n*10>data.length){let cap=data.length*2;while(cap<len+n*10)cap*=2;const g=new Float32Array(cap);g.set(data.subarray(0,len));data=g;}}
+function put(x,y,col,rx=0,ry=0,rr=0,rf=0){let o=len;data[o++]=x;data[o++]=y;data[o++]=col[0];data[o++]=col[1];data[o++]=col[2];data[o++]=col[3];data[o++]=rx;data[o++]=ry;data[o++]=rr;data[o++]=rf;len=o;}
+function rect(x,y,w,h,col){reserve(6);const r=x+w,b=y+h;put(x,y,col);put(r,y,col);put(r,b,col);put(x,y,col);put(r,b,col);put(x,b,col);}
+const tables=new Map();function table(N){let t=tables.get(N);if(!t){t=new Float32Array((N+1)*2);for(let i=0;i<=N;i++){t[i*2]=Math.cos(i/N*Math.PI*2);t[i*2+1]=Math.sin(i/N*Math.PI*2);}tables.set(N,t);}return t;}
+function ringGpu(cx,cy,R,col){const reach=R+3;if(cx+reach<0||cx-reach>W||cy+reach<0||cy-reach>H)return;if(R<7){reserve(6);const l=cx-reach,t=cy-reach,r=cx+reach,b=cy+reach;put(l,t,col,cx,cy,R,1);put(r,t,col,cx,cy,R,1);put(r,b,col,cx,cy,R,1);put(l,t,col,cx,cy,R,1);put(r,b,col,cx,cy,R,1);put(l,b,col,cx,cy,R,1);return;}
+ const N=R<24?12:R<64?16:R<160?24:R<400?32:48;const tb=table(N);const inner=Math.max(0,R-2.5),outer=(R+2.5)/Math.cos(Math.PI/N)+0.5;reserve(N*6);
+ for(let i=0;i<N;i++){const c0=tb[i*2],s0=tb[i*2+1],c1=tb[i*2+2],s1=tb[i*2+3];put(cx+c0*outer,cy+s0*outer,col,cx,cy,R,1);put(cx+c1*outer,cy+s1*outer,col,cx,cy,R,1);put(cx+c0*inner,cy+s0*inner,col,cx,cy,R,1);put(cx+c0*inner,cy+s0*inner,col,cx,cy,R,1);put(cx+c1*outer,cy+s1*outer,col,cx,cy,R,1);put(cx+c1*inner,cy+s1*inner,col,cx,cy,R,1);}}
+function ringCpuTyped(cx,cy,R,col){let x=R,y=0,e=1-R;while(x>=y){rect(cx+x,cy+y,1,1,col);rect(cx+y,cy+x,1,1,col);rect(cx-y,cy+x,1,1,col);rect(cx-x,cy+y,1,1,col);rect(cx-x,cy-y,1,1,col);rect(cx-y,cy-x,1,1,col);rect(cx+y,cy-x,1,1,col);rect(cx+x,cy-y,1,1,col);y++;if(e<0)e+=y*2+1;else{x--;e+=(y-x)*2+1;}}}
+// old batch: JS array + spread + object allocs (6 floats/vertex), separate program w/o ring attr is same shader with ring=0 → just emulate the cost of building
+let old=[];const oldVertex=(x,y,color)=>{old.push(x,y,...color,0,0,0,0);};const oldTri=(a,b,c,col)=>{oldVertex(a.x,a.y,col);oldVertex(b.x,b.y,col);oldVertex(c.x,c.y,col);};
+const oldRect=(x,y,w,h,col)=>{const a={x,y},b={x:x+w,y},c={x:x+w,y:y+h},d={x,y:y+h};oldTri(a,b,c,col);oldTri(a,c,d,col);};
+function ringCpuOld(cx,cy,R,col){let x=R,y=0,e=1-R;while(x>=y){oldRect(cx+x,cy+y,1,1,col);oldRect(cx+y,cy+x,1,1,col);oldRect(cx-y,cy+x,1,1,col);oldRect(cx-x,cy+y,1,1,col);oldRect(cx-x,cy-y,1,1,col);oldRect(cx-y,cy-x,1,1,col);oldRect(cx+y,cy-x,1,1,col);oldRect(cx+x,cy-y,1,1,col);y++;if(e<0)e+=y*2+1;else{x--;e+=(y-x)*2+1;}}}
+let cap=0;function flushTyped(){const v=data.subarray(0,len);if(data.byteLength>cap){cap=data.byteLength;gl.bufferData(gl.ARRAY_BUFFER,cap,gl.DYNAMIC_DRAW);}gl.bufferSubData(gl.ARRAY_BUFFER,0,v);gl.drawArrays(gl.TRIANGLES,0,len/10);len=0;}
+function flushOld(){const v=new Float32Array(old);gl.bufferData(gl.ARRAY_BUFFER,v,gl.DYNAMIC_DRAW);gl.drawArrays(gl.TRIANGLES,0,v.length/10);old.length=0;}
+const col=[0.3,1,0.8,1];
+const scenarios={};
+function scene(count,R){const rings=[];for(let i=0;i<count;i++)rings.push([50+(i*97)%700+0.25,50+(i*61)%500+0.5,R]);return rings;}
+async function run(name,fn,flush,rings,frames=60){
+ // warmup
+ for(let i=0;i<5;i++){gl.clear(gl.COLOR_BUFFER_BIT);for(const [x,y,R] of rings)fn(x,y,R,col);flush();}
+ await new Promise(r=>requestAnimationFrame(r));
+ let js=0;const t0=performance.now();let prev=t0;const frameTimes=[];
+ for(let f=0;f<frames;f++){const a=performance.now();gl.clear(gl.COLOR_BUFFER_BIT);for(const [x,y,R] of rings)fn(x,y,R,col);flush();js+=performance.now()-a;await new Promise(r=>requestAnimationFrame(r));const now=performance.now();frameTimes.push(now-prev);prev=now;}
+ frameTimes.sort((a,b)=>a-b);
+ return `${name.padEnd(22)} js ${(js/frames).toFixed(2).padStart(6)} ms/frame  frame p50 ${frameTimes[frames>>1].toFixed(1).padStart(5)} p95 ${frameTimes[Math.floor(frames*0.95)].toFixed(1).padStart(5)}`;
+}
+(async()=>{const out=[];
+ for(const [label,count,R] of [['60 rings r=120 (ranges)',60,120],['300 rings r=40 (explosions)',300,40],['40 rings r=400 (zoomed out)',40,400]]){
+  const rings=scene(count,R);out.push('== '+label);
+  out.push(await run('old js-array cpu',ringCpuOld,flushOld,rings));
+  out.push(await run('typed-store cpu',ringCpuTyped,flushTyped,rings));
+  out.push(await run('gpu annulus',ringGpu,flushTyped,rings));
+ }
+ document.getElementById('out').textContent=out.join('\n');window.__done=out.join('\n');})();
+</script>

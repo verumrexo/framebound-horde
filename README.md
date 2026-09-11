@@ -28,7 +28,7 @@ keep the host's game open and active. this beta uses the existing framebound sig
 - `1`: place one frame. click a tower, then `1` for replacements or `2` to sell.
 - replacement menu `1 / 2 / 3`: choose a branch.
 - `b`: catalog for repeated placement of already-upgraded forms.
-- `q / e`: targeting. `a`: rocket strike point or editable control geometry.
+- `q / e`: targeting. `a`: rocket strike point, laser direction, broadside fan facing, or editable control geometry. `0`: back to automatic.
 - `g`: all ranges. `k`: kills-per-second. `t`: solo test field.
 - drag: pan. wheel: integer pixel zoom. `esc`: menu; it does not pause a running game.
 

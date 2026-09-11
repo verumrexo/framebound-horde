@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 export const AUTHORITY_TICK_RATE = 60;
 export const AUTHORITY_TICK_MS = 1000 / AUTHORITY_TICK_RATE;
 
@@ -49,6 +49,7 @@ export const EVENT = Object.freeze({
   TOWER_FORCE_DIRECTION_CHANGED: 'tower.force_direction.changed',
   TOWER_CONTROL_GEOMETRY_CHANGED: 'tower.control_geometry.changed',
   TOWER_RELAY_TARGET_CHANGED: 'tower.relay_target.changed',
+  RELAY_NETWORK_COMPLETED: 'network.relay.completed',
   TOWER_OWNERSHIP_TRANSFERRED: 'tower.ownership.transferred',
   KILLS_RECORDED: 'combat.kills.recorded',
   ATTACK_RESOLVED: 'combat.attack.resolved',
