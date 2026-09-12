@@ -26,7 +26,7 @@ const context = vm.createContext({
     'openControlGeometryMenu', 'openStrikeTargetMenu', 'clearSelectedStrikePoint', 'resetSelectedControlGeometry', 'setStatus']
     .map((name) => [name, (...args) => calls.push({ name, args })]))
 });
-vm.runInContext([extract('towerAccent'), extract('weaponView'), extract('economyNetworkSummary'), extract('towerActionView')].join('\n'), context);
+vm.runInContext([extract('catalogDefinition'), extract('towerAccent'), extract('weaponView'), extract('economyNetworkSummary'), extract('towerActionView')].join('\n'), context);
 const authority = new EmbeddedAuthority(TEST_FIELD_SESSION_CONFIG);
 authority.join({ clientId: 'owner', payload: { label: 'owner' } });
 const snapshot = { ...authority.state, towerCatalog: Object.values(TOWER_DEFINITIONS), players: [{ id: 'owner', label: 'owner' }, { id: 'peer', label: 'peer' }] };
