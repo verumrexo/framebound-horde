@@ -284,7 +284,7 @@ const context = vm.createContext({
   pointer: { x: 0, y: 0 }, unproject: () => origin, findDefenseAreaAt: () => 'b', relayCandidateAreas: () => areas,
   baseDamage: damage, researchWave: null
 });
-vm.runInContext(['reactorShutdownAppearance', 'drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
+vm.runInContext(['reactorShutdownAppearance', 'catalogDefinition', 'drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
   'drawWorldRing', 'drawAreaTargetBrackets', 'drawRelayTargetOverlay', 'startRelayCollapse', 'drawRelayCollapse',
   'resetWorldPresentation'].map(extract).join('\n'), context);
 const draw = (operation) => { calls.length = 0; operation(); return structuredClone(calls); };

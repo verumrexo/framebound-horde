@@ -1,4 +1,5 @@
 import { pixelHudLayout, fitPixelTelemetry, pixelActionLayout } from './ui/pixel-layout.js';
+import { MENU_HEADER, attachedPanelPosition, catalogLayout, coopMenuLayout, defeatLayout, escapeMenuLayout, mainMenuLayout, mapSelectionLayout } from './ui/panel-layout.js';
 import { drawSweep, drawLaserPulse, sweepPose } from './render/laser-effects.js';
 import { compactMetric } from './core/format.js';
 import { RESEARCH_NODES, researchNode, arsenalChoices, hasResearch, reactorRank, reactorQuote, REACTOR_CATEGORIES } from './core/research.js';
@@ -324,6 +325,7 @@ flat in float v_units;
 flat in float v_hp;
 flat in float v_pointSize;
 uniform float u_renderScale;
+uniform float u_hostilePalette;
 out vec4 outColor;
 void main() {
   vec2 point = gl_PointCoord;
@@ -354,14 +356,17 @@ void main() {
     else if (v_status > 2.5) outColor = vec4(${COLOR.amber.join(',')});
     else outColor = vec4(${COLOR.cyan.join(',')});
   } else {
-    if (v_hp < 1.5) outColor = vec4(${COLOR.red.join(',')});
-    else if (v_hp < 2.5) outColor = vec4(1.0, 0.48, 0.12, 1.0);
-    else if (v_hp < 3.5) outColor = vec4(1.0, 0.86, 0.18, 1.0);
-    else if (v_hp < 4.5) outColor = vec4(0.64, 0.40, 1.0, 1.0);
-    else if (v_hp < 5.5) outColor = vec4(1.0, 0.30, 0.75, 1.0);
+    bool alt = u_hostilePalette > 0.5;
+    if (v_hp < 1.5) outColor = alt ? vec4(1.0, 0.30, 0.90, 1.0) : vec4(${COLOR.red.join(',')});
+    else if (v_hp < 2.5) outColor = alt ? vec4(1.0, 0.62, 0.86, 1.0) : vec4(1.0, 0.48, 0.12, 1.0);
+    else if (v_hp < 3.5) outColor = alt ? vec4(1.0, 0.96, 0.90, 1.0) : vec4(1.0, 0.86, 0.18, 1.0);
+    else if (v_hp < 4.5) outColor = alt ? vec4(0.62, 0.50, 1.0, 1.0) : vec4(0.64, 0.40, 1.0, 1.0);
+    else if (v_hp < 5.5) outColor = alt ? vec4(0.42, 0.30, 0.86, 1.0) : vec4(1.0, 0.30, 0.75, 1.0);
     else {
       float tier = mod(floor(log2(v_hp)), 3.0);
-      vec3 shell = tier < 0.5 ? vec3(1.0, 0.58, 0.18) : tier < 1.5 ? vec3(0.74, 0.48, 1.0) : vec3(1.0, 0.38, 0.70);
+      vec3 shell = alt
+        ? (tier < 0.5 ? vec3(1.0, 0.40, 0.92) : tier < 1.5 ? vec3(0.62, 0.50, 1.0) : vec3(1.0, 0.80, 0.95))
+        : (tier < 0.5 ? vec3(1.0, 0.58, 0.18) : tier < 1.5 ? vec3(0.74, 0.48, 1.0) : vec3(1.0, 0.38, 0.70));
       bool stripe = abs(point.y - 0.5) < 0.10;
       outColor = vec4(stripe ? vec3(1.0) : shell, 1.0);
     }
@@ -523,6 +528,7 @@ class EnemyRenderer {
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_viewScale'), camera.scale);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_tickAlpha'), frame.alpha);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_pointSizes'), enemyPointSize(camera.scale), enemyPointSize(camera.scale, 2));
+    gl.uniform1f(gl.getUniformLocation(this.program, 'u_hostilePalette'), gameplayPreferences.hostilePalette === 'magenta' ? 1 : 0);
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.POINTS, 0, frame.count);
     gl.bindVertexArray(null);
@@ -1090,10 +1096,11 @@ function loadGameplayPreferences() {
     const saved = JSON.parse(localStorage.getItem('framebound_horde_preferences') || 'null');
     return {
       autoSelectPlacedFrame: saved?.autoSelectPlacedFrame !== false,
-      pace: normalizePace(saved?.pace ?? DEFAULT_PACE)
+      pace: normalizePace(saved?.pace ?? DEFAULT_PACE),
+      hostilePalette: saved?.hostilePalette === 'magenta' ? 'magenta' : 'red'
     };
   } catch {
-    return { autoSelectPlacedFrame: true, pace: DEFAULT_PACE };
+    return { autoSelectPlacedFrame: true, pace: DEFAULT_PACE, hostilePalette: 'red' };
   }
 }
 
@@ -1887,6 +1894,9 @@ addEventListener('keydown', (event) => {
     if (escapeMenuPage === 'options' && (event.key === '1' || event.key === 'Enter')) {
       event.preventDefault();
       toggleAutoSelectPlacedFrame();
+    } else if (escapeMenuPage === 'options' && event.key === '2') {
+      event.preventDefault();
+      toggleHostilePalette();
     }
     return;
   }
@@ -1915,7 +1925,7 @@ addEventListener('keydown', (event) => {
   }
   if (selectedTowerId && towerMenuMode && (sessionMode === 'game' || ['arsenal','reactor'].includes(sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId)?.definitionId) || isRelayForm(sessionSnapshot.towers.find((tower) => tower.id === selectedTowerId)?.definitionId) || ['relay', 'strike', 'control'].includes(towerMenuMode))) {
     const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-    const towerDefinition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+    const towerDefinition = catalogDefinition(sessionSnapshot, tower?.definitionId);
     if (towerMenuMode === 'actions' && event.key === '1') {
       event.preventDefault();
       if (['arsenal','reactor'].includes(tower?.definitionId)) openResearchStation(tower);
@@ -1943,7 +1953,7 @@ addEventListener('keydown', (event) => {
     }
     if (towerMenuMode === 'upgrades' && ['1', '2', '3'].includes(event.key)) {
       event.preventDefault();
-      const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+      const definition = catalogDefinition(sessionSnapshot, tower?.definitionId);
       const definitionId = definition?.evolutionChoices?.[Number(event.key) - 1];
       if (definitionId) evolveSelectedTower(definitionId);
       else setStatus('that branch is not designed yet');
@@ -2223,6 +2233,20 @@ function closeEscapeOptions() {
   setStatus('menu open // horde still live');
 }
 
+// Colour-vision fallback: hostiles swap to a magenta-led ramp that stays apart from
+// system green. Presentation only; hp values, statuses and packets are unchanged.
+function toggleHostilePalette() {
+  gameplayPreferences.hostilePalette = gameplayPreferences.hostilePalette === 'magenta' ? 'red' : 'magenta';
+  saveGameplayPreferences();
+  setStatus(`hostile palette ${gameplayPreferences.hostilePalette}`);
+}
+
+function hostilePaletteLabel(prefix) {
+  return gameplayPreferences.hostilePalette === 'magenta'
+    ? `${prefix}: magenta 1 / pink 2 / white 3`
+    : `${prefix}: red 1 / orange 2 / yellow 3`;
+}
+
 function toggleAutoSelectPlacedFrame() {
   gameplayPreferences.autoSelectPlacedFrame = !gameplayPreferences.autoSelectPlacedFrame;
   saveGameplayPreferences();
@@ -2250,7 +2274,7 @@ function enterTestField() {
 }
 
 function armFramePlacement() {
-  const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === TOWER_DEFINITION_ID);
+  const definition = catalogDefinition(sessionSnapshot, TOWER_DEFINITION_ID);
   const economy = sessionSnapshot.teamEconomy;
   if ((sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < (definition?.cost ?? Infinity)) {
     placementArmed = false;
@@ -2290,7 +2314,7 @@ function closeBuildCatalog() {
 }
 
 function selectBulkPlacementDefinition(definitionId) {
-  const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === definitionId);
+  const definition = catalogDefinition(sessionSnapshot, definitionId);
   if (sessionMode === 'test') {
     if (!definition) {
       setStatus('test form is unavailable');
@@ -2330,7 +2354,7 @@ function switchTestTowerForm(definitionId) {
 function evolveSelectedTower(definitionId) {
   const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
   if (!tower) return;
-  const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(sessionSnapshot, tower.definitionId);
   if (!definition?.evolutionChoices?.includes(definitionId)) {
     setStatus('next branch not designed yet');
     return;
@@ -2341,7 +2365,7 @@ function evolveSelectedTower(definitionId) {
 
 function cycleSelectedTargeting(direction) {
   const tower = sessionSnapshot.towers.find((candidate) => candidate.id === selectedTowerId);
-  const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === tower?.definitionId);
+  const definition = catalogDefinition(sessionSnapshot, tower?.definitionId);
   if (!tower || !definition?.targetingModes?.length) return;
   const modes=[...definition.targetingModes,...(hasResearch(sessionSnapshot,16)?['execution']:[]),...(hasResearch(sessionSnapshot,36)?['highest_hp']:[])];
   const current=Math.max(0,modes.indexOf(tower.targetingMode));
@@ -2482,7 +2506,7 @@ function handleWorldClick(screenPoint) {
       return;
     }
     const definitionId = bulkPlacementDefinitionId || TOWER_DEFINITION_ID;
-    const definition = sessionSnapshot.towerCatalog.find((candidate) => candidate.id === definitionId);
+    const definition = catalogDefinition(sessionSnapshot, definitionId);
     const quote = towerBuildQuote(sessionSnapshot.towerCatalog, definitionId);
     session.send(COMMAND.TOWER_PLACE, { definitionId, x: world.x, y: world.y });
     if (bulkPlacementDefinitionId) {
@@ -2522,11 +2546,24 @@ function drawBackground() {
   nebulaRenderer.draw(currentMap, camera);
 }
 
+// One catalog index per snapshot instead of a linear scan per tower per frame.
+function catalogDefinition(snapshot, definitionId) {
+  const catalog = snapshot?.towerCatalog;
+  if (!catalog) return undefined;
+  const cache = catalogDefinition.cache || (catalogDefinition.cache = new WeakMap());
+  let index = cache.get(catalog);
+  if (!index) {
+    index = new Map(catalog.map((definition) => [definition.id, definition]));
+    cache.set(catalog, index);
+  }
+  return index.get(definitionId);
+}
+
 function drawTower(tower, override = null) {
   const p = project(tower.x, tower.y);
   const tick = sessionSnapshot?.runTick || 0;
   const control = tower.definitionId === 'bond'
-    ? tower.effectiveControl || sessionSnapshot?.towerCatalog.find((item) => item.id === 'bond')?.control
+    ? tower.effectiveControl || catalogDefinition(sessionSnapshot, 'bond')?.control
     : null;
   const period = Math.max(1, Math.round((control?.periodSeconds || 6) * AUTHORITY_TICK_RATE));
   const pulseTick = tick % period;
@@ -2547,10 +2584,11 @@ function drawTower(tower, override = null) {
     if (point) {
       const socket = project(point.x, point.y);
       drawDashedLink(p, socket, COLOR.dimMint);
-      shapes.rect(socket.x - 5, socket.y - 5, 11, 1, COLOR.amber);
-      shapes.rect(socket.x - 5, socket.y + 5, 11, 1, COLOR.amber);
-      shapes.rect(socket.x - 5, socket.y - 4, 1, 9, COLOR.amber);
-      shapes.rect(socket.x + 5, socket.y - 4, 1, 9, COLOR.amber);
+      const half = Math.max(3, Math.round(combatMetrics(camera.scale).tower / 2));
+      shapes.rect(socket.x - half, socket.y - half, half * 2 + 1, 1, COLOR.amber);
+      shapes.rect(socket.x - half, socket.y + half, half * 2 + 1, 1, COLOR.amber);
+      shapes.rect(socket.x - half, socket.y - half + 1, 1, half * 2 - 1, COLOR.amber);
+      shapes.rect(socket.x + half, socket.y - half + 1, 1, half * 2 - 1, COLOR.amber);
     }
   }
 }
@@ -2584,7 +2622,7 @@ function drawPerimeterIntel(snapshot, frame) {
   if (!hasResearch(snapshot,36)) return;
   if (snapshot.runTick < perimeterIntelTick || snapshot.runTick - perimeterIntelTick >= 30 || perimeterIntelTick < 0) {
     perimeterIntelTick = snapshot.runTick;
-    const sources = snapshot.towers.filter((tower) => snapshot.towerCatalog.find((definition)=>definition.id===tower.definitionId)?.networkNode);
+    const sources = snapshot.towers.filter((tower) => catalogDefinition(snapshot, tower.definitionId)?.networkNode);
     const seen = [];
     for (let i=0;i<frame.count;i++) {
       const hp=frame.hpById[frame.idByIndex[i]], x=frame.state[i*4], y=frame.state[i*4+1];
@@ -2598,11 +2636,12 @@ function drawPerimeterIntel(snapshot, frame) {
       if(perimeterIntel.length===6) break;
     }
   }
+  const half=Math.max(3,Math.round(enemyPointSize(camera.scale,2)));
   for(const group of perimeterIntel) {
     const p=project(group.x,group.y);
-    shapes.rect(p.x-6,p.y-6,13,1,COLOR.amber);
-    shapes.rect(p.x-6,p.y+6,13,1,COLOR.amber);
-    bitmapText.draw(`${Math.ceil(group.hp)} hp`,p.x+9,p.y-3,COLOR.amber,1);
+    shapes.rect(p.x-half,p.y-half,half*2+1,1,COLOR.amber);
+    shapes.rect(p.x-half,p.y+half,half*2+1,1,COLOR.amber);
+    bitmapText.draw(`${Math.ceil(group.hp)} hp`,p.x+half+3,p.y-3,COLOR.amber,1);
   }
 }
 
@@ -2807,42 +2846,6 @@ function drawClusterPayloads(fields, runTick) {
     const shot = combatMetrics(camera.scale).shot;
     shapes.rect(head.x - Math.floor(shot / 2), head.y - Math.floor(shot / 2), shot, shot, COLOR.red);
     if (shot >= 3) shapes.rect(head.x, head.y, 1, 1, COLOR.mint);
-  }
-}
-
-function drawReworkedCombat(snapshot) {
-  const state = snapshot.turretRework;
-  if (!state) return;
-  for (const shot of state.shots) {
-    const p = project(shot.x, shot.y);
-    const damage = ['pellet','nail','embedded','splinter','orbit'].includes(shot.type);
-    const color = damage ? COLOR.amber : shot.type === 'gravity_seed' ? COLOR.mint : COLOR.cyan;
-    const size = ['freeze_shell','gravity_seed','embedded'].includes(shot.type) ? 4 : 2;
-    shapes.rect(p.x-size/2,p.y-size/2,size,size,color);
-    if (shot.type === 'nail' || shot.type === 'splinter') shapes.line(p.x,p.y,p.x-shot.dx*7,p.y-shot.dy*7,1,color);
-    if (shot.type === 'chain') drawWorldRing(shot.x,shot.y,7,COLOR.cyan);
-  }
-  for (const v of state.visuals) {
-    if (v.x2 !== undefined) {
-      const p=project(v.x,v.y), q=project(v.x2,v.y2);
-      shapes.line(p.x,p.y,q.x,q.y,v.type === 'ray' ? 2 : 1,COLOR.cyan);
-      if(v.type === 'ray') shapes.rect(q.x-2,q.y-2,4,4,COLOR.mint);
-    } else {
-      drawWorldRing(v.x,v.y,v.radius,v.type === 'gravity' ? COLOR.dimMint : COLOR.cyan);
-      if(v.type === 'gravity') drawWorldRing(v.x,v.y,v.radius*((snapshot.runTick%30)/30),COLOR.cyan);
-    }
-  }
-  // Enemy positions come from the already received swarm presentation.
-  if (!state.chains.length) return;
-  const presentation = session.presentation();
-  const positions = new Map();
-  for(let i=0;i<presentation.count;i++) {
-    const id=presentation.ids?.[i] ?? presentation.idByIndex?.[i];
-    if(id !== undefined) positions.set(id,{x:presentation.state[i*4],y:presentation.state[i*4+1]});
-  }
-  for(const chain of state.chains) for(let i=1;i<chain.members.length;i++) {
-    const a=positions.get(chain.members[i-1].id), b=positions.get(chain.members[i].id);
-    if(a&&b) drawDashedLink(project(a.x,a.y),project(b.x,b.y),COLOR.cyan);
   }
 }
 
@@ -3216,43 +3219,16 @@ function drawAttackFlashes(dt) {
       const cross = flash.age < 0.1 ? Math.ceil(heavy / 2) : Math.max(1, Math.floor(heavy / 3));
       shapes.rect(center.x - cross, center.y, cross * 2 + 1, 1, COLOR.red);
       shapes.rect(center.x, center.y - cross, 1, cross * 2 + 1, COLOR.red);
-    } else if (flash.kind === 'knot') {
-      if (flash.age >= flash.duration) continue;
-      const phase = Math.min(1, flash.age / flash.duration);
-      const radius = flash.radius * (1 - phase * 0.3);
-      drawWorldRing(flash.x, flash.y, radius, phase < 0.55 ? COLOR.green : COLOR.dimMint);
-      if (phase < 0.45) drawWorldRing(flash.x, flash.y, Math.max(8, radius * 0.55), COLOR.cyan);
-      const center = project(flash.x, flash.y);
-      const reach = Math.max(2, Math.round(radius / camera.scale));
-      shapes.rect(center.x - reach, center.y, 3, 1, COLOR.mint);
-      shapes.rect(center.x + reach - 2, center.y, 3, 1, COLOR.mint);
-      shapes.rect(center.x, center.y - reach, 1, 3, COLOR.mint);
-      shapes.rect(center.x, center.y + reach - 2, 1, 3, COLOR.mint);
-    } else if (flash.kind === 'backwash') {
-      if (flash.age >= flash.duration) continue;
-      const phase = Math.min(1, flash.age / flash.duration);
-      drawWorldRing(flash.x, flash.y, flash.radius, phase < 0.5 ? COLOR.amber : COLOR.dimMint);
-      const center = project(flash.x, flash.y);
-      const endpoint = project(
-        flash.x + flash.directionX * flash.radius * (0.45 + phase * 0.45),
-        flash.y + flash.directionY * flash.radius * (0.45 + phase * 0.45)
-      );
-      const perpendicularX = -flash.directionY;
-      const perpendicularY = flash.directionX;
-      for (const offset of [-5, 0, 5]) {
-        const ox = Math.round(perpendicularX * offset);
-        const oy = Math.round(perpendicularY * offset);
-        shapes.line(center.x + ox, center.y + oy, endpoint.x + ox, endpoint.y + oy, 1, offset === 0 ? COLOR.mint : COLOR.amber);
-      }
     } else if (flash.kind === 'forge') {
       if (flash.age >= 0.5) continue;
       const phase = Math.min(1, flash.age / 0.5);
       const radius = 8 + phase * 30;
       drawWorldRing(flash.x, flash.y, radius, phase < 0.55 ? COLOR.amber : COLOR.dimMint);
       const center = project(flash.x, flash.y);
-      shapes.rect(center.x - 4, center.y, 9, 1, COLOR.green);
-      shapes.rect(center.x, center.y - 4, 1, 9, COLOR.green);
-      bitmapText.draw(`+${compactMetric(flash.credits)}`, center.x + 7, center.y - 10 - Math.round(phase * 5), COLOR.amber, 1);
+      const reach = combatMetrics(camera.scale).burst;
+      shapes.rect(center.x - reach, center.y, reach * 2 + 1, 1, COLOR.green);
+      shapes.rect(center.x, center.y - reach, 1, reach * 2 + 1, COLOR.green);
+      bitmapText.draw(`+${compactMetric(flash.credits)}`, center.x + reach + 3, center.y - 10 - Math.round(phase * 5), COLOR.amber, 1);
     }
     attackFlashes[write++] = flash;
   }
@@ -3415,7 +3391,7 @@ function drawAreaTargetBrackets(area, color) {
 }
 
 function drawRelayTargetOverlay(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(snapshot, tower.definitionId);
   const linkRange = definition?.linkRange || 0;
   const candidates = relayCandidateAreas(snapshot, tower);
   const pointerWorld = unproject(pointer.x, pointer.y);
@@ -3601,14 +3577,14 @@ function drawBuildState(snapshot) {
   const selected = snapshot.towers.find((tower) => tower.id === selectedTowerId);
   if (showAllRanges) {
     for (const tower of snapshot.towers) {
-      const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+      const definition = catalogDefinition(snapshot, tower.definitionId);
       const range = towerRingRange(tower, definition);
       if (range) drawWorldRing(tower.x, tower.y, range, COLOR.dimMint);
     }
   }
   if (selected) {
     const p = project(selected.x, selected.y);
-    const selectedDefinition = snapshot.towerCatalog.find((candidate) => candidate.id === selected.definitionId);
+    const selectedDefinition = catalogDefinition(snapshot, selected.definitionId);
     const selectedRange = towerRingRange(selected, selectedDefinition);
     if (towerMenuMode === 'relay') drawRelayTargetOverlay(snapshot, selected);
     else if (towerMenuMode === 'strike') drawStrikeTargetOverlay(snapshot, selected);
@@ -3635,7 +3611,7 @@ function drawBuildState(snapshot) {
   if (selected && towerMenuMode && (sessionMode === 'game' || ['arsenal','reactor'].includes(selected.definitionId) || isRelayForm(selected.definitionId) || ['relay', 'strike', 'control'].includes(towerMenuMode))) drawTowerMenu(snapshot, selected);
   if (!placementArmed || pointer.y <= HUD_TOP_HEIGHT || pointer.y >= hudBottomY) return;
   const placementDefinitionId = bulkPlacementDefinitionId || TOWER_DEFINITION_ID;
-  const placementDefinition = snapshot.towerCatalog.find((candidate) => candidate.id === placementDefinitionId);
+  const placementDefinition = catalogDefinition(snapshot, placementDefinitionId);
   const quote = towerBuildQuote(snapshot.towerCatalog, placementDefinitionId);
   const world = unproject(pointer.x, pointer.y);
   const economy = snapshot.teamEconomy;
@@ -3782,7 +3758,6 @@ function drawMenuButton(id, label, x, y, width, accent, action, selected = false
 // Catalog rows carry the real body in a left socket plus a two-line label, so price
 // survives narrow columns instead of being dropped when a single line overflows.
 const CATALOG_ENTRY_HEIGHT = TOWER_PORTRAIT_SIZE + 2;
-const CATALOG_ROW_PITCH = CATALOG_ENTRY_HEIGHT + 2;
 
 function drawCatalogEntry(id, definitionId, title, price, x, y, width, accent, action) {
   const height = CATALOG_ENTRY_HEIGHT;
@@ -3808,10 +3783,8 @@ function drawBuildCatalog(snapshot) {
   const page = BUILD_CATALOG_PAGES[buildCatalogPageId];
   if (!page) return;
   const economy = snapshot.teamEconomy || { credits: 0 };
-  const width = Math.min(410, logicalWidth - 12);
-  const height = 22 + page.rows.length * CATALOG_ROW_PITCH + 16;
-  const x = Math.round((logicalWidth - width) * 0.5);
-  const y = Math.max(HUD_TOP_HEIGHT + 5, hudBottomY - height - 6);
+  const layout = catalogLayout(viewport(), HUD_TOP_HEIGHT, hudBottomY, page.rows.length, CATALOG_ENTRY_HEIGHT);
+  const { x, y, width, height } = layout;
   drawTechPanel(x, y, width, height, COLOR.amber);
   shapes.rect(x + 8, y + 6, 2, 11, COLOR.amber);
   bitmapText.draw(sessionMode === 'test' ? 'form catalog' : 'tower catalog', x + 16, y + 7, COLOR.amber, 1);
@@ -3821,14 +3794,14 @@ function drawBuildCatalog(snapshot) {
   drawButton('catalog_page_network', 'network iii', x + 284, y + 4, 70, buildCatalogPageId === 'network', COLOR.green, () => { buildCatalogPageId = 'network'; });
   drawButton('build_catalog_close', sessionMode === 'test' ? 'u close' : 'b close', x + width - 50, y + 4, 43, false, COLOR.cyan, closeBuildCatalog);
 
-  const innerX = x + 7;
-  const innerWidth = width - 14;
+  const innerX = x + layout.innerX;
+  const innerWidth = layout.innerWidth;
   page.rows.forEach((row, rowIndex) => {
-    const rowY = y + 22 + rowIndex * CATALOG_ROW_PITCH;
+    const rowY = y + layout.rowsTop + rowIndex * layout.rowPitch;
     const gap = 3;
     const buttonWidth = row.length === 1 ? 118 : Math.floor((innerWidth - gap * (row.length - 1)) / row.length);
     row.forEach((entry, columnIndex) => {
-      const definition = snapshot.towerCatalog.find((candidate) => candidate.id === entry.definitionId);
+      const definition = catalogDefinition(snapshot, entry.definitionId);
       const quote = towerBuildQuote(snapshot.towerCatalog, entry.definitionId);
       if (!definition || !quote) return;
       const price = purchaseCost(snapshot, null, quote.cost, { placement: true });
@@ -3855,10 +3828,37 @@ function drawBuildCatalog(snapshot) {
         ? 'pick once // click many // right click ends'
         : 'valid nebula clicks keep building // right click cancels',
     x + 8,
-    y + height - 12,
+    y + layout.footerY,
     COLOR.dimMint,
     1
   );
+}
+
+// Shared menu hierarchy: hard bookends, 2x title, machine sub-line, then an interrupted
+// rule carrying one accent scar. Tiers of buttons are split by an interrupted divider.
+function drawMenuHeader(panel, title, titleColor, subtitle, subtitleColor, scarColor = COLOR.amber) {
+  const { x, y, width } = panel;
+  shapes.rect(x + 8, y + 8, 3, 25, titleColor);
+  shapes.rect(x + width - 11, y + 8, 3, 25, COLOR.red);
+  let cursor = x + 20;
+  for (const [text, color] of Array.isArray(title) ? title : [[title, titleColor]]) {
+    bitmapText.draw(text, cursor, y + 10, color, 2);
+    cursor += text.length * 12;
+  }
+  bitmapText.draw(clippedUiText(subtitle, width - 40), x + 20, y + MENU_HEADER.subtitleY, subtitleColor, 1);
+  shapes.rect(x + 16, y + MENU_HEADER.ruleY, MENU_HEADER.scarWidth, 1, scarColor);
+  shapes.rect(x + 16 + MENU_HEADER.scarWidth + 4, y + MENU_HEADER.ruleY, width - 58, 1, COLOR.dimMint);
+  shapes.rect(x + width - 20, y + MENU_HEADER.ruleY, 4, 1, scarColor);
+}
+
+function drawTierDivider(x, y, width, endColor = COLOR.dimMint) {
+  shapes.rect(x, y, 10, 1, COLOR.dimMint);
+  shapes.rect(x + 14, y, width - 28, 1, COLOR.dimMint);
+  shapes.rect(x + width - 10, y, 10, 1, endColor);
+}
+
+function viewport() {
+  return { width: logicalWidth, height: logicalHeight };
 }
 
 function mainMenuRunLabel(snapshot) {
@@ -3872,47 +3872,31 @@ function mainMenuRunLabel(snapshot) {
 }
 
 function drawMainMenu(snapshot) {
-  const width = Math.min(330, logicalWidth - 20);
-  const height = Math.min(184, logicalHeight - 12);
-  const x = Math.round((logicalWidth - width) * 0.5);
-  const y = Math.round((logicalHeight - height) * 0.5);
-  drawTechPanel(x, y, width, height, COLOR.mint);
-  // Header: brand at 2x with hard bookends, a machine sub-line, then an interrupted rule
-  // carrying one amber scar. Telemetry and controls hang below in two grouped tiers.
-  shapes.rect(x + 8, y + 8, 3, 25, COLOR.mint);
-  shapes.rect(x + width - 11, y + 8, 3, 25, COLOR.red);
-  bitmapText.draw('framebound', x + 20, y + 10, COLOR.mint, 2);
-  bitmapText.draw('// horde', x + 130, y + 10, COLOR.red, 2);
-  bitmapText.draw('survival telemetry // mechanical void', x + 20, y + 29, COLOR.dimMint, 1);
-  shapes.rect(x + 16, y + 40, 22, 1, COLOR.amber);
-  shapes.rect(x + 42, y + 40, width - 58, 1, COLOR.dimMint);
-  shapes.rect(x + width - 20, y + 40, 4, 1, COLOR.amber);
-  shapes.rect(x + 17, y + 48, 1, 7, gameRestorePending ? COLOR.amber : COLOR.cyan);
-  bitmapText.draw(mainMenuRunLabel(snapshot), x + 21, y + 48, gameRestorePending ? COLOR.amber : COLOR.cyan, 1);
+  const layout = mainMenuLayout(viewport());
+  const { x, y, width, buttonX, buttonWidth, rows } = layout;
+  drawTechPanel(x, y, width, layout.height, COLOR.mint);
+  drawMenuHeader(layout, [['framebound', COLOR.mint], ['// horde', COLOR.red]], COLOR.mint, 'survival telemetry // mechanical void', COLOR.dimMint);
+  shapes.rect(x + 17, y + MENU_HEADER.runLabelY, 1, 7, gameRestorePending ? COLOR.amber : COLOR.cyan);
+  bitmapText.draw(mainMenuRunLabel(snapshot), x + 21, y + MENU_HEADER.runLabelY, gameRestorePending ? COLOR.amber : COLOR.cyan, 1);
   if (gameHasEnteredGameplay && snapshot.phase === 'running') {
-    bitmapText.draw('warning // the horde is still live', x + 21, y + 59, COLOR.red, 1);
+    bitmapText.draw('warning // the horde is still live', x + 21, y + MENU_HEADER.noteY, COLOR.red, 1);
   } else {
-    bitmapText.draw('solo survival // difficulty climbs', x + 21, y + 59, COLOR.dimMint, 1);
+    bitmapText.draw('solo survival // difficulty climbs', x + 21, y + MENU_HEADER.noteY, COLOR.dimMint, 1);
   }
 
-  const buttonX = x + 17;
-  const buttonWidth = width - 34;
   const networkBundle = sessions.get('game');
   const networkActive = Boolean(networkBundle?.networkRole);
   const primaryLabel = snapshot.phase === 'running' ? 'continue run' : networkActive ? 'coop // room status' : snapshot.phase === 'defeated' ? 'choose map // retry' : 'solo // choose map';
-  drawMenuButton('menu_continue', primaryLabel, buttonX, y + 70, buttonWidth, COLOR.mint, startOrContinueGame, true);
-  drawMenuButton('menu_restart', 'new solo run // choose map', buttonX, y + 91, buttonWidth, COLOR.amber, openNewSoloRun);
-  // Interrupted divider between the run tier and the session tier.
-  shapes.rect(buttonX, y + 112, 10, 1, COLOR.dimMint);
-  shapes.rect(buttonX + 14, y + 112, buttonWidth - 28, 1, COLOR.dimMint);
-  shapes.rect(buttonX + buttonWidth - 10, y + 112, 10, 1, networkActive ? COLOR.green : COLOR.dimMint);
+  drawMenuButton('menu_continue', primaryLabel, buttonX, y + rows.primary, buttonWidth, COLOR.mint, startOrContinueGame, true);
+  drawMenuButton('menu_restart', 'new solo run // choose map', buttonX, y + rows.secondary, buttonWidth, COLOR.amber, openNewSoloRun);
+  drawTierDivider(buttonX, y + rows.divider, buttonWidth, networkActive ? COLOR.green : COLOR.dimMint);
   const gap = 6;
   const halfWidth = Math.floor((buttonWidth - gap) * 0.5);
   drawMenuButton(
     'menu_coop_host',
     networkActive ? `coop ${multiplayerState.roomCode?.toLowerCase() || 'status'}` : 'h host coop',
     buttonX,
-    y + 118,
+    y + rows.coop,
     halfWidth,
     COLOR.green,
     networkActive ? () => { frontEndScreen = 'coop'; } : beginHostingCoop
@@ -3921,14 +3905,14 @@ function drawMainMenu(snapshot) {
     'menu_coop_join',
     networkActive ? 'leave coop' : 'j join code',
     buttonX + halfWidth + gap,
-    y + 118,
+    y + rows.coop,
     buttonWidth - halfWidth - gap,
     networkActive ? COLOR.red : COLOR.cyan,
     networkActive ? () => cancelMultiplayer(true) : openJoinCoop
   );
-  drawMenuButton('menu_test', 'test field // t', buttonX, y + 139, buttonWidth, COLOR.cyan, enterTestField);
-  bitmapText.draw(networkActive ? 'p2p session active' : 'coop // 2-4 pilots // p2p beta', x + 17, y + 165, networkActive ? COLOR.green : COLOR.dimMint, 1);
-  bitmapText.draw('enter selects', x + width - 85, y + 165, COLOR.ink, 1);
+  drawMenuButton('menu_test', 'test field // t', buttonX, y + rows.test, buttonWidth, COLOR.cyan, enterTestField);
+  bitmapText.draw(networkActive ? 'p2p session active' : 'coop // 2-4 pilots // p2p beta', x + 17, y + rows.footer, networkActive ? COLOR.green : COLOR.dimMint, 1);
+  bitmapText.draw('enter selects', x + width - 85, y + rows.footer, COLOR.ink, 1);
 }
 
 function clippedUiText(value, width) {
@@ -3963,20 +3947,14 @@ function retryMultiplayer() {
 }
 
 function drawCoopMenu(snapshot) {
-  const width = Math.min(390, logicalWidth - 16);
-  const height = Math.min(198, logicalHeight - 12);
-  const x = Math.round((logicalWidth - width) * 0.5);
-  const y = Math.round((logicalHeight - height) * 0.5);
+  const layout = coopMenuLayout(viewport());
+  const { x, y, width, height, buttonX, buttonWidth } = layout;
   const accent = multiplayerState.phase === 'error' ? COLOR.red : multiplayerState.role === 'host' ? COLOR.green : COLOR.cyan;
   drawTechPanel(x, y, width, height, accent);
-  shapes.rect(x + 9, y + 8, 3, 24, accent);
-  shapes.rect(x + width - 12, y + 8, 3, 24, COLOR.red);
-  bitmapText.draw('coop // direct peer link', x + 20, y + 10, accent, 2);
-  bitmapText.draw('six-character signaling // gameplay stays p2p', x + 20, y + 31, COLOR.dimMint, 1);
-  bitmapText.draw(clippedUiText(multiplayerState.status, width - 34), x + 17, y + 45, multiplayerState.phase === 'error' ? COLOR.red : COLOR.ink, 1);
+  drawMenuHeader(layout, 'coop // direct peer link', accent, 'six-character signaling // gameplay stays p2p', COLOR.dimMint, accent);
+  shapes.rect(x + 17, y + 46, 1, 7, multiplayerState.phase === 'error' ? COLOR.red : accent);
+  bitmapText.draw(clippedUiText(multiplayerState.status, width - 38), x + 21, y + 46, multiplayerState.phase === 'error' ? COLOR.red : COLOR.ink, 1);
 
-  const buttonX = x + 17;
-  const buttonWidth = width - 34;
   if (multiplayerState.phase === 'join_entry') {
     const code = multiplayerState.codeInput.padEnd(6, '_').toLowerCase();
     const boxWidth = 28;
@@ -4034,10 +4012,8 @@ function drawCoopMenu(snapshot) {
 
 function drawMapSelection(snapshot) {
   const maps = playableMaps();
-  const width = Math.min(430, logicalWidth - 12);
-  const height = Math.min(172 + maps.length * 23, logicalHeight - 12);
-  const x = Math.round((logicalWidth - width) * 0.5);
-  const y = Math.round((logicalHeight - height) * 0.5);
+  const layout = mapSelectionLayout(viewport(), maps.length);
+  const { x, y, width, height, rowHeight: mapRowHeight, rowTop: mapRowTop, listWidth } = layout;
   drawTechPanel(x, y, width, height, COLOR.amber);
   bitmapText.draw('select survival field', x + 16, y + 9, COLOR.amber, 2);
   const runIsLive = gameHasEnteredGameplay && snapshot.phase === 'running';
@@ -4046,27 +4022,19 @@ function drawMapSelection(snapshot) {
     : snapshot.phase === 'running' ? 'saved run held // deployment wipes it' : 'choose a flow // fresh seed per run';
   bitmapText.draw(warning, x + 16, y + 27, snapshot.phase === 'running' ? COLOR.red : COLOR.dimMint, 1);
 
-  // The selected field's real contours, base and rift entries sit beside the list when
-  // the panel is wide enough; narrow panels keep the full-width list.
-  const mapRowHeight=height>=242?23:17, mapRowTop=height>=242?40:35;
-  const showThumbnail = width >= 380 && height >= 242;
-  const listWidth = showThumbnail ? 196 : width - 32;
   maps.forEach((map,index) => {
     const selected=map.id===selectedRunMapId;
-    drawMenuButton(`map_${map.id}`,`${index+1} ${map.label}`,x+16,y+mapRowTop+index*mapRowHeight,listWidth,selected?COLOR.mint:COLOR.cyan,()=>selectRunMap(map.id),selected);
+    drawMenuButton(`map_${map.id}`,`${index+1} ${map.label}`,layout.listX,y+mapRowTop+index*mapRowHeight,listWidth,selected?COLOR.mint:COLOR.cyan,()=>selectRunMap(map.id),selected);
   });
   const selected=maps.find((map)=>map.id===selectedRunMapId);
-  if (showThumbnail && selected) {
-    const thumbX = x + 16 + listWidth + 10;
-    const thumbWidth = width - 16 - 4 - thumbX + x;
-    const thumbHeight = Math.min(maps.length * mapRowHeight - 6, height - 66 - 8 - (mapRowTop + 3));
-    drawMapThumbnail(shapes, COLOR, selected, thumbX, y + mapRowTop + 3, thumbWidth, thumbHeight, COLOR.mint);
+  if (layout.thumbnail && selected) {
+    const thumb = layout.thumbnail;
+    drawMapThumbnail(shapes, COLOR, selected, thumb.x, thumb.y, thumb.width, thumb.height, COLOR.mint);
   }
-  const descriptionY = mapRowTop + maps.length * mapRowHeight + 4;
-  if(descriptionY < height - 78) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+descriptionY,COLOR.ink,1);
+  if(layout.descriptionY < height - 78) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+layout.descriptionY,COLOR.ink,1);
   // horde pace row: [-] pace x1.0 [+], with a small tick bar across the allowed range
   const pace = selectedRunPace();
-  const paceY = y + height - 66;
+  const paceY = layout.paceY;
   const paceButton = 18;
   drawMenuButton('pace_down', '-', x + 16, paceY, paceButton, pace > PACE_MIN ? COLOR.cyan : COLOR.dimMint, () => adjustRunPace(-1), false);
   drawMenuButton('pace_up', '+', x + 16 + paceButton + 4 + 92 + 4, paceY, paceButton, pace < PACE_MAX ? COLOR.cyan : COLOR.dimMint, () => adjustRunPace(1), false);
@@ -4083,7 +4051,7 @@ function drawMapSelection(snapshot) {
   }
   bitmapText.draw(pace < DEFAULT_PACE ? 'slower horde' : pace > DEFAULT_PACE ? 'faster horde' : 'designed pace', barX, paceY + 14, COLOR.dimMint, 1);
 
-  const buttonY = y + height - 38;
+  const buttonY = layout.buttonY;
   const backWidth = 76;
   const deployLabel = menuConfirm === 'map_deploy' ? 'confirm wipe // deploy' : `deploy ${selectedRunMapId.replace('map_', 'map ')}`;
   drawMenuButton('map_back', 'back // esc', x + 16, buttonY, backWidth, COLOR.cyan, closeMapSelection);
@@ -4129,21 +4097,15 @@ function drawDevTools(snapshot) {
 }
 
 function drawEscapeMenu(snapshot) {
-  const width = Math.min(escapeMenuPage === 'help' ? 288 : 264, logicalWidth - 20);
   const networkActive = Boolean(session.networkRole);
-  const height = Math.min(escapeMenuPage === 'help' ? 222 : networkActive ? 200 : 179, logicalHeight - 16);
-  const x = Math.round((logicalWidth - width) * 0.5);
-  const y = Math.round((logicalHeight - height) * 0.5);
+  const layout = escapeMenuLayout(viewport(), { page: escapeMenuPage, networkActive });
+  const { x, y, width, height, buttonX, buttonWidth } = layout;
   drawTechPanel(x, y, width, height, COLOR.cyan);
-  shapes.rect(x + 8, y + 8, 2, 22, COLOR.cyan);
-  shapes.rect(x + width - 10, y + 8, 2, 22, COLOR.red);
-  const buttonX = x + 17;
-  const buttonWidth = width - 34;
 
   if (escapeMenuPage === 'help') {
-    bitmapText.draw('field guide', x + 18, y + 10, COLOR.cyan, 2);
+    drawMenuHeader(layout, 'field guide', COLOR.cyan, 'operational reference // local only', COLOR.dimMint);
     const rows = [
-      'hp: red 1 / orange 2 / yellow 3',
+      hostilePaletteLabel('hp'),
       'build in nebulae. each hp pays 1 credit.',
       'upgrades replace a tower permanently.',
       sessionMode === 'test' ? 'b place support // drag towers to move' : '1 place frame // click tower to manage',
@@ -4155,16 +4117,15 @@ function drawEscapeMenu(snapshot) {
       'solo autosaves on this browser.',
       'menus and test field do not pause solo.'
     ];
-    const lineHeight = Math.min(14, Math.floor((height - 69) / rows.length));
-    rows.forEach((line, i) => bitmapText.draw(line, x + 18, y + 34 + i * lineHeight, i === 10 ? COLOR.red : COLOR.ink, 1));
+    const lineHeight = Math.min(14, Math.floor((height - 78) / rows.length));
+    rows.forEach((line, i) => bitmapText.draw(line, x + 18, y + 46 + i * lineHeight, i === 10 ? COLOR.red : COLOR.ink, 1));
     drawMenuButton('help_back', 'back // esc', buttonX, y + height - 29, buttonWidth, COLOR.cyan, closeEscapeOptions, true);
     return;
   }
 
   if (escapeMenuPage === 'options') {
-    bitmapText.draw('gameplay options', x + 18, y + 10, COLOR.cyan, 2);
-    bitmapText.draw('local controls // run still live', x + 18, y + 31, COLOR.red, 1);
-    bitmapText.draw('placement flow', x + 18, y + 44, COLOR.ink, 1);
+    drawMenuHeader(layout, 'gameplay options', COLOR.cyan, 'local controls // run still live', COLOR.red);
+    bitmapText.draw('placement flow', x + 18, y + 46, COLOR.ink, 1);
     drawMenuButton(
       'option_auto_select_frame',
       `1 auto-select frame // ${gameplayPreferences.autoSelectPlacedFrame ? 'on' : 'off'}`,
@@ -4175,37 +4136,59 @@ function drawEscapeMenu(snapshot) {
       toggleAutoSelectPlacedFrame,
       gameplayPreferences.autoSelectPlacedFrame
     );
-    bitmapText.draw('1 place > selected > 1 > 1 assault', x + 18, y + 82, COLOR.mint, 1);
-    bitmapText.draw('off restores click-to-select', x + 18, y + 94, COLOR.dimMint, 1);
-    drawMenuButton('options_back', 'back // esc', buttonX, y + 115, buttonWidth, COLOR.cyan, closeEscapeOptions, true);
-    bitmapText.draw('saved on this browser', x + 18, y + 139, COLOR.ink, 1);
+    bitmapText.draw('1 place > selected > 1 > 1 assault', x + 18, y + 80, COLOR.dimMint, 1);
+    drawTierDivider(buttonX, y + 92, buttonWidth);
+    bitmapText.draw('hostile colours', x + 18, y + 98, COLOR.ink, 1);
+    drawMenuButton(
+      'option_hostile_palette',
+      `2 hostile palette // ${gameplayPreferences.hostilePalette === 'magenta' ? 'magenta' : 'red'}`,
+      buttonX,
+      y + 110,
+      buttonWidth,
+      gameplayPreferences.hostilePalette === 'magenta' ? COLOR.amber : COLOR.mint,
+      toggleHostilePalette,
+      gameplayPreferences.hostilePalette === 'magenta'
+    );
+    bitmapText.draw(gameplayPreferences.hostilePalette === 'magenta' ? 'magenta ramp keeps hostiles apart from green' : 'red ramp // switch if red and green blur', x + 18, y + 132, COLOR.dimMint, 1);
+    drawMenuButton('options_back', 'back // esc', buttonX, y + height - 29, buttonWidth, COLOR.cyan, closeEscapeOptions, true);
+    bitmapText.draw('saved on this browser', x + 18, y + height - 10, COLOR.ink, 1);
     return;
   }
 
-  const compact = height < (networkActive ? 200 : 179);
-  const rowY = (index) => y + (compact ? 43 : 58) + index * (compact ? 18 : 21);
-  bitmapText.draw('command interrupt', x + 18, y + 10, COLOR.cyan, 2);
-  bitmapText.draw('simulation is not paused', x + 18, y + 31, COLOR.red, 1);
+  const { compact, rowY, runTierWidth } = layout;
   const seconds = Math.floor(snapshot.runTick / AUTHORITY_TICK_RATE);
   const runLabel = networkActive ? `coop ${multiplayerState.roomCode?.toLowerCase() || 'link'}` : sessionMode;
-  if (!compact) bitmapText.draw(`${runLabel} // ${seconds}s // ${compactMetric(snapshot.swarm.activeEnemies)} hostiles`, x + 18, y + 43, COLOR.ink, 1);
-  drawMenuButton('escape_resume', 'resume // esc', buttonX, rowY(0), buttonWidth, COLOR.mint, resumeSession, true);
+  if (compact) {
+    bitmapText.draw('command interrupt', x + 18, y + 10, COLOR.cyan, 2);
+    bitmapText.draw('simulation is not paused', x + 18, y + 31, COLOR.red, 1);
+  } else {
+    drawMenuHeader(layout, 'command interrupt', COLOR.cyan, 'simulation is not paused', COLOR.red);
+    shapes.rect(x + 17, y + MENU_HEADER.runLabelY, 1, 7, COLOR.cyan);
+    const runState = networkActive ? `${runLabel} // ${seconds}s` : `${seconds}s // ${compactMetric(snapshot.swarm.activeEnemies)} hostiles`;
+    bitmapText.draw(clippedUiText(runState, runTierWidth - 4), x + 21, y + MENU_HEADER.runLabelY, COLOR.ink, 1);
+    if (layout.thumbnail && currentMap.playable) {
+      const thumb = layout.thumbnail;
+      drawMapThumbnail(shapes, COLOR, currentMap, thumb.x, thumb.y, thumb.width, thumb.height, COLOR.dimMint);
+    }
+  }
+  drawMenuButton('escape_resume', 'resume // esc', buttonX, rowY(0), runTierWidth, COLOR.mint, resumeSession, true);
   if (networkActive) {
     drawMenuButton(
       'escape_coop_status',
       `coop status // ${multiplayerState.roomCode?.toLowerCase() || 'linked'}`,
       buttonX,
       rowY(1),
-      buttonWidth,
+      runTierWidth,
       COLOR.green,
       () => { frontEndScreen = 'coop'; },
       true
     );
   } else if (sessionMode === 'game') {
-    drawMenuButton('escape_restart', 'new run // choose map', buttonX, rowY(1), buttonWidth, COLOR.amber, () => openMapSelection('escape'));
+    drawMenuButton('escape_restart', 'new run // choose map', buttonX, rowY(1), runTierWidth, COLOR.amber, () => openMapSelection('escape'));
   } else {
-    drawMenuButton('escape_test_reset', 'clear test field', buttonX, rowY(1), buttonWidth, COLOR.amber, resetTestFieldFromMenu);
+    drawMenuButton('escape_test_reset', 'clear test field', buttonX, rowY(1), runTierWidth, COLOR.amber, resetTestFieldFromMenu);
   }
+  if (layout.dividerY !== null) drawTierDivider(buttonX, layout.dividerY, buttonWidth, networkActive ? COLOR.green : COLOR.dimMint);
   drawMenuButton('escape_options', 'gameplay options', buttonX, rowY(2), buttonWidth, COLOR.cyan, openEscapeOptions);
   drawMenuButton('escape_help', 'field guide // ?', buttonX, rowY(3), buttonWidth, COLOR.green, () => { escapeMenuPage = 'help'; });
   drawMenuButton('escape_main', 'main menu', buttonX, rowY(4), buttonWidth, COLOR.cyan, returnToMainMenu);
@@ -4219,25 +4202,14 @@ function drawEscapeMenu(snapshot) {
 
 function towerPanelPosition(tower, width, height) {
   const towerPoint = project(tower.x, tower.y);
-  const edge = 5;
-  const minimumY = HUD_TOP_HEIGHT + 4;
-  const maximumY = Math.max(minimumY, hudBottomY - height - 4);
-  const x = Math.max(edge, Math.min(logicalWidth - width - edge, Math.round(towerPoint.x - width * 0.5)));
-  let y = towerPoint.y - height - 14;
-  let above = true;
-  if (y < minimumY) {
-    y = towerPoint.y + 14;
-    above = false;
-  }
-  y = Math.max(minimumY, Math.min(maximumY, Math.round(y)));
-  const connectorX = Math.max(x + 7, Math.min(x + width - 8, towerPoint.x));
+  const { x, y, above, connectorX } = attachedPanelPosition(towerPoint, width, height, viewport(), HUD_TOP_HEIGHT, hudBottomY);
   if (above) shapes.line(towerPoint.x, towerPoint.y - 8, connectorX, y + height, 1, COLOR.dimMint);
   else shapes.line(towerPoint.x, towerPoint.y + 8, connectorX, y, 1, COLOR.dimMint);
   return { x, y };
 }
 
 function openUpgradeMenu(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(snapshot, tower.definitionId);
   if (!definition?.evolutionChoices?.length) {
     setStatus('next branches are not designed yet');
     return;
@@ -4248,7 +4220,7 @@ function openUpgradeMenu(snapshot, tower) {
 
 function relayCandidateAreas(snapshot, tower) {
   if (!tower) return [];
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(snapshot, tower.definitionId);
   const linkRange = Math.max(0, definition?.linkRange || 0);
   if (!isRelayForm(definition?.id) || linkRange <= 0) return [];
   return currentMap.defenseAreas.filter((area) => (
@@ -4264,7 +4236,7 @@ function openRelayTargetMenu(snapshot, tower) {
 }
 
 function weaponView(snapshot, tower) {
-  return snapshot.towerCatalog.find((candidate) => candidate.id === (tower?.echoWeaponId || tower?.definitionId));
+  return catalogDefinition(snapshot, tower?.echoWeaponId || tower?.definitionId);
 }
 
 function openStrikeTargetMenu(snapshot, tower) {
@@ -4381,7 +4353,15 @@ function drawResearchIcon(kind, x, y, color, scale = 1) {
   if (kind === 'blast') { px(3, 0); px(1, 1); px(5, 1); px(0, 3); px(6, 3); px(1, 5); px(5, 5); px(3, 6); px(2, 2, 3, 3); return; }
   if (kind === 'control') { px(3, 0, 1, 7); px(0, 3, 7, 1); px(1, 1); px(5, 1); px(1, 5); px(5, 5); return; }
   if (kind === 'speed') { px(0, 3, 2, 1); px(2, 2); px(2, 4); px(3, 1); px(3, 5); px(4, 0); px(4, 6); return; }
+  if (kind === 'plate') { px(0, 0, 7, 1); px(0, 6, 7, 1); px(0, 1, 1, 5); px(6, 1, 1, 5); px(2, 2, 3, 3); return; }
+  if (kind === 'guide') { px(0, 6); px(1, 5); px(2, 4); px(3, 3); px(4, 2); px(5, 1); px(3, 0, 4, 1); px(6, 0, 1, 4); return; }
+  if (kind === 'economy') { px(1, 0, 5, 1); px(1, 6, 5, 1); px(0, 1, 1, 2); px(6, 4, 1, 2); px(1, 3, 5, 1); px(3, 1, 1, 5); return; }
 }
+
+const REACTOR_ICON_KIND = Object.freeze({
+  damage: 'damage', cadence: 'cadence', range: 'range', velocity: 'speed', blast: 'blast', beam: 'burst',
+  recovery: 'control', coverage: 'targeting', construction: 'economy', lives: 'plate', guidance: 'guide', sustain: 'magazine'
+});
 
 function drawArsenalTree(snapshot,tower) {
   uiHitboxes.length=0;
@@ -4408,11 +4388,14 @@ function drawArsenalTree(snapshot,tower) {
     }
   }
   const detailY=y+238;
-  drawResearchIcon(RESEARCH_ICON_KIND[selected.id],x+12,detailY,COLOR.amber);
-  bitmapText.draw(clippedUiText(selected.label,width-38),x+22,detailY,COLOR.amber,1);
+  shapes.rect(x+12,detailY-2,18,1,COLOR.dimMint);
+  shapes.rect(x+12,detailY+17,18,1,COLOR.dimMint);
+  drawResearchIcon(RESEARCH_ICON_KIND[selected.id],x+14,detailY+1,COLOR.amber,2);
+  bitmapText.draw(clippedUiText(selected.label,width-50),x+34,detailY,COLOR.amber,1);
+  bitmapText.draw(clippedUiText(researchScope(selected.id),width-50),x+34,detailY+9,COLOR.dimMint,1);
   // The tree above already draws a connector line to the prerequisite node; no need to restate it here.
   const lines=wrapResearchText(selected.description,Math.floor((width-24)/6));
-  lines.slice(0,3).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+12+i*9,COLOR.ink,1));
+  lines.slice(0,3).forEach((line,i)=>bitmapText.draw(line,x+12,detailY+22+i*9,COLOR.ink,1));
   const wallet=snapshot.teamEconomy?.credits||0;
   const available=!selected.owned&&!selected.locked&&(snapshot.dev?.infiniteMoney||wallet>=selected.cost);
   const label=selected.owned?'owned':selected.locked?'unlock parent first':`buy // ${compactMetric(selected.cost)} cr // enter`;
@@ -4428,7 +4411,9 @@ function drawReactorTile(id, item, x, y, width, height, color, selected, action)
   shapes.rect(x, y + height - 1, width, 1, rimColor);
   shapes.rect(x, y, selected ? 3 : 1, height, rimColor);
   shapes.rect(x + width - 1, y, 1, height, rimColor);
-  bitmapText.draw(clippedUiText(item.label, width - 8), x + 4, y + 4, selected || hovered ? color : COLOR.ink, 1);
+  const icon = REACTOR_ICON_KIND[item.id];
+  if (icon && height >= 32) drawResearchIcon(icon, x + width - 19, y + 4, selected || hovered ? color : COLOR.dimMint, 2);
+  bitmapText.draw(clippedUiText(item.label, width - (icon && height >= 32 ? 26 : 8)), x + 4, y + 4, selected || hovered ? color : COLOR.ink, 1);
   bitmapText.draw(item.maxRank === null ? `rank ${item.rank}` : `${item.rank}/${item.maxRank}`, x + 4, y + height - 11, COLOR.dimMint, 1);
   const meterX = x + 4, meterY = y + height - 6, meterW = width - 8;
   shapes.rect(meterX, meterY, meterW, 3, COLOR.black);
@@ -4462,9 +4447,10 @@ function drawReactorGrid(snapshot, tower) {
     drawReactorTile(`reactor_tile_${item.id}`, item, tx, ty, tileW, tileH, color, item.id === selected.id, () => { researchSelection = item.id; });
   }
   const detailY = gridTop + rows * (tileH + 4) + 4;
-  bitmapText.draw(clippedUiText(selected.label, width - 24), x + 12, detailY, COLOR.amber, 1);
+  if (REACTOR_ICON_KIND[selected.id]) drawResearchIcon(REACTOR_ICON_KIND[selected.id], x + 12, detailY, COLOR.amber, 2);
+  bitmapText.draw(clippedUiText(selected.label, width - 44), x + 32, detailY, COLOR.amber, 1);
   const lines = wrapResearchText(selected.description, Math.floor((width - 24) / 6));
-  lines.slice(0, 1).forEach((line, i) => bitmapText.draw(line, x + 12, detailY + 11 + i * 9, COLOR.ink, 1));
+  lines.slice(0, 1).forEach((line, i) => bitmapText.draw(line, x + 32, detailY + 9 + i * 9, COLOR.ink, 1));
   const available = selected.cost !== null && (snapshot.dev?.infiniteMoney || wallet >= selected.cost);
   const label = selected.cost === null ? 'rank capped' : `rank ${selected.rank} -> ${selected.rank + 1} // ${compactMetric(selected.cost)} cr // enter`;
   drawMenuButton('reactor_buy', label, x + 12, y + height - 42, width - 24, available ? COLOR.mint : COLOR.red, () => { if (available) purchaseStationItem(tower, selected); }, available);
@@ -4539,7 +4525,8 @@ function drawResearchStation(snapshot, tower) {
     drawMenuButton(`research_select_${item.id}`,`${i+1} ${clippedUiText(item.label, width - 120)}`,x+12,y+48+i*20,width-24,COLOR.mint,() => {
       researchSelection=item.id; researchDetailPage=0;
     },selected?.id===item.id);
-    if (RESEARCH_ICON_KIND[item.id]) drawResearchIcon(RESEARCH_ICON_KIND[item.id],x+width-108,y+53+i*20,COLOR.mint);
+    const rowIcon = RESEARCH_ICON_KIND[item.id] || REACTOR_ICON_KIND[item.id];
+    if (rowIcon) drawResearchIcon(rowIcon,x+width-112,y+50+i*20,selected?.id===item.id?COLOR.mint:COLOR.dimMint,2);
     const wallet = (snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.teamEconomy?.credits || 0);
     bitmapText.draw(cost, x + width - 18 - cost.length * 6, y + 53 + i * 20, item.cost !== null && wallet >= item.cost ? COLOR.amber : COLOR.red, 1);
   }
@@ -4580,7 +4567,7 @@ function economyNetworkSummary(snapshot, tower) {
 }
 
 function towerActionView(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(snapshot, tower.definitionId);
   if (!definition) return null;
   const owner = snapshot.players.find((player) => player.id === tower.ownerId);
   const inspectOnly = false;
@@ -4823,9 +4810,9 @@ function drawUpgradeChoice(snapshot, tower, definition, shortcut, x, y, width, h
 }
 
 function drawTowerUpgradeMenu(snapshot, tower) {
-  const current = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const current = catalogDefinition(snapshot, tower.definitionId);
   const choices = (current?.evolutionChoices || [])
-    .map((id) => snapshot.towerCatalog.find((candidate) => candidate.id === id))
+    .map((id) => catalogDefinition(snapshot, id))
     .filter(Boolean);
   if (!choices.length) {
     towerMenuMode = 'actions';
@@ -4851,7 +4838,7 @@ function drawTowerUpgradeMenu(snapshot, tower) {
 }
 
 function drawRelayTargetMenu(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(snapshot, tower.definitionId);
   const candidates = relayCandidateAreas(snapshot, tower);
   const width = 188;
   const height = 43;
@@ -4865,7 +4852,7 @@ function drawRelayTargetMenu(snapshot, tower) {
 }
 
 function drawStrikeTargetMenu(snapshot, tower) {
-  const definition = snapshot.towerCatalog.find((candidate) => candidate.id === tower.definitionId);
+  const definition = catalogDefinition(snapshot, tower.definitionId);
   const width = 210;
   const height = 43;
   const panel = towerPanelPosition(tower, width, height);
@@ -5055,9 +5042,9 @@ function drawGameHud(snapshot, telemetry) {
   const y = hudBottomY;
   const layout = pixelHudLayout(logicalWidth);
   const selectedTower = snapshot.towers.find((tower) => tower.id === selectedTowerId);
-  const definition = snapshot.towerCatalog.find((item) => item.id === selectedTower?.definitionId);
+  const definition = catalogDefinition(snapshot, selectedTower?.definitionId);
   const input = definition?.control?.input;
-  const bulk = snapshot.towerCatalog.find((item) => item.id === bulkPlacementDefinitionId);
+  const bulk = catalogDefinition(snapshot, bulkPlacementDefinitionId);
   shapes.rect(0, y, logicalWidth, logicalHeight - y, COLOR.black);
   shapes.rect(0, y, logicalWidth, 1, COLOR.dimMint);
   shapes.rect(0, y, 92, 1, COLOR.cyan);
@@ -5214,8 +5201,8 @@ function drawTestHud(snapshot, telemetry) {
 
 function combatStatus(snapshot) {
   const selectedTower = snapshot.towers.find((tower) => tower.id === selectedTowerId);
-  const selectedDefinition = snapshot.towerCatalog.find((definition) => definition.id === selectedTower?.definitionId);
-  const bulkDefinition = snapshot.towerCatalog.find((definition) => definition.id === bulkPlacementDefinitionId);
+  const selectedDefinition = catalogDefinition(snapshot, selectedTower?.definitionId);
+  const bulkDefinition = catalogDefinition(snapshot, bulkPlacementDefinitionId);
   const targetLabel = selectedTower?.targetingMode?.replaceAll('_', ' ') || 'closest';
   const elapsedSeconds = threatSecondsOf(snapshot);
   const nextRift = currentMap.spawnSources.find((source) => source.unlockSeconds > elapsedSeconds);
@@ -5273,26 +5260,30 @@ function drawHud(fps, snapshot) {
     bitmapText.draw('replica held // no fake progress', panelX + 14, panelY + 44, COLOR.dimMint, 1);
   } else if (snapshot.phase === 'defeated') {
     uiHitboxes.length = 0;
-    const width = Math.min(264, logicalWidth - 20);
-    const height = 132;
-    const panelX = Math.round((logicalWidth - width) / 2);
-    const panelY = Math.round((logicalHeight - height) / 2);
+    const layout = defeatLayout(viewport());
+    const { x: panelX, y: panelY, width, height, buttonX, buttonWidth, rows } = layout;
     drawTechPanel(panelX, panelY, width, height, COLOR.red);
     bitmapText.draw('base lost', panelX + 16, panelY + 10, COLOR.red, 2);
-    drawReactorShutdown(snapshot, panelX + width - 46, panelY + 34);
+    drawReactorShutdown(snapshot, layout.reactor.x, layout.reactor.y);
+    if (layout.thumbnail && currentMap.playable) {
+      const thumb = layout.thumbnail;
+      drawMapThumbnail(shapes, COLOR, currentMap, thumb.x, thumb.y, thumb.width, thumb.height, COLOR.dimMint);
+    }
     const seconds = Math.floor(snapshot.runTick / AUTHORITY_TICK_RATE);
     const pace = snapshot.pace || DEFAULT_PACE;
-    bitmapText.draw(`survived ${Math.floor(seconds / 60)}m ${seconds % 60}s${pace === DEFAULT_PACE ? '' : ` // pace x${pace.toFixed(1)}`}`, panelX + 16, panelY + 34, COLOR.ink, 1);
-    bitmapText.draw(`${compactMetric(snapshot.stats.kills)} kills // ${snapshot.towers.length} towers`, panelX + 16, panelY + 48, COLOR.amber, 1);
+    const statsWidth = (layout.thumbnail ? layout.thumbnail.x : layout.reactor.x) - panelX - 20;
+    bitmapText.draw(clippedUiText(`survived ${Math.floor(seconds / 60)}m ${seconds % 60}s${pace === DEFAULT_PACE ? '' : ` // x${pace.toFixed(1)}`}`, statsWidth), panelX + 16, panelY + rows.stats, COLOR.ink, 1);
+    bitmapText.draw(clippedUiText(`${compactMetric(snapshot.stats.kills)} kills // ${snapshot.towers.length} towers`, statsWidth), panelX + 16, panelY + rows.stats + 14, COLOR.amber, 1);
+    bitmapText.draw(clippedUiText(snapshot.mapLabel || currentMap.label, statsWidth), panelX + 16, panelY + rows.stats + 28, COLOR.dimMint, 1);
     if (session.networkRole) {
-      drawMenuButton('defeat_coop', 'room status', panelX + 16, panelY + 68, width - 32, COLOR.cyan, () => { frontEndScreen = 'coop'; });
-      bitmapText.draw('new coop run needs a fresh room', panelX + 16, panelY + 92, COLOR.ink, 1);
+      drawMenuButton('defeat_coop', 'room status', buttonX, panelY + rows.retry, buttonWidth, COLOR.cyan, () => { frontEndScreen = 'coop'; });
+      bitmapText.draw('new coop run needs a fresh room', buttonX, panelY + rows.map + 4, COLOR.ink, 1);
     } else {
-      drawMenuButton('defeat_retry', 'retry same field // r', panelX + 16, panelY + 68, width - 32, COLOR.mint,
+      drawMenuButton('defeat_retry', 'retry same field // r', buttonX, panelY + rows.retry, buttonWidth, COLOR.mint,
         () => { clearTransientUi(); session.send(COMMAND.SESSION_RESTART); }, true);
-      drawMenuButton('defeat_map', 'choose another map', panelX + 16, panelY + 89, width - 32, COLOR.cyan, () => openMapSelection('main'));
+      drawMenuButton('defeat_map', 'choose another map', buttonX, panelY + rows.map, buttonWidth, COLOR.cyan, () => openMapSelection('main'));
     }
-    drawMenuButton('defeat_menu', 'main menu', panelX + 16, panelY + 110, width - 32, COLOR.cyan, returnToMainMenu);
+    drawMenuButton('defeat_menu', 'main menu', buttonX, panelY + rows.menu, buttonWidth, COLOR.cyan, returnToMainMenu);
   } else {
     defeatSeenAt = null;
   }
@@ -5650,7 +5641,7 @@ function frame(now) {
         : autoSelect ? 'frame selected // 1 upgrade // 2 sell' : 'frame placed // press 1 for another');
     } else if (event.type === EVENT.TOWER_EVOLVED && (event.payload.actorPlayerId || event.payload.tower.ownerId) === session.playerId) {
       selectedTowerId = event.payload.tower.id;
-      const evolved = sessionSnapshot.towerCatalog.find((definition) => definition.id === event.payload.tower.definitionId);
+      const evolved = catalogDefinition(sessionSnapshot, event.payload.tower.definitionId);
       towerMenuMode = sessionMode === 'test'
         ? isRelayForm(evolved?.id) ? 'actions' : evolved?.control?.input !== 'none' && evolved?.control?.input ? 'control' : null
         : evolved?.evolutionChoices?.length
@@ -5774,7 +5765,6 @@ function frame(now) {
     drawProjectiles(presentProjectiles(sessionSnapshot.projectiles, dt));
     drawClusterPayloads(sessionSnapshot.attackFields, sessionSnapshot.runTick);
     drawControlFields(sessionSnapshot);
-    drawReworkedCombat(sessionSnapshot);
     drawSelectedBondLinks(sessionSnapshot, enemyFrame);
     shapes.flush();
     gl.enable(gl.BLEND);
