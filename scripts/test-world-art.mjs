@@ -274,17 +274,17 @@ const shapes = Object.fromEntries(['rect', 'line', 'ring'].map((kind) => [kind, 
 const template = getMapDefinition('map_01').defenseAreas[0].shape;
 const areas = ['a', 'b', 'd', 'e', 'pending'].map((id, index) => ({ id, shape: { ...template, x: 60 + index * 80, y: 200 } }));
 const context = vm.createContext({
-  drawCompactTowerSprite, towerScreenBounds, drawBodyBrackets, AUTHORITY_TICK_RATE, DEFAULT_RELAY_PALETTE,
+  drawCompactTowerSprite, towerScreenBounds, drawBodyBrackets, AUTHORITY_TICK_RATE, DEFAULT_RELAY_PALETTE, combatMetrics,
   hashString32, isRelayForm, defenseAreaBounds, shapes, COLOR: colors,
   camera: { x: 0, y: 0, scale: 1 }, logicalWidth: 800, logicalHeight: 600,
-  session: { networkRole: null }, sessionSnapshot: { runTick: 0, towers: [], attackFields: [], towerCatalog: Object.values(TOWER_DEFINITIONS) },
+  session: { networkRole: null, presentation: () => ({ count: 0, state: new Float32Array(0) }) }, sessionSnapshot: { runTick: 0, towers: [], attackFields: [], towerCatalog: Object.values(TOWER_DEFINITIONS) },
   currentMap: { id: 'test', defenseAreas: areas }, reducedNetworkMotion: { matches: false },
   project: (x, y) => ({ x, y }), socketPoint: () => null, sweepPose: () => null,
   selectedTowerId: null, networkPresentation: shown, relayCollapse: null, RELAY_COLLAPSE_SECONDS: 2.2,
   pointer: { x: 0, y: 0 }, unproject: () => origin, findDefenseAreaAt: () => 'b', relayCandidateAreas: () => areas,
   baseDamage: damage, researchWave: null
 });
-vm.runInContext(['reactorShutdownAppearance', 'catalogDefinition', 'drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
+vm.runInContext(['reactorShutdownAppearance', 'catalogDefinition', 'drawReworkedCombat', 'drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
   'drawWorldRing', 'drawAreaTargetBrackets', 'drawRelayTargetOverlay', 'startRelayCollapse', 'drawRelayCollapse',
   'resetWorldPresentation'].map(extract).join('\n'), context);
 const draw = (operation) => { calls.length = 0; operation(); return structuredClone(calls); };
@@ -299,6 +299,20 @@ for (const definitionId of Object.keys(TOWER_DEFINITIONS)) for (const zoom of zo
   }
   context.sessionSnapshot.towers = [];
   assert.deepEqual(draw(() => context.drawTower({ ...tower, id: undefined })), alone, 'placement ghost and retired/sold neighbours keep identical size');
+}
+// Barrage descendants (broadside pellets, flechette nails, cyclone orbits) and the
+// reworked control forms draw from state.turretRework, which is recreated every tick.
+for (const zoom of zooms) {
+  context.camera.scale = zoom;
+  const shots = ['pellet', 'nail', 'splinter', 'orbit', 'embedded', 'freeze_shell', 'gravity_seed', 'chain']
+    .map((type, index) => ({ type, x: 100 + index * 20, y: 100, dx: 1, dy: 0 }));
+  const visuals = [{ type: 'ray', x: 0, y: 0, x2: 50, y2: 0 }, { type: 'gravity', x: 0, y: 0, radius: 40 }];
+  const result = draw(() => context.drawReworkedCombat({ runTick: 5, turretRework: { shots, chains: [], visuals } }));
+  const rectangles = result.filter(({ kind }) => kind === 'rect');
+  assert.ok(rectangles.length >= shots.length + 1, `${zoom}: every reworked shot draws a visible head`);
+  const reach = combatMetrics(zoom).heavy + 2;
+  for (const { args } of rectangles) assert.ok(args[2] <= reach && args[3] <= reach, `${zoom}: reworked heads stay proportional`);
+  assert.equal(draw(() => context.drawReworkedCombat({ runTick: 5 })).length, 0, 'no rework state draws nothing');
 }
 context.camera.scale = 4;
 const linked = { ...topology, towers: topology.towers.map((tower, index) => ({ ...tower, x: 60 + index * 80, y: 200 })),

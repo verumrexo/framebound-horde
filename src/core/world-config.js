@@ -71,7 +71,7 @@ const freezeSpawn = (source) => Object.freeze({
 function freezeMap(map) {
   // Southern-wall maps push perimeter rifts away from the bottom wall and out past the
   // camera-safe bounds. Arena maps author their rifts directly on every edge instead.
-  const relocate = map.playable && !map.arena;
+  const relocate = map.playable && !map.arena && !map.flow;
   return Object.freeze({
     ...map,
     menuLines: Object.freeze([...(map.menuLines || [])]),
@@ -377,18 +377,22 @@ export const MAP_DEFINITIONS = Object.freeze({
     defenseAreas: MAP_03_AREAS,
     spawnSources: perimeterSpawns('continent', MAP_03_SPAWN_ORDER)
   }),
+  // A long east-to-west run: the reactor sits at the western end, rifts open at the far
+  // eastern end, and solid walls close the north and south. Two nebula rows line the
+  // walls with a centre-line chain so every field stays relay-linkable.
   map_04: freezeMap({
     ...COMMON_MAP, id: 'map_04', label: 'map 04 // corridor',
-    menuLines: ['solid side walls', 'linear north-to-south flow'], playable: true,
-    sideWalls: true, bounds: { left: -380, right: 380, top: -1100, bottom: 900 },
-    cameraBounds: { left: -520, right: 520, top: -1100, bottom: 900 },
-    camera: { x: 0, y: 100, scale: 4 },
-    base: { id: 'base_4', x: 0, y: 790, reachRadius: 30 },
+    menuLines: ['4000-unit walled corridor', 'base west // rifts east'], playable: true,
+    walls: ['top', 'bottom'], flow: 'west',
+    bounds: { left: -1300, right: 2700, top: -380, bottom: 380 },
+    cameraBounds: { left: -1440, right: 2840, top: -520, bottom: 520 },
+    camera: { x: -600, y: 0, scale: 4 },
+    base: { id: 'base_4', x: -1200, y: 0, reachRadius: 30 },
     defenseAreas: [
-      ...areasFromSpecs('corridor_', 1, [-650,-300,50,400,650].flatMap((y) => [-245,245].map((x) => [x,y,70,60,0]))),
-      ...areasFromSpecs('corridor_', 11, [[0,-470,70,60,2],[0,230,70,60,4]])
+      ...areasFromSpecs('corridor_', 1, [-1000,-660,-320,20,360,700,1040,1380,1720,2060,2400].flatMap((x, i) => [-245,245].map((y, j) => [x,y,70,60,(i + j) % 5]))),
+      ...areasFromSpecs('corridor_', 23, [-830,-150,530,1210,1890].map((x, i) => [x,0,70,60,(i * 2 + 1) % 5]))
     ],
-    spawnSources: [-180,0,180].map((x,i) => ({id:`corridor_rift_${i}`,x,y:-1000,spreadX:30,spreadY:12,unlockSeconds:i*120}))
+    spawnSources: [-240,0,240].map((y,i) => ({id:`corridor_rift_${i}`,x:2600,y,spreadX:12,spreadY:30,unlockSeconds:i*120}))
   }),
   map_05: freezeMap({
     ...COMMON_MAP, id: 'map_05', label: 'map 05 // shuffled rifts',
@@ -454,20 +458,41 @@ export const MAP_DEFINITIONS = Object.freeze({
 
 export const DEFAULT_MAP_ID = 'map_01';
 
-export function getMapDefinition(mapId = DEFAULT_MAP_ID, seed = 0) {
+// Randomised rifts: a per-run option (or a map default) that seeds every rift position
+// along the map's open edges and shuffles the unlock order, so entries and their timing
+// stay unpredictable. The base wall side never spawns. Deterministic per seed, so every
+// peer and every correction derives the same layout.
+export function riftsRandomized(map, options = {}) {
+  return Boolean(map.randomRifts || options.randomRifts);
+}
+
+export function getMapDefinition(mapId = DEFAULT_MAP_ID, seed = 0, options = {}) {
   const map = MAP_DEFINITIONS[mapId];
   if (!map) throw new Error(`unknown map: ${mapId}`);
-  if (!map.randomRifts) return map;
+  if (!riftsRandomized(map, options)) return map;
   let value = (seed ^ 0xa341316c) >>> 0;
   const random = () => { value = (Math.imul(value,1664525)+1013904223) >>> 0; return value/4294967296; };
+  const { left, right, top, bottom } = map.bounds;
+  const inset = 120;
+  const wallSides = new Set(map.arena ? [] : map.walls || ['bottom']);
+  // Open edges exclude walls; the base side is always closed for flow maps.
+  const edges = ['left', 'right', 'top', 'bottom'].filter((edge) => !wallSides.has(edge)
+    && !(map.flow === 'west' && edge === 'left') && !(map.flow === 'east' && edge === 'right')
+    && !(!map.arena && !map.flow && edge === 'bottom'));
+  const along = (low, high, margin) => low + margin + random() * Math.max(0, high - low - margin * 2);
   const sources = map.spawnSources.map((source) => {
-    const edge = Math.floor(random()*3);
-    const x = edge === 0 ? map.bounds.left+120 : edge === 1 ? map.bounds.right-120
-      : map.bounds.left+120+random()*(map.bounds.right-map.bounds.left-240);
-    const y = edge === 2 ? map.bounds.top+120 : map.bounds.top+120+random()*(map.bounds.bottom-map.bounds.top-360);
-    return Object.freeze({...source,x,y,spreadX:24,spreadY:24});
+    const edge = edges[Math.floor(random() * edges.length)] || 'top';
+    const x = edge === 'left' ? left + inset : edge === 'right' ? right - inset : along(left, right, inset);
+    const y = edge === 'top' ? top + inset : edge === 'bottom' ? bottom - inset : along(top, bottom, inset + (edge !== 'top' && wallSides.has('bottom') ? 240 : 0));
+    return {...source,x,y,spreadX:24,spreadY:24};
   });
-  return Object.freeze({...map,layoutSeed:seed>>>0,spawnSources:Object.freeze(sources)});
+  const unlocks = sources.map((source) => source.unlockSeconds);
+  for (let index = unlocks.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [unlocks[index], unlocks[swap]] = [unlocks[swap], unlocks[index]];
+  }
+  const shuffled = sources.map((source, index) => Object.freeze({ ...source, unlockSeconds: unlocks[index] }));
+  return Object.freeze({...map,layoutSeed:seed>>>0,randomizedRifts:true,spawnSources:Object.freeze(shuffled)});
 }
 
 // Relay eligibility is a static property of the map: two areas are linkable when a
