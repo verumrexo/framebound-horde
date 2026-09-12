@@ -3,7 +3,8 @@ import { drawSweep, drawLaserPulse, sweepPose } from './render/laser-effects.js'
 import { compactMetric } from './core/format.js';
 import { RESEARCH_NODES, researchNode, arsenalChoices, hasResearch, reactorRank, reactorQuote, REACTOR_CATEGORIES } from './core/research.js';
 import { towerPlacementClear, MIN_TOWER_SPACING } from './core/placement.js';
-import { drawCompactTowerSprite, towerScreenBounds } from './render/tower-sprites.js';
+import { drawCompactTowerSprite, drawTowerPortrait, TOWER_PORTRAIT_SIZE, towerScreenBounds } from './render/tower-sprites.js';
+import { BURST_SECONDS, MAX_CONTROL_LINKS, admitBurst, combatMetrics, drawImpactMark, impactColors, impactFamily } from './render/combat-marks.js';
 import { NEBULA_FRAGMENT } from './render/nebula-shader.js';
 import { BaseDamagePresentation, DEFAULT_RELAY_PALETTE, enemyPointSize,
   hashString32, relayNetworkPresentation, riftAppearance } from './render/world-appearance.js';
@@ -2715,6 +2716,7 @@ function presentProjectiles(projectiles, dt) {
 }
 
 function drawProjectiles(projectiles) {
+  const marks = combatMetrics(camera.scale);
   for (const projectile of projectiles) {
     if (['rocket', 'warhead', 'cluster', 'salvo'].includes(projectile.formId)) {
       const speed = Math.hypot(projectile.vx, projectile.vy) || 1;
@@ -2723,15 +2725,19 @@ function drawProjectiles(projectiles) {
       const ember = project(projectile.x - projectile.vx / speed * 13, projectile.y - projectile.vy / speed * 13);
       const head = project(projectile.x, projectile.y);
       shapes.line(tail.x, tail.y, ember.x, ember.y, 1, COLOR.red);
-      shapes.line(ember.x, ember.y, head.x, head.y, 2, COLOR.amber);
-      const headRadiusX = projectile.formId === 'warhead' ? 4 : projectile.formId === 'salvo' ? 2 : 3;
-      shapes.rect(head.x - headRadiusX, head.y - 2, headRadiusX * 2 + 1, 5, COLOR.black);
-      shapes.rect(head.x - headRadiusX + 1, head.y - 1, Math.max(3, headRadiusX * 2 - 1), 3, projectile.formId === 'cluster' ? COLOR.amber : COLOR.red);
-      if (projectile.formId === 'cluster') {
-        shapes.rect(head.x - 3, head.y - 3, 2, 2, COLOR.red);
-        shapes.rect(head.x + 2, head.y + 2, 2, 2, COLOR.red);
+      shapes.line(ember.x, ember.y, head.x, head.y, marks.rail, COLOR.amber);
+      // Heads follow the turret footprint through the zoom instead of a fixed screen slab.
+      const headWidth = projectile.formId === 'warhead' ? marks.heavy + 2 : projectile.formId === 'salvo' ? Math.max(3, marks.heavy - 2) : marks.heavy;
+      const headHeight = headWidth >= 7 ? 3 : 2;
+      const halfWidth = Math.floor(headWidth / 2);
+      const halfHeight = Math.floor(headHeight / 2);
+      shapes.rect(head.x - halfWidth - 1, head.y - halfHeight - 1, headWidth + 2, headHeight + 2, COLOR.black);
+      shapes.rect(head.x - halfWidth, head.y - halfHeight, headWidth, headHeight, projectile.formId === 'cluster' ? COLOR.amber : COLOR.red);
+      if (projectile.formId === 'cluster' && headWidth >= 7) {
+        shapes.rect(head.x - halfWidth, head.y - halfHeight - 1, 2, 1, COLOR.red);
+        shapes.rect(head.x + halfWidth - 1, head.y + halfHeight, 2, 1, COLOR.red);
       }
-      shapes.rect(head.x, head.y, 2, 1, COLOR.mint);
+      shapes.rect(head.x, head.y, Math.min(2, headWidth - 1), 1, COLOR.mint);
       continue;
     }
     if (projectile.formId === 'flechette') {
@@ -2739,7 +2745,7 @@ function drawProjectiles(projectiles) {
       const tail = project(projectile.x - projectile.vx / speed * 34, projectile.y - projectile.vy / speed * 34);
       const head = project(projectile.x, projectile.y);
       shapes.line(tail.x, tail.y, head.x, head.y, 1, COLOR.amber);
-      shapes.rect(head.x - 1, head.y - 1, 3, 3, COLOR.mint);
+      shapes.rect(head.x - Math.floor(marks.shot / 2), head.y - Math.floor(marks.shot / 2), marks.shot, marks.shot, COLOR.mint);
       shapes.rect(tail.x, tail.y, 1, 1, COLOR.cyan);
       continue;
     }
@@ -2764,7 +2770,7 @@ function drawProjectiles(projectiles) {
     const tail = project(projectile.x - projectile.vx / speed * 22, projectile.y - projectile.vy / speed * 22);
     const head = project(projectile.x, projectile.y);
     shapes.line(tail.x, tail.y, head.x, head.y, 1, palette.trail);
-    shapes.rect(head.x - 1, head.y - 1, 3, 3, palette.head);
+    shapes.rect(head.x - Math.floor(marks.shot / 2), head.y - Math.floor(marks.shot / 2), marks.shot, marks.shot, palette.head);
   }
 }
 
@@ -2784,8 +2790,9 @@ function drawClusterPayloads(fields, runTick) {
       field.originY + (field.y - field.originY) * previousProgress
     );
     shapes.line(tail.x, tail.y, head.x, head.y, 1, COLOR.amber);
-    shapes.rect(head.x - 1, head.y - 1, 3, 3, COLOR.red);
-    shapes.rect(head.x, head.y, 1, 1, COLOR.mint);
+    const shot = combatMetrics(camera.scale).shot;
+    shapes.rect(head.x - Math.floor(shot / 2), head.y - Math.floor(shot / 2), shot, shot, COLOR.red);
+    if (shot >= 3) shapes.rect(head.x, head.y, 1, 1, COLOR.mint);
   }
 }
 
@@ -3191,7 +3198,8 @@ function drawAttackFlashes(dt) {
       drawWorldRing(flash.x, flash.y, radius, flash.age < 0.12 ? COLOR.amber : COLOR.red);
       if (radius > 14) drawWorldRing(flash.x, flash.y, Math.max(4, radius - 12), flash.age < 0.08 ? COLOR.mint : COLOR.amber);
       const center = project(flash.x, flash.y);
-      const cross = flash.age < 0.1 ? 4 : 2;
+      const heavy = combatMetrics(camera.scale).heavy;
+      const cross = flash.age < 0.1 ? Math.ceil(heavy / 2) : Math.max(1, Math.floor(heavy / 3));
       shapes.rect(center.x - cross, center.y, cross * 2 + 1, 1, COLOR.red);
       shapes.rect(center.x, center.y - cross, 1, cross * 2 + 1, COLOR.red);
     } else if (flash.kind === 'knot') {
@@ -3305,45 +3313,34 @@ function drawRelayCollapse(snapshot) {
 
 function addImpactBurst(event) {
   if (!Number.isFinite(event.payload.x) || !Number.isFinite(event.payload.y)) return;
-  impactBursts.push({
+  admitBurst(impactBursts, {
     x: event.payload.x,
     y: event.payload.y,
     age: 0,
     seed: event.payload.enemyId || 1,
     sourceFormId: event.payload.sourceFormId,
+    family: impactFamily(event.payload.sourceFormId),
     controlTargets: event.payload.controlTargets || []
-  });
+  }, combatMetrics(camera.scale).burst * camera.scale);
 }
 
 function drawImpactBursts(dt) {
+  const marks = combatMetrics(camera.scale);
   let write = 0;
   for (const burst of impactBursts) {
     burst.age += dt;
-    if (burst.age >= 0.22) continue;
+    if (burst.age >= BURST_SECONDS) continue;
     const p = project(burst.x, burst.y);
-    const radius = 1 + Math.floor(burst.age * 38);
-    const alternate = burst.seed & 1;
-    const anchorFamily = ['tether', 'anchor', 'stasis', 'recall', 'dragnet'].includes(burst.sourceFormId);
-    const knotFamily = ['knot', 'singularity', 'bond', 'braid'].includes(burst.sourceFormId);
-    const color = anchorFamily
-      ? (burst.sourceFormId === 'recall' ? COLOR.amber : burst.age < 0.1 ? COLOR.cyan : COLOR.green)
-      : knotFamily
-        ? (burst.age < 0.1 ? COLOR.green : COLOR.cyan)
-        : (burst.age < 0.08 ? COLOR.mint : COLOR.red);
-    const controlColor = burst.sourceFormId === 'recall'
-      ? COLOR.amber
-      : burst.sourceFormId === 'stasis'
-        ? COLOR.mint
-        : COLOR.cyan;
-    for (const target of burst.controlTargets.slice(0, 4)) {
+    const progress = burst.age / BURST_SECONDS;
+    const colors = impactColors(burst.sourceFormId, COLOR);
+    const color = progress < 0.4 ? colors.early : colors.late;
+    const half = Math.floor(marks.shot / 2);
+    for (const target of burst.controlTargets.slice(0, MAX_CONTROL_LINKS)) {
       const endpoint = project(target.x, target.y);
-      shapes.line(p.x, p.y, endpoint.x, endpoint.y, 1, controlColor);
-      shapes.rect(endpoint.x - 1, endpoint.y - 1, 3, 3, controlColor);
+      shapes.line(p.x, p.y, endpoint.x, endpoint.y, 1, colors.control);
+      shapes.rect(endpoint.x - half, endpoint.y - half, marks.shot, marks.shot, colors.control);
     }
-    shapes.rect(p.x - radius, p.y + alternate, 2, 1, color);
-    shapes.rect(p.x + radius - 1, p.y - alternate, 2, 1, color);
-    shapes.rect(p.x + alternate, p.y - radius, 1, 2, color);
-    shapes.rect(p.x - alternate, p.y + radius - 1, 1, 2, color);
+    drawImpactMark(shapes, burst.family, p, progress, marks.burst, burst.seed & 1, color);
     impactBursts[write++] = burst;
   }
   impactBursts.length = write;
@@ -3768,13 +3765,37 @@ function drawMenuButton(id, label, x, y, width, accent, action, selected = false
   registerHitbox(id, x, y, width, 17, { action });
 }
 
+// Catalog rows carry the real body in a left socket plus a two-line label, so price
+// survives narrow columns instead of being dropped when a single line overflows.
+const CATALOG_ENTRY_HEIGHT = TOWER_PORTRAIT_SIZE + 2;
+const CATALOG_ROW_PITCH = CATALOG_ENTRY_HEIGHT + 2;
+
+function drawCatalogEntry(id, definitionId, title, price, x, y, width, accent, action) {
+  const height = CATALOG_ENTRY_HEIGHT;
+  const hovered = pointInside(x, y, width, height);
+  const live = hovered ? accent : COLOR.dimMint;
+  shapes.rect(x, y, width, height, COLOR.black);
+  shapes.rect(x, y, width, 1, live);
+  shapes.rect(x, y + height - 1, width, 1, live);
+  shapes.rect(x, y, hovered ? 3 : 1, height, live);
+  shapes.rect(x + width - 1, y + 3, 1, height - 6, live);
+  const socketX = x + 4;
+  drawTowerPortrait(shapes, COLOR, socketX, y + 1, definitionId);
+  shapes.rect(socketX + TOWER_PORTRAIT_SIZE + 1, y + 4, 1, height - 8, COLOR.dimMint);
+  const textX = socketX + TOWER_PORTRAIT_SIZE + 5;
+  const textWidth = x + width - 4 - textX;
+  bitmapText.draw(clippedUiText(title, textWidth), textX, y + (price ? 5 : 10), hovered ? accent : COLOR.ink, 1);
+  if (price) bitmapText.draw(clippedUiText(price, textWidth), textX, y + 15, accent === COLOR.red ? COLOR.red : COLOR.amber, 1);
+  registerHitbox(id, x, y, width, height, { action });
+}
+
 function drawBuildCatalog(snapshot) {
   if (!buildCatalogOpen) return;
   const page = BUILD_CATALOG_PAGES[buildCatalogPageId];
   if (!page) return;
   const economy = snapshot.teamEconomy || { credits: 0 };
   const width = Math.min(410, logicalWidth - 12);
-  const height = 120;
+  const height = 22 + page.rows.length * CATALOG_ROW_PITCH + 16;
   const x = Math.round((logicalWidth - width) * 0.5);
   const y = Math.max(HUD_TOP_HEIGHT + 5, hudBottomY - height - 6);
   drawTechPanel(x, y, width, height, COLOR.amber);
@@ -3789,34 +3810,29 @@ function drawBuildCatalog(snapshot) {
   const innerX = x + 7;
   const innerWidth = width - 14;
   page.rows.forEach((row, rowIndex) => {
-    const rowY = y + 22 + rowIndex * 21;
+    const rowY = y + 22 + rowIndex * CATALOG_ROW_PITCH;
     const gap = 3;
-    const buttonWidth = row.length === 1 ? 94 : Math.floor((innerWidth - gap * (row.length - 1)) / row.length);
+    const buttonWidth = row.length === 1 ? 118 : Math.floor((innerWidth - gap * (row.length - 1)) / row.length);
     row.forEach((entry, columnIndex) => {
       const definition = snapshot.towerCatalog.find((candidate) => candidate.id === entry.definitionId);
       const quote = towerBuildQuote(snapshot.towerCatalog, entry.definitionId);
       if (!definition || !quote) return;
       const price = purchaseCost(snapshot, null, quote.cost, { placement: true });
       const affordable = sessionMode === 'test' || snapshot.dev?.infiniteMoney || economy.credits >= price;
-      const pricedLabel = `${entry.key} ${definition.label} ${compactMetric(price)}`;
-      const label = sessionMode === 'test'
-        ? `${entry.key} ${definition.label}`
-        : pricedLabel.length * 6 <= buttonWidth - 8
-          ? pricedLabel
-          : `${entry.key} ${definition.label}`;
-      drawMenuButton(
+      drawCatalogEntry(
         `build_catalog_${entry.definitionId}`,
-        label,
+        entry.definitionId,
+        `${entry.key} ${definition.label}`,
+        sessionMode === 'test' ? '' : `${compactMetric(price)} cr`,
         innerX + columnIndex * (buttonWidth + gap),
         rowY,
         buttonWidth,
         affordable ? towerAccent(entry.definitionId) : COLOR.red,
-        () => selectBulkPlacementDefinition(entry.definitionId),
-        false
+        () => selectBulkPlacementDefinition(entry.definitionId)
       );
       if (!affordable) shapes.rect(innerX + columnIndex * (buttonWidth + gap) + buttonWidth - 4, rowY + 3, 2, 2, COLOR.red);
     });
-    if (row.length === 1) bitmapText.draw('pick once // place repeatedly', innerX + 104, rowY + 5, COLOR.ink, 1);
+    if (row.length === 1) bitmapText.draw('pick once // place repeatedly', innerX + 128, rowY + 10, COLOR.ink, 1);
   });
   bitmapText.draw(
     sessionMode === 'test'
@@ -3825,7 +3841,7 @@ function drawBuildCatalog(snapshot) {
         ? 'pick once // click many // right click ends'
         : 'valid nebula clicks keep building // right click cancels',
     x + 8,
-    y + 108,
+    y + height - 12,
     COLOR.dimMint,
     1
   );
@@ -4783,14 +4799,21 @@ function drawUpgradeChoice(snapshot, tower, definition, shortcut, x, y, width, h
   shapes.rect(x + width - 1, y, 1, height, hovered ? accent : COLOR.dimMint);
   shapes.rect(x + 3, y + 3, hovered ? 12 : 5, 2, accent);
   if (hovered) shapes.rect(x + width - 5, y + 3, 2, 5, accent);
-  bitmapText.draw(`${shortcut} ${definition.label}`, x + 5, y + 9, accent, 1);
-  bitmapText.draw(definition.role || 'branch', x + 5, y + 19, COLOR.ink, 1);
-  bitmapText.draw(`${compactMetric(cost)} cr`, x + 5, y + 30, affordable ? COLOR.amber : COLOR.red, 1);
-  shapes.rect(x + 5, y + 40, width - 10, 1, COLOR.dimMint);
+  // The real body sits in a fixed socket at the top right so the silhouette reads before buying.
+  const socketX = x + width - TOWER_PORTRAIT_SIZE - 5;
+  const socketY = y + 16;
+  shapes.rect(socketX, socketY - 1, TOWER_PORTRAIT_SIZE, 1, COLOR.dimMint);
+  shapes.rect(socketX, socketY + TOWER_PORTRAIT_SIZE, TOWER_PORTRAIT_SIZE, 1, COLOR.dimMint);
+  drawTowerPortrait(shapes, COLOR, socketX, socketY, definition.id);
+  const textWidth = socketX - (x + 5) - 3;
+  bitmapText.draw(clippedUiText(`${shortcut} ${definition.label}`, width - 10), x + 5, y + 8, accent, 1);
+  bitmapText.draw(clippedUiText(definition.role || 'branch', textWidth), x + 5, y + 19, COLOR.ink, 1);
+  bitmapText.draw(clippedUiText(`${compactMetric(cost)} cr`, textWidth), x + 5, y + 29, affordable ? COLOR.amber : COLOR.red, 1);
+  shapes.rect(x + 5, y + 44, width - 10, 1, COLOR.dimMint);
   const maximumCharacters = Math.max(6, Math.floor((width - 10) / 6));
   const lines = wrappedDescription(definition.description, maximumCharacters, 4);
   for (let index = 0; index < lines.length; index += 1) {
-    bitmapText.draw(lines[index], x + 5, y + 46 + index * 10, COLOR.ink, 1);
+    bitmapText.draw(lines[index], x + 5, y + 49 + index * 10, COLOR.ink, 1);
   }
   registerHitbox(`upgrade_choice_${tower.id}_${definition.id}`, x, y, width, height, {
     action: () => {

@@ -240,3 +240,11 @@ the combat hud and tower panel stay in the canvas and use the authored bitmap at
 - the same canvas hud renders during active play, defeat, reconnect, research, and menus. no overlay appears or disappears across game state transitions.
 
 verification: `npm run test:ui` covers pixel layout, narrow reflow, telemetry clipping, panel pagination, tower action routes, and ownership. `npm run check` includes this gate.
+
+## combat marks and body portraits
+
+projectile heads and kill marks now follow the 22-unit turret footprint through the camera instead of fixed screen slabs. `src/render/combat-marks.js` owns the proportions: light heads are 2–5px, explosive heads an odd 3–9px width with a one-pixel black backing, and the kill mark radius is 3–8px, all derived from the on-screen turret diameter with floors matching the two-pixel enemy minimum. trails keep their world lengths.
+
+each weapon family has one compact rectangle-only kill mark: ballistic ticks move outward, explosives expand a hollow square, beams split two bars apart, control forms close four corner brackets, gravity forms collapse ticks inward, and displacement forms widen a single bar. colours keep the earlier family logic. dense combat absorbs same-family kills landing within one burst radius of a mark younger than 70ms, caps live marks at 48 by recycling the oldest, and draws at most three control-link lines per mark. nothing here changes simulation, targeting, or authority.
+
+upgrade cards and the tower catalog show the real body as a static 1× portrait inside a fixed 25px socket (`drawTowerPortrait` in `tower-sprites.js`), centred on the measured bounds; no fractional scaling and no animation. catalog rows grew to 27px with a two-line label so shortcut, name, and price stay readable in four-column rows. `npm run test:art` checks every portrait fits its socket and `npm run test:visual` checks mark proportions, family distinctness, merge and cap behaviour.
