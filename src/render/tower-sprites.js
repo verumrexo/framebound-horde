@@ -1,4 +1,43 @@
 import { NETWORK_DESCENDANT_IDS } from '../core/network-descendants.js';
+
+export const TOWER_WORLD_DIAMETER = 22;
+const metricsByForm = new Map();
+const boundsPalette = Object.fromEntries(['black', 'amber', 'mint', 'cyan', 'green', 'red', 'dimMint']
+  .map((key) => [key, [1, 1, 1, 1]]));
+
+export function towerSpriteMetrics(definitionId) {
+  if (metricsByForm.has(definitionId)) return metricsByForm.get(definitionId);
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity, radius = 0;
+  const shapes = { rect(x, y, w, h) {
+    left = Math.min(left, x); top = Math.min(top, y);
+    right = Math.max(right, x + w); bottom = Math.max(bottom, y + h);
+    for (const px of [x, x + w]) for (const py of [y, y + h]) radius = Math.max(radius, Math.hypot(px, py));
+  } };
+  const sample = (context) => drawTowerSprite(shapes, boundsPalette, { x: 0, y: 0 }, { definitionId }, null, context);
+  sample({ runTick: 0, sweepPhase: null, controlActive: false });
+  // Covers every rail stop: cyclone's 18-tick cycle, metronome's 40-tick cycle,
+  // and all 13 rounded sweeper positions, including both endpoints.
+  for (let tick = 0; tick <= 40; tick += 1) sample({ runTick: tick, sweepPhase: tick / 40, controlActive: true });
+  const metrics = Object.freeze({ left, top, right, bottom, radius, worldScale: TOWER_WORLD_DIAMETER / (2 * radius) });
+  metricsByForm.set(definitionId, metrics);
+  return metrics;
+}
+
+export function towerScreenBounds(definitionId, viewScale) {
+  const metrics = towerSpriteMetrics(definitionId);
+  const scale = metrics.worldScale / viewScale;
+  return { left: metrics.left * scale, top: metrics.top * scale,
+    right: metrics.right * scale, bottom: metrics.bottom * scale, scale };
+}
+
+export function drawCompactTowerSprite(shapes, colors, p, tower, viewScale, override = null, context = {}) {
+  const bounds = towerScreenBounds(tower.definitionId, viewScale);
+  drawTowerSprite({ rect: (x, y, w, h, color) => shapes.rect(
+    p.x + x * bounds.scale, p.y + y * bounds.scale, w * bounds.scale, h * bounds.scale, color
+  ) }, colors, { x: 0, y: 0 }, tower, override, context);
+  return bounds;
+}
+
 // Tower bodies use rectangles exclusively. World-space links and combat geometry live in main.
 // Preserve the frame / assault / tether / network vocabulary: square housing,
 // inset core, straight rails and blunt mechanical attachments. Never rotate a body.
@@ -464,4 +503,3 @@ export function drawTowerSprite(shapes, COLOR, p, tower, override = null, contex
   shapes.rect(p.x - 1, p.y - 1, 3, 3, core);
   shapes.rect(p.x, p.y - 6, 1, 3, palette.amber);
 }
-
