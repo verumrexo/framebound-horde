@@ -11,6 +11,9 @@ import { drawCompactTowerSprite, towerScreenBounds, towerSpriteMetrics, TOWER_WO
 import { BASE_HIT_TICKS, BaseDamagePresentation, DEFAULT_RELAY_PALETTE, baseAppearance, enemyPointSize,
   hashString32, nebulaPalette, networkHueFromId, relayNetworkPresentation, riftAppearance } from '../src/render/world-appearance.js';
 import { drawBaseSprite, drawBodyBrackets, drawRiftSprite, RIFT_BOUNDS } from '../src/render/world-sprites.js';
+import { ASSEMBLY_SIZE, ASSEMBLY_TICKS, AssemblyPresentation, drawAssemblyFrame } from '../src/render/assembly.js';
+import { drawMapThumbnail, mapThumbnail } from '../src/render/map-thumbnail.js';
+import { playableMaps } from '../src/core/world-config.js';
 import { BURST_MERGE_SECONDS, BURST_SECONDS, MAX_CONTROL_LINKS, MAX_LIVE_BURSTS, admitBurst, combatMetrics,
   drawImpactMark, impactColors, impactFamily } from '../src/render/combat-marks.js';
 
@@ -149,6 +152,60 @@ assert.equal(flood.length, MAX_LIVE_BURSTS, 'dense combat is capped');
 assert.ok(flood.every((entry) => entry.age < BURST_SECONDS));
 assert.ok(MAX_CONTROL_LINKS <= 4 && BURST_SECONDS <= 0.25);
 
+// Construction reveal: fixed screen size, simulation-tick driven, never a gameplay input.
+const assembly = new AssemblyPresentation();
+assembly.begin({ id: 't1', x: 10, y: 20 }, 'placed', 100);
+assembly.begin({ id: 't1', x: 10, y: 20 }, 'evolved', 104);
+assert.equal(assembly.items.length, 1, 'evolution replaces the placement frame of the same tower');
+assembly.begin({ id: 't2', x: 50, y: 20 }, 'placed', 100);
+assert.equal(assembly.frames(99).length, 0, 'frames from a later session start are ignored');
+assert.equal(assembly.items.length, 0);
+assembly.begin({ id: 't1', x: 10, y: 20 }, 'evolved', 104);
+assembly.begin({ id: 't2', x: 50, y: 20 }, 'placed', 100);
+const held = assembly.frames(110);
+assert.deepEqual(assembly.frames(110), held, 'paused ticks freeze the reveal');
+assert.equal(held.length, 2);
+assert.equal(assembly.frames(104 + ASSEMBLY_TICKS).length, 0, 'frames expire by ticks');
+assert.equal(assembly.items.length, 0);
+assembly.begin({ id: 't3', x: 0, y: 0 }, 'placed', 0);
+for (const kind of ['placed', 'evolved']) for (let step = 0; step < ASSEMBLY_TICKS; step += 1) {
+  const rectangles = capture((shapes) => drawAssemblyFrame(shapes, colors, origin, { kind, step }));
+  for (const [x, y, w, h] of rectangles) {
+    assert.ok([x, y, w, h].every(Number.isInteger));
+    assert.ok(x >= -8 && y >= -8 && x + w <= 9 && y + h <= 9, `${kind}/${step}: frame leaves its ${ASSEMBLY_SIZE}px box`);
+  }
+}
+const still = capture((shapes) => drawAssemblyFrame(shapes, colors, origin, { kind: 'placed', step: null }));
+assert.deepEqual(assembly.frames(5, true).map((frame) => frame.step), [null], 'reduced motion holds a static frame');
+assert.ok(still.length < capture((shapes) => drawAssemblyFrame(shapes, colors, origin, { kind: 'placed', step: 5 })).length);
+assembly.reset();
+assert.equal(assembly.items.length, 0);
+
+// Map thumbnails come from the real field boundary, not rectangles, and show the base
+// and every distinct rift entry inside a bounded frame.
+for (const map of playableMaps()) {
+  const thumb = mapThumbnail(map, 188, 155);
+  assert.equal(mapThumbnail(map, 188, 155), thumb, 'thumbnails are cached per map and size');
+  assert.ok(thumb.frameWidth <= 188 && thumb.frameHeight <= 155);
+  assert.ok(thumb.interior.length > 20 && thumb.edge.length > thumb.interior.length, `${map.id}: contour detail missing`);
+  for (const [px, py, w] of [...thumb.interior, ...thumb.edge]) assert.ok(px >= 0 && py >= 0 && px + w <= thumb.frameWidth && py < thumb.frameHeight);
+  assert.ok(thumb.rifts.length >= Math.min(3, map.spawnSources.length) && thumb.rifts.length <= map.spawnSources.length);
+  for (const point of [thumb.base, ...thumb.rifts]) assert.ok(point.x >= 1 && point.y >= 1 && point.x < thumb.frameWidth - 1 && point.y < thumb.frameHeight - 1);
+  assert.equal(thumb.arena, Boolean(map.arena));
+  const inside = new Set();
+  for (const [px, py, w] of [...thumb.interior, ...thumb.edge]) for (let i = 0; i < w; i += 1) inside.add(`${px + i},${py}`);
+  const visible = map.defenseAreas.filter((area) => area.shape.x > map.cameraBounds.left + 40 && area.shape.x < map.cameraBounds.right - 40
+    && area.shape.y > map.cameraBounds.top + 40 && area.shape.y < map.cameraBounds.bottom - 40);
+  const centred = visible.filter((area) => {
+    const px = Math.floor((area.shape.x - map.cameraBounds.left) / (map.cameraBounds.right - map.cameraBounds.left) * thumb.frameWidth);
+    const py = Math.floor((area.shape.y - map.cameraBounds.top) / (map.cameraBounds.bottom - map.cameraBounds.top) * thumb.frameHeight);
+    return inside.has(`${px},${py}`);
+  });
+  assert.ok(centred.length >= visible.length * 0.9, `${map.id}: field centres fall outside the drawn contour`);
+  const rectangles = capture((shapes) => drawMapThumbnail(shapes, colors, map, 0, 0, 188, 155, colors.mint));
+  for (const [x, y, w, h] of rectangles) assert.ok(x >= -2 && y >= -2 && x + w <= 190 && y + h <= 157, `${map.id}: thumbnail paints outside its box`);
+}
+
 const source = { id: 'rift-a', unlockSeconds: 100 };
 const snapshot = { runTick: 100 * AUTHORITY_TICK_RATE, pace: 1, swarm: { threatSeconds: 100 } };
 assert.equal(riftAppearance({ ...snapshot, swarm: { threatSeconds: 89 } }, source).visible, false);
@@ -227,7 +284,7 @@ const context = vm.createContext({
   pointer: { x: 0, y: 0 }, unproject: () => origin, findDefenseAreaAt: () => 'b', relayCandidateAreas: () => areas,
   baseDamage: damage, researchWave: null
 });
-vm.runInContext(['drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
+vm.runInContext(['reactorShutdownAppearance', 'drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
   'drawWorldRing', 'drawAreaTargetBrackets', 'drawRelayTargetOverlay', 'startRelayCollapse', 'drawRelayCollapse',
   'resetWorldPresentation'].map(extract).join('\n'), context);
 const draw = (operation) => { calls.length = 0; operation(); return structuredClone(calls); };
@@ -262,10 +319,20 @@ for (const runTick of [0, 25, 55, 90, 120]) {
 }
 context.reducedNetworkMotion.matches = true;
 assert.deepEqual(draw(() => context.drawRelayCollapse({ runTick: 120 })), []);
+for (const [age, state] of [[0, 'healthy'], [0.2, 'damaged'], [0.35, 'critical'], [0.6, 'destroyed'], [Infinity, 'destroyed']]) {
+  const appearance = context.reactorShutdownAppearance({}, age);
+  assert.equal(appearance.state, state);
+  capture((shapes) => drawBaseSprite(shapes, colors, origin, appearance));
+}
 context.researchWave = { startedTick: 0 };
+context.assembly = assembly;
+context.defeatSeenAt = 5;
+assembly.begin({ id: 't9', x: 0, y: 0 }, 'placed', 0);
 context.resetWorldPresentation();
+assert.equal(assembly.items.length, 0, 'replacement sessions clear pending reveals');
+assert.equal(context.defeatSeenAt, null);
 assert.equal(context.relayCollapse, null);
 assert.equal(context.researchWave, null);
 assert.equal(damage.hitTick, null);
 
-console.log('world art: fixed tower bounds, combat mark proportions, relay palettes/routes, rift states, base damage, reduced motion and pause passed');
+console.log('world art: fixed tower bounds, combat mark proportions, assembly reveal, map contours, reactor shutdown, relay palettes/routes, rift states, base damage, reduced motion and pause passed');
