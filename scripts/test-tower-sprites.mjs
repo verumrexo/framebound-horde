@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { drawTowerSprite } from '../src/render/tower-sprites.js';
+import { drawTowerPortrait, drawTowerSprite, TOWER_PORTRAIT_SIZE } from '../src/render/tower-sprites.js';
 import { TOWER_DEFINITIONS, validateTowerCatalog } from '../src/core/tower-catalog.js';
 
 const colors = Object.fromEntries(['black', 'amber', 'mint', 'cyan', 'green', 'red', 'ink', 'dimMint'].map(key => [key, key]));
@@ -28,4 +28,22 @@ for (const id of Object.keys(TOWER_DEFINITIONS)) {
     }
   }
 }
+// Catalog and upgrade portraits: every body fits its fixed socket at 1x, static and integer.
+const portraits = new Map();
+for (const id of Object.keys(TOWER_DEFINITIONS)) {
+  const rects = [];
+  drawTowerPortrait({ rect: (...args) => rects.push(args) }, colors, 40, 60, id);
+  assert.ok(rects.length >= 5, `${id}: portrait missing body`);
+  for (const [x, y, width, height] of rects) {
+    assert.ok([x, y, width, height].every(Number.isInteger), `${id}: portrait off the pixel grid`);
+    assert.ok(x >= 40 && y >= 60 && x + width <= 40 + TOWER_PORTRAIT_SIZE && y + height <= 60 + TOWER_PORTRAIT_SIZE, `${id}: portrait leaves its socket`);
+  }
+  const again = [];
+  drawTowerPortrait({ rect: (...args) => again.push(args) }, colors, 40, 60, id);
+  assert.deepEqual(again, rects, `${id}: portraits are static`);
+  const signature = JSON.stringify(rects);
+  assert.ok(!portraits.has(signature), `${id}: portrait duplicates ${portraits.get(signature)}`);
+  portraits.set(signature, id);
+}
+console.log(`${portraits.size} portraits fit the ${TOWER_PORTRAIT_SIZE}px socket`);
 console.log(`${signatures.size} distinct tower sprites: rectangle-only geometry, bounds, animation phases and placement tints passed`);

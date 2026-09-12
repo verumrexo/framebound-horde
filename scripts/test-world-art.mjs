@@ -11,6 +11,8 @@ import { drawCompactTowerSprite, towerScreenBounds, towerSpriteMetrics, TOWER_WO
 import { BASE_HIT_TICKS, BaseDamagePresentation, DEFAULT_RELAY_PALETTE, baseAppearance, enemyPointSize,
   hashString32, nebulaPalette, networkHueFromId, relayNetworkPresentation, riftAppearance } from '../src/render/world-appearance.js';
 import { drawBaseSprite, drawBodyBrackets, drawRiftSprite, RIFT_BOUNDS } from '../src/render/world-sprites.js';
+import { BURST_MERGE_SECONDS, BURST_SECONDS, MAX_CONTROL_LINKS, MAX_LIVE_BURSTS, admitBurst, combatMetrics,
+  drawImpactMark, impactColors, impactFamily } from '../src/render/combat-marks.js';
 
 const colors = {
   black: [1 / 255, 6 / 255, 7 / 255, 1], cyan: [53 / 255, 242 / 255, 1, 1],
@@ -85,6 +87,67 @@ for (const zoom of zooms) for (const units of [1, 2, 3, 4, 5, 100]) {
   assert.equal(size, oldSize * 0.8);
   if (units > 1) assert.ok(size > enemyPointSize(zoom, 1));
 }
+
+// Projectile heads and kill marks follow the turret footprint through every zoom and
+// never exceed it by much; the floors track the two-pixel enemy minimum.
+let previous = null;
+for (const zoom of zooms) {
+  const marks = combatMetrics(zoom);
+  assert.equal(combatMetrics(zoom), marks, 'metrics are cached per zoom');
+  assert.ok(marks.shot >= 2 && marks.shot <= 5 && Number.isInteger(marks.shot));
+  assert.ok(marks.heavy >= 3 && marks.heavy <= 9 && marks.heavy % 2 === 1);
+  assert.ok(marks.burst >= 3 && marks.burst <= 8 && Number.isInteger(marks.burst));
+  assert.ok(marks.heavy + 2 <= Math.max(5, marks.tower + 1), `${zoom}: warhead head wider than its turret`);
+  assert.ok(marks.burst * 2 + 1 <= Math.max(7, marks.tower * 1.5), `${zoom}: kill mark dwarfs the turret`);
+  assert.ok(marks.shot <= Math.max(2, enemyPointSize(zoom) + 1), `${zoom}: light shot outgrows enemies`);
+  if (previous) for (const key of ['shot', 'heavy', 'burst', 'rail']) assert.ok(marks[key] <= previous[key], `${key} must not grow when zooming out`);
+  previous = marks;
+}
+assert.equal(combatMetrics(4).heavy, 3);
+assert.equal(combatMetrics(1).heavy, 9);
+const families = new Map();
+for (const definitionId of Object.keys(TOWER_DEFINITIONS)) {
+  const family = impactFamily(definitionId);
+  if (!families.has(family)) families.set(family, definitionId);
+  const palette = impactColors(definitionId, colors);
+  assert.ok(palette.early && palette.late && palette.control);
+}
+assert.deepEqual([...families.keys()].sort(), ['ballistic', 'beam', 'collapse', 'explosive', 'lock', 'shove']);
+assert.equal(impactFamily('unknown'), 'ballistic');
+for (const zoom of zooms) {
+  const reach = combatMetrics(zoom).burst;
+  const signatures = new Map();
+  for (const [family] of families) {
+    for (const progress of [0, 0.25, 0.5, 0.75, 0.999]) for (const alternate of [0, 1]) {
+      const rectangles = capture((shapes) => drawImpactMark(shapes, family, origin, progress, reach, alternate, colors.red));
+      assert.ok(rectangles.length <= 8, `${family}: too many rectangles`);
+      for (const [x, y, w, h] of rectangles) {
+        assert.ok([x, y, w, h].every(Number.isInteger));
+        assert.ok(x >= -reach && y >= -reach && x + w <= reach + 1 && y + h <= reach + 1, `${family}/${zoom}: mark exceeds burst radius`);
+      }
+    }
+    const signature = JSON.stringify(capture((shapes) => drawImpactMark(shapes, family, origin, 0.5, reach, 0, colors.red)));
+    assert.ok(!signatures.has(signature), `${family} looks like ${signatures.get(signature)}`);
+    signatures.set(family, signature);
+  }
+}
+const burst = (x, formId, age = 0) => ({ x, y: 0, age, seed: 1, sourceFormId: formId, family: impactFamily(formId), controlTargets: [] });
+const live = [];
+admitBurst(live, burst(0, 'assault'), 12);
+admitBurst(live, burst(5, 'assault'), 12);
+assert.equal(live.length, 1, 'same-family kills at one place share a mark');
+admitBurst(live, burst(5, 'laser'), 12);
+assert.equal(live.length, 2, 'different families keep distinct marks');
+live[0].age = BURST_MERGE_SECONDS + 0.01;
+admitBurst(live, burst(5, 'assault'), 12);
+assert.equal(live.length, 3, 'older marks stop absorbing');
+admitBurst(live, burst(40, 'assault'), 12);
+assert.equal(live.length, 4, 'distance beyond one burst radius keeps a new mark');
+const flood = [];
+for (let index = 0; index < MAX_LIVE_BURSTS * 3; index += 1) admitBurst(flood, burst(index * 100, 'rocket', index * 0.001), 12);
+assert.equal(flood.length, MAX_LIVE_BURSTS, 'dense combat is capped');
+assert.ok(flood.every((entry) => entry.age < BURST_SECONDS));
+assert.ok(MAX_CONTROL_LINKS <= 4 && BURST_SECONDS <= 0.25);
 
 const source = { id: 'rift-a', unlockSeconds: 100 };
 const snapshot = { runTick: 100 * AUTHORITY_TICK_RATE, pace: 1, swarm: { threatSeconds: 100 } };
@@ -205,4 +268,4 @@ assert.equal(context.relayCollapse, null);
 assert.equal(context.researchWave, null);
 assert.equal(damage.hitTick, null);
 
-console.log('world art: fixed tower bounds, relay palettes/routes, rift states, base damage, reduced motion and pause passed');
+console.log('world art: fixed tower bounds, combat mark proportions, relay palettes/routes, rift states, base damage, reduced motion and pause passed');

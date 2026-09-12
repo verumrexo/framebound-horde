@@ -30,6 +30,20 @@ export function towerScreenBounds(definitionId, viewScale) {
     right: metrics.right * scale, bottom: metrics.bottom * scale, scale };
 }
 
+// Catalog and upgrade portraits: the real body at 1x authored pixels, static pose,
+// centred on its measured bounds inside a fixed square socket. Integer scale only.
+export const TOWER_PORTRAIT_SIZE = 25;
+
+export function drawTowerPortrait(shapes, colors, x, y, definitionId, size = TOWER_PORTRAIT_SIZE) {
+  const metrics = towerSpriteMetrics(definitionId);
+  const origin = {
+    x: x + Math.floor(size / 2) - Math.round((metrics.left + metrics.right) / 2),
+    y: y + Math.floor(size / 2) - Math.round((metrics.top + metrics.bottom) / 2)
+  };
+  drawTowerSprite(shapes, colors, origin, { definitionId }, null, { runTick: 0, sweepPhase: null, controlActive: false });
+  return origin;
+}
+
 export function drawCompactTowerSprite(shapes, colors, p, tower, viewScale, override = null, context = {}) {
   const bounds = towerScreenBounds(tower.definitionId, viewScale);
   drawTowerSprite({ rect: (x, y, w, h, color) => shapes.rect(
