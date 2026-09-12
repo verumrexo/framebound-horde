@@ -4,6 +4,8 @@ import { compactMetric } from './core/format.js';
 import { RESEARCH_NODES, researchNode, arsenalChoices, hasResearch, reactorRank, reactorQuote, REACTOR_CATEGORIES } from './core/research.js';
 import { towerPlacementClear, MIN_TOWER_SPACING } from './core/placement.js';
 import { drawCompactTowerSprite, drawTowerPortrait, TOWER_PORTRAIT_SIZE, towerScreenBounds } from './render/tower-sprites.js';
+import { AssemblyPresentation, drawAssemblyFrame } from './render/assembly.js';
+import { drawMapThumbnail, mapThumbnail } from './render/map-thumbnail.js';
 import { BURST_SECONDS, MAX_CONTROL_LINKS, admitBurst, combatMetrics, drawImpactMark, impactColors, impactFamily } from './render/combat-marks.js';
 import { NEBULA_FRAGMENT } from './render/nebula-shader.js';
 import { BaseDamagePresentation, DEFAULT_RELAY_PALETTE, enemyPointSize,
@@ -975,6 +977,8 @@ let researchWave = null;
 let devToolsOpen = false;
 let networkPresentation = new Map();
 const baseDamage = new BaseDamagePresentation();
+const assembly = new AssemblyPresentation();
+let defeatSeenAt = null;
 const reducedNetworkMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const enemyRenderer = new EnemyRenderer(PROTOTYPE_SESSION_CONFIG.swarm.initialCapacity);
 const shapes = new ShapeBatch();
@@ -1550,8 +1554,10 @@ document.addEventListener('visibilitychange', () => {
 
 function resetWorldPresentation() {
   baseDamage.reset();
+  assembly.reset();
   researchWave = null;
   relayCollapse = null;
+  defeatSeenAt = null;
 }
 
 function activateSession(mode) {
@@ -2685,6 +2691,14 @@ function drawNetworkLinks(snapshot) {
 function drawBase(snapshot) {
   const p = project(snapshot.base.x, snapshot.base.y);
   drawBaseSprite(shapes, COLOR, p, baseDamage.appearance(snapshot, reducedNetworkMotion.matches));
+}
+
+function drawAssembly(snapshot) {
+  for (const frame of assembly.frames(snapshot.runTick, reducedNetworkMotion.matches)) {
+    const tower = snapshot.towers.find((candidate) => candidate.id === frame.towerId);
+    if (!tower) continue;
+    drawAssemblyFrame(shapes, COLOR, project(tower.x, tower.y), frame);
+  }
 }
 
 function presentProjectiles(projectiles, dt) {
@@ -3859,21 +3873,26 @@ function mainMenuRunLabel(snapshot) {
 
 function drawMainMenu(snapshot) {
   const width = Math.min(330, logicalWidth - 20);
-  const height = Math.min(176, logicalHeight - 12);
+  const height = Math.min(184, logicalHeight - 12);
   const x = Math.round((logicalWidth - width) * 0.5);
   const y = Math.round((logicalHeight - height) * 0.5);
   drawTechPanel(x, y, width, height, COLOR.mint);
+  // Header: brand at 2x with hard bookends, a machine sub-line, then an interrupted rule
+  // carrying one amber scar. Telemetry and controls hang below in two grouped tiers.
   shapes.rect(x + 8, y + 8, 3, 25, COLOR.mint);
   shapes.rect(x + width - 11, y + 8, 3, 25, COLOR.red);
-  shapes.rect(x + 16, y + 40, width - 32, 1, COLOR.dimMint);
   bitmapText.draw('framebound', x + 20, y + 10, COLOR.mint, 2);
   bitmapText.draw('// horde', x + 130, y + 10, COLOR.red, 2);
-  bitmapText.draw('wip command deck', x + 20, y + 29, COLOR.ink, 1);
-  bitmapText.draw(mainMenuRunLabel(snapshot), x + 17, y + 48, gameRestorePending ? COLOR.amber : COLOR.cyan, 1);
+  bitmapText.draw('survival telemetry // mechanical void', x + 20, y + 29, COLOR.dimMint, 1);
+  shapes.rect(x + 16, y + 40, 22, 1, COLOR.amber);
+  shapes.rect(x + 42, y + 40, width - 58, 1, COLOR.dimMint);
+  shapes.rect(x + width - 20, y + 40, 4, 1, COLOR.amber);
+  shapes.rect(x + 17, y + 48, 1, 7, gameRestorePending ? COLOR.amber : COLOR.cyan);
+  bitmapText.draw(mainMenuRunLabel(snapshot), x + 21, y + 48, gameRestorePending ? COLOR.amber : COLOR.cyan, 1);
   if (gameHasEnteredGameplay && snapshot.phase === 'running') {
-    bitmapText.draw('warning // the horde is still live', x + 17, y + 59, COLOR.red, 1);
+    bitmapText.draw('warning // the horde is still live', x + 21, y + 59, COLOR.red, 1);
   } else {
-    bitmapText.draw('solo survival // difficulty climbs', x + 17, y + 59, COLOR.dimMint, 1);
+    bitmapText.draw('solo survival // difficulty climbs', x + 21, y + 59, COLOR.dimMint, 1);
   }
 
   const buttonX = x + 17;
@@ -3883,13 +3902,17 @@ function drawMainMenu(snapshot) {
   const primaryLabel = snapshot.phase === 'running' ? 'continue run' : networkActive ? 'coop // room status' : snapshot.phase === 'defeated' ? 'choose map // retry' : 'solo // choose map';
   drawMenuButton('menu_continue', primaryLabel, buttonX, y + 70, buttonWidth, COLOR.mint, startOrContinueGame, true);
   drawMenuButton('menu_restart', 'new solo run // choose map', buttonX, y + 91, buttonWidth, COLOR.amber, openNewSoloRun);
+  // Interrupted divider between the run tier and the session tier.
+  shapes.rect(buttonX, y + 112, 10, 1, COLOR.dimMint);
+  shapes.rect(buttonX + 14, y + 112, buttonWidth - 28, 1, COLOR.dimMint);
+  shapes.rect(buttonX + buttonWidth - 10, y + 112, 10, 1, networkActive ? COLOR.green : COLOR.dimMint);
   const gap = 6;
   const halfWidth = Math.floor((buttonWidth - gap) * 0.5);
   drawMenuButton(
     'menu_coop_host',
     networkActive ? `coop ${multiplayerState.roomCode?.toLowerCase() || 'status'}` : 'h host coop',
     buttonX,
-    y + 112,
+    y + 118,
     halfWidth,
     COLOR.green,
     networkActive ? () => { frontEndScreen = 'coop'; } : beginHostingCoop
@@ -3898,14 +3921,14 @@ function drawMainMenu(snapshot) {
     'menu_coop_join',
     networkActive ? 'leave coop' : 'j join code',
     buttonX + halfWidth + gap,
-    y + 112,
+    y + 118,
     buttonWidth - halfWidth - gap,
     networkActive ? COLOR.red : COLOR.cyan,
     networkActive ? () => cancelMultiplayer(true) : openJoinCoop
   );
-  drawMenuButton('menu_test', 'test field // t', buttonX, y + 133, buttonWidth, COLOR.cyan, enterTestField);
-  bitmapText.draw(networkActive ? 'p2p session active' : 'coop // 2-4 pilots // p2p beta', x + 17, y + 157, networkActive ? COLOR.green : COLOR.dimMint, 1);
-  bitmapText.draw('enter selects', x + width - 85, y + 157, COLOR.ink, 1);
+  drawMenuButton('menu_test', 'test field // t', buttonX, y + 139, buttonWidth, COLOR.cyan, enterTestField);
+  bitmapText.draw(networkActive ? 'p2p session active' : 'coop // 2-4 pilots // p2p beta', x + 17, y + 165, networkActive ? COLOR.green : COLOR.dimMint, 1);
+  bitmapText.draw('enter selects', x + width - 85, y + 165, COLOR.ink, 1);
 }
 
 function clippedUiText(value, width) {
@@ -4009,42 +4032,6 @@ function drawCoopMenu(snapshot) {
   bitmapText.draw(SIGNALING_URL.includes('framebound-signaling') ? 'public signal relay online // direct data after handshake' : 'custom signal relay', x + 18, y + 181, COLOR.dimMint, 1);
 }
 
-function drawMapThumbnail(map, x, y, width, height, accent) {
-  const bounds = map.cameraBounds;
-  const worldWidth = bounds.right - bounds.left;
-  const worldHeight = bounds.bottom - bounds.top;
-  shapes.rect(x, y, width, height, COLOR.black);
-  shapes.rect(x, y, width, 1, COLOR.dimMint);
-  shapes.rect(x, y + height - 1, width, 1, COLOR.dimMint);
-  for (const area of map.defenseAreas) {
-    const shape = area.shape;
-    const markerX = Math.round(x + (shape.x - bounds.left) / worldWidth * width);
-    const markerY = Math.round(y + (shape.y - bounds.top) / worldHeight * height);
-    const markerWidth = Math.max(1, Math.round(shape.radiusX / worldWidth * width * 1.5));
-    const markerHeight = Math.max(1, Math.round(shape.radiusY / worldHeight * height * 1.5));
-    shapes.rect(markerX - Math.floor(markerWidth * 0.5), markerY - Math.floor(markerHeight * 0.5), markerWidth, markerHeight, accent);
-  }
-  const baseX = Math.round(x + (map.base.x - bounds.left) / worldWidth * width);
-  const baseY = Math.round(y + (map.base.y - bounds.top) / worldHeight * height);
-  shapes.rect(baseX - 2, baseY - 1, 5, 3, COLOR.green);
-}
-
-function drawMapCard(map, index, x, y, width, height) {
-  const selected = map.id === selectedRunMapId;
-  const hovered = pointInside(x, y, width, height);
-  const accent = selected ? COLOR.mint : hovered ? COLOR.cyan : COLOR.dimMint;
-  drawTechPanel(x, y, width, height, accent);
-  bitmapText.draw(`${index + 1} ${map.label}`, x + 8, y + 7, selected || hovered ? accent : COLOR.ink, 1);
-  drawMapThumbnail(map, x + 8, y + 20, width - 16, 45, selected ? COLOR.mint : COLOR.dimMint);
-  bitmapText.draw(map.menuLines[0] || `${map.defenseAreas.length} areas`, x + 8, y + 72, selected ? COLOR.mint : COLOR.ink, 1);
-  bitmapText.draw(map.menuLines[1] || 'survival field', x + 8, y + 84, selected ? COLOR.cyan : COLOR.dimMint, 1);
-  if (selected) {
-    shapes.rect(x + width - 9, y + 5, 3, 3, COLOR.green);
-    shapes.rect(x + width - 5, y + 5, 2, 3, COLOR.mint);
-  }
-  registerHitbox(`map_${map.id}`, x, y, width, height, { action: () => selectRunMap(map.id) });
-}
-
 function drawMapSelection(snapshot) {
   const maps = playableMaps();
   const width = Math.min(430, logicalWidth - 12);
@@ -4059,15 +4046,24 @@ function drawMapSelection(snapshot) {
     : snapshot.phase === 'running' ? 'saved run held // deployment wipes it' : 'choose a flow // fresh seed per run';
   bitmapText.draw(warning, x + 16, y + 27, snapshot.phase === 'running' ? COLOR.red : COLOR.dimMint, 1);
 
+  // The selected field's real contours, base and rift entries sit beside the list when
+  // the panel is wide enough; narrow panels keep the full-width list.
   const mapRowHeight=height>=242?23:17, mapRowTop=height>=242?40:35;
+  const showThumbnail = width >= 380 && height >= 242;
+  const listWidth = showThumbnail ? 196 : width - 32;
   maps.forEach((map,index) => {
     const selected=map.id===selectedRunMapId;
-    drawMenuButton(`map_${map.id}`,`${index+1} ${map.label}`,x+16,y+mapRowTop+index*mapRowHeight,width-32,selected?COLOR.mint:COLOR.cyan,()=>selectRunMap(map.id),selected);
+    drawMenuButton(`map_${map.id}`,`${index+1} ${map.label}`,x+16,y+mapRowTop+index*mapRowHeight,listWidth,selected?COLOR.mint:COLOR.cyan,()=>selectRunMap(map.id),selected);
   });
   const selected=maps.find((map)=>map.id===selectedRunMapId);
+  if (showThumbnail && selected) {
+    const thumbX = x + 16 + listWidth + 10;
+    const thumbWidth = width - 16 - 4 - thumbX + x;
+    const thumbHeight = Math.min(maps.length * mapRowHeight - 6, height - 66 - 8 - (mapRowTop + 3));
+    drawMapThumbnail(shapes, COLOR, selected, thumbX, y + mapRowTop + 3, thumbWidth, thumbHeight, COLOR.mint);
+  }
   const descriptionY = mapRowTop + maps.length * mapRowHeight + 4;
   if(descriptionY < height - 78) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+descriptionY,COLOR.ink,1);
-
   // horde pace row: [-] pace x1.0 [+], with a small tick bar across the allowed range
   const pace = selectedRunPace();
   const paceY = y + height - 66;
@@ -5283,6 +5279,7 @@ function drawHud(fps, snapshot) {
     const panelY = Math.round((logicalHeight - height) / 2);
     drawTechPanel(panelX, panelY, width, height, COLOR.red);
     bitmapText.draw('base lost', panelX + 16, panelY + 10, COLOR.red, 2);
+    drawReactorShutdown(snapshot, panelX + width - 46, panelY + 34);
     const seconds = Math.floor(snapshot.runTick / AUTHORITY_TICK_RATE);
     const pace = snapshot.pace || DEFAULT_PACE;
     bitmapText.draw(`survived ${Math.floor(seconds / 60)}m ${seconds % 60}s${pace === DEFAULT_PACE ? '' : ` // pace x${pace.toFixed(1)}`}`, panelX + 16, panelY + 34, COLOR.ink, 1);
@@ -5296,8 +5293,26 @@ function drawHud(fps, snapshot) {
       drawMenuButton('defeat_map', 'choose another map', panelX + 16, panelY + 89, width - 32, COLOR.cyan, () => openMapSelection('main'));
     }
     drawMenuButton('defeat_menu', 'main menu', panelX + 16, panelY + 110, width - 32, COLOR.cyan, returnToMainMenu);
+  } else {
+    defeatSeenAt = null;
   }
 
+}
+
+// Restrained reactor shutdown: the base sprite steps cyan, amber, red, then extinguished
+// over 0.6s of wall-clock time (ticks stop at defeat). Retry controls never wait on it.
+function drawReactorShutdown(snapshot, x, y) {
+  const now = performance.now();
+  if (defeatSeenAt === null) defeatSeenAt = now;
+  const age = reducedNetworkMotion.matches ? Infinity : (now - defeatSeenAt) / 1000;
+  const appearance = reactorShutdownAppearance(snapshot, age);
+  drawBaseSprite(shapes, COLOR, { x: x + 21, y: y + 15 }, appearance);
+}
+
+function reactorShutdownAppearance(snapshot, age) {
+  const step = age < 0.15 ? 0 : age < 0.3 ? 1 : age < 0.45 ? 2 : 3;
+  const state = ['healthy', 'damaged', 'critical', 'destroyed'][step];
+  return { state, health: step === 3 ? 0 : 1, plates: Math.max(0, 4 - step), phase: 0, hit: step > 0 && step < 3 };
 }
 
 function currentPresencePayload(now) {
@@ -5594,6 +5609,11 @@ function syncDiagnostics(snapshot = sessionSnapshot) {
 }
 
 syncDiagnostics();
+// Rasterise menu thumbnails off the critical path so opening map selection never hitches.
+(window.requestIdleCallback || ((callback) => setTimeout(callback, 400)))(() => {
+  const maps = playableMaps();
+  for (const map of maps) mapThumbnail(map, 188, maps.length * 23 - 6);
+});
 
 function frame(now) {
   const elapsedMs = Math.min(133, Math.max(1, now - previousTime));
@@ -5606,6 +5626,9 @@ function frame(now) {
   const sessionFrame = session.advance(shouldAdvance ? elapsedMs * timeScale : 0);
   sessionSnapshot = sessionFrame.snapshot;
   for (const event of sessionFrame.events) {
+    if (event.type === EVENT.TOWER_PLACED || event.type === EVENT.TOWER_EVOLVED) {
+      assembly.begin(event.payload.tower, event.type === EVENT.TOWER_EVOLVED ? 'evolved' : 'placed', sessionSnapshot.runTick);
+    }
     if ([EVENT.RESEARCH_PURCHASED, EVENT.REACTOR_PURCHASED].includes(event.type)) {
       setStatus(event.type===EVENT.RESEARCH_PURCHASED ? `${event.payload.label} unlocked` : `${event.payload.categoryId} rank ${event.payload.rank}`);
       researchDetailPage=0;
@@ -5764,6 +5787,7 @@ function frame(now) {
     gl.disable(gl.BLEND);
     drawImpactBursts(dt);
     for (const tower of sessionSnapshot.towers) drawTower(tower);
+    drawAssembly(sessionSnapshot);
     drawRelayCollapse(sessionSnapshot);
     drawBase(sessionSnapshot);
     if (currentMap.arena) drawArenaFrame(currentMap);
