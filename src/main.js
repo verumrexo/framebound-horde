@@ -3,7 +3,11 @@ import { drawSweep, drawLaserPulse, sweepPose } from './render/laser-effects.js'
 import { compactMetric } from './core/format.js';
 import { RESEARCH_NODES, researchNode, arsenalChoices, hasResearch, reactorRank, reactorQuote, REACTOR_CATEGORIES } from './core/research.js';
 import { towerPlacementClear, MIN_TOWER_SPACING } from './core/placement.js';
-import { drawTowerSprite } from './render/tower-sprites.js';
+import { drawCompactTowerSprite, towerScreenBounds } from './render/tower-sprites.js';
+import { NEBULA_FRAGMENT } from './render/nebula-shader.js';
+import { BaseDamagePresentation, DEFAULT_RELAY_PALETTE, enemyPointSize,
+  hashString32, relayNetworkPresentation, riftAppearance } from './render/world-appearance.js';
+import { drawBaseSprite, drawBodyBrackets, drawRiftSprite, RIFT_BOUNDS } from './render/world-sprites.js';
 import { EmbeddedAuthority, EmbeddedClient } from './core/embedded-session.js';
 import { AUTHORITY_TICK_RATE, COMMAND, EVENT, PROTOCOL_VERSION } from './core/protocol.js';
 import { PROTOTYPE_SESSION_CONFIG, TEST_FIELD_SESSION_CONFIG } from './core/session-config.js';
@@ -281,100 +285,6 @@ void main() {
 }
 `;
 
-const NEBULA_FRAGMENT = `#version 300 es
-precision highp float;
-uniform vec3 u_researchWave;
-uniform vec2 u_resolution;
-uniform float u_renderScale;
-uniform vec2 u_camera;
-uniform float u_viewScale;
-flat in vec4 v_shape0;
-flat in vec4 v_shape1;
-flat in vec4 v_shape2;
-flat in vec4 v_style;
-out vec4 outColor;
-
-float hash21(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
-
-vec3 networkHueTint(float hue) {
-  vec3 p = abs(fract(hue + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
-  return clamp(p - 1.0, 0.0, 1.0);
-}
-
-void main() {
-  vec2 screen = vec2(gl_FragCoord.x / u_renderScale, u_resolution.y - gl_FragCoord.y / u_renderScale);
-  vec2 world = (screen - u_resolution * 0.5) * u_viewScale + u_camera;
-  vec2 delta = world - v_shape0.xy;
-  vec2 local = vec2(
-    delta.x * v_shape1.x + delta.y * v_shape1.y,
-    -delta.x * v_shape1.y + delta.y * v_shape1.x
-  );
-  vec2 normalized = local / v_shape0.zw;
-  float radius = length(normalized);
-  vec2 normal = radius > 0.000001 ? normalized / radius : vec2(1.0, 0.0);
-  float x2 = normal.x * normal.x;
-  float y2 = normal.y * normal.y;
-  float harmonic2 = x2 - y2;
-  float harmonic3 = normal.x * (x2 - 3.0 * y2);
-  float harmonic5 = normal.y * (5.0 * x2 * x2 - 10.0 * x2 * y2 + y2 * y2);
-  float biteFacing = max(dot(normal, v_shape2.zw), 0.0);
-  float biteSquared = biteFacing * biteFacing;
-  float boundary = max(0.58, 1.0
-    + v_shape1.z * harmonic2
-    + v_shape1.w * harmonic3
-    + v_shape2.x * harmonic5
-    - v_shape2.y * biteSquared * biteSquared);
-  float field = radius / boundary - 1.0;
-  if (field >= 0.0) discard;
-
-  float edgeDepth = -field * min(v_shape0.z, v_shape0.w);
-  vec3 color = vec3(0.012, 0.047, 0.031);
-
-  vec2 localPixel = floor(local / u_viewScale + vec2(v_style.x * 113.0, v_style.x * 67.0));
-  vec2 scratchCell = floor(localPixel / vec2(10.0, 8.0));
-  vec2 scratchPixel = mod(localPixel, vec2(10.0, 8.0));
-  float scratch = hash21(scratchCell + vec2(v_style.x * 31.0, v_style.y * 19.0));
-  if (edgeDepth > u_viewScale * 2.0 && scratch > 0.79 && scratchPixel.y < 1.0 && scratchPixel.x < 3.0) {
-    color = vec3(0.025, 0.125, 0.072);
-  }
-
-  vec2 edgeCell = floor(world / (u_viewScale * 5.0));
-  float edgeScar = hash21(edgeCell + vec2(v_style.x * 97.0, v_style.x * 53.0));
-  if (edgeDepth <= u_viewScale * 1.35) {
-    color = vec3(0.055, 0.255, 0.145);
-    if (edgeScar > 0.68) color = vec3(0.20, 0.62, 0.36);
-    if (edgeScar > 0.955) color = vec3(0.333, 1.0, 0.761);
-  }
-  if (v_style.z > 0.5) {
-    // Isolated relay nodes (no confirmed link yet) read as a dim amber "pending" tint;
-    // confirmed networks each get a stable hue derived from their canonical area id so
-    // separate networks are visually distinguishable and never flicker or recolor.
-    vec3 tint = v_style.z > 1.5 ? networkHueTint(v_style.w) : vec3(0.85, 0.55, 0.22);
-    color = mix(color, color * (tint * 0.9 + 0.35), 0.5);
-    // World-aligned buried traces: sparse, static and confined to the interior.
-    // Suppress detail at far zoom instead of turning small fields into bright noise.
-    vec2 circuit = mod(world + vec2(8000.0), 96.0);
-    vec2 cell = floor((world + vec2(8000.0)) / 96.0);
-    float traceWidth = min(u_viewScale, 3.0);
-    bool trace = (circuit.y < traceWidth && circuit.x < 48.0)
-      || (abs(circuit.x - 48.0) < traceWidth && circuit.y < 24.0);
-    if (edgeDepth > u_viewScale * 3.0 && u_viewScale <= 5.0
-        && hash21(cell) > 0.65 && trace) {
-      color = mix(vec3(0.025, 0.095, 0.085), tint, 0.4);
-      float arrival = distance(world, u_researchWave.xy) / 1800.0;
-      float age = u_researchWave.z - arrival;
-      if (u_researchWave.z >= 0.0 && age >= 0.0 && age < 0.18)
-        color = mix(vec3(0.045, 0.17, 0.145), tint, 0.65);
-    }
-  }
-  outColor = vec4(color, 1.0);
-}
-`;
-
 const SWARM_RENDER_VERTEX = `#version 300 es
 precision highp float;
 layout(location=0) in vec4 a_state;
@@ -386,16 +296,18 @@ uniform float u_renderScale;
 uniform vec2 u_camera;
 uniform float u_viewScale;
 uniform float u_tickAlpha;
+uniform vec2 u_pointSizes;
 flat out float v_status;
 flat out float v_units;
 flat out float v_hp;
+flat out float v_pointSize;
 void main() {
   vec2 world = a_state.xy + a_state.zw * (u_tickAlpha / ${AUTHORITY_TICK_RATE.toFixed(1)});
   vec2 screen = ((world - u_camera) / u_viewScale + u_resolution * 0.5);
   vec2 clip = vec2(screen.x / u_resolution.x * 2.0 - 1.0, 1.0 - screen.y / u_resolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
-  float baseSize = floor(clamp(13.0 / u_viewScale, 3.0, 6.0) + 0.5);
-  gl_PointSize = (baseSize + (a_units > 1.5 ? 3.0 : 0.0)) * u_renderScale;
+  v_pointSize = a_units > 1.5 ? u_pointSizes.y : u_pointSizes.x;
+  gl_PointSize = v_pointSize * u_renderScale;
   v_status = a_status;
   v_units = a_units;
   v_hp = a_hp;
@@ -407,6 +319,8 @@ precision highp float;
 flat in float v_status;
 flat in float v_units;
 flat in float v_hp;
+flat in float v_pointSize;
+uniform float u_renderScale;
 out vec4 outColor;
 void main() {
   vec2 point = gl_PointCoord;
@@ -422,7 +336,14 @@ void main() {
     body = (point.x < 0.44 || point.x > 0.56) && (point.y < 0.44 || point.y > 0.56);
     if (v_units > 4.5 && center.x < 0.08 && center.y < 0.08) body = true;
   }
-  bool statusPixel = v_status > 0.5 && center.x < 0.15 && center.y < 0.15;
+  // A centred device-pixel block also survives the smallest, even-sized sprites.
+  // Leave body pixels visible so a status can never hide the remaining-hp colour.
+  float deviceSize = max(2.0, floor(v_pointSize * u_renderScale + 0.5));
+  float markerSize = min(deviceSize - 1.0, max(1.0, floor(max(u_renderScale, deviceSize * 0.3) + 0.5)));
+  float markerStart = floor((deviceSize - markerSize) * 0.5);
+  vec2 cell = floor(point * deviceSize);
+  bool statusPixel = v_status > 0.5 && all(greaterThanEqual(cell, vec2(markerStart)))
+    && all(lessThan(cell, vec2(markerStart + markerSize)));
   if (!body && !statusPixel) discard;
   if (statusPixel) {
     if (v_status > 4.5) outColor = vec4(${COLOR.green.join(',')});
@@ -598,6 +519,7 @@ class EnemyRenderer {
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_camera'), camera.x, camera.y);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_viewScale'), camera.scale);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_tickAlpha'), frame.alpha);
+    gl.uniform2f(gl.getUniformLocation(this.program, 'u_pointSizes'), enemyPointSize(camera.scale), enemyPointSize(camera.scale, 2));
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.POINTS, 0, frame.count);
     gl.bindVertexArray(null);
@@ -988,74 +910,6 @@ class BitmapText {
   }
 }
 
-function hashString32(str) {
-  let hash = 2166136261;
-  for (let i = 0; i < str.length; i += 1) {
-    hash ^= str.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
-}
-
-function networkHueFromId(id) {
-  return (hashString32(id) * 0.6180339887498949) % 1;
-}
-
-// Presentation-only: derives stable per-network nebula colors from already-synced relay
-// links (tower.areaId / relayTargetAreaId). Pure function of authoritative snapshot state,
-// recomputed every frame on every client identically - never mutates or feeds back into
-// game state, so it cannot desync multiplayer.
-function relayNetworkPresentation(snapshot) {
-  const presentation = new Map();
-  if (!snapshot) return presentation;
-  const parent = new Map();
-  const ensure = (id) => { if (!parent.has(id)) parent.set(id, id); };
-  const find = (id) => {
-    let root = id;
-    while (parent.get(root) !== root) root = parent.get(root);
-    let current = id;
-    while (parent.get(current) !== root) {
-      const next = parent.get(current);
-      parent.set(current, root);
-      current = next;
-    }
-    return root;
-  };
-  const union = (a, b) => {
-    const rootA = find(a), rootB = find(b);
-    if (rootA === rootB) return;
-    // The lexicographically smaller id always becomes the shared root, so a merged
-    // network's canonical id (and therefore its color) never depends on merge order.
-    if (rootA < rootB) parent.set(rootB, rootA); else parent.set(rootA, rootB);
-  };
-  for (const tower of snapshot.towers || []) {
-    if (!isRelayForm(tower.definitionId)) continue;
-    ensure(tower.areaId);
-    if (tower.relayTargetAreaId) {
-      ensure(tower.relayTargetAreaId);
-      union(tower.areaId, tower.relayTargetAreaId);
-    }
-  }
-  // A completed network keeps its established links after the connector relays retire.
-  for (const [areaA, areaB] of snapshot.relayNetwork?.links || []) {
-    ensure(areaA); ensure(areaB); union(areaA, areaB);
-  }
-  const members = new Map();
-  for (const id of parent.keys()) {
-    const root = find(id);
-    if (!members.has(root)) members.set(root, new Set());
-    members.get(root).add(id);
-  }
-  for (const [root, ids] of members) {
-    // tier 2 = confirmed multi-area network (stable hue); tier 1 = a relay placed but
-    // not yet linked to anything, flagged distinctly so a missed connection stands out.
-    const tier = ids.size >= 2 ? 2 : 1;
-    const hue = tier === 2 ? networkHueFromId(root) : 0;
-    for (const id of ids) presentation.set(id, { tier, hue });
-  }
-  return presentation;
-}
-
 class NebulaRenderer {
   constructor() {
     this.program = createProgram(NEBULA_VERTEX, NEBULA_FRAGMENT);
@@ -1076,7 +930,7 @@ class NebulaRenderer {
 
   setMap(map, presentation) {
     const key = `${map.id}:${[...presentation.entries()].sort(([a], [b]) => a < b ? -1 : 1)
-      .map(([id, info]) => `${id}=${info.tier}:${info.hue.toFixed(3)}`).join(',')}`;
+      .map(([id, info]) => `${id}=${info.tier}:${info.hue.toFixed(8)}`).join(',')}`;
     if (this.mapId === key) return;
     const data = [];
     for (const area of map.defenseAreas) {
@@ -1096,7 +950,7 @@ class NebulaRenderer {
   }
 
   draw(map, viewCamera) {
-    this.setMap(map, relayNetworkPresentation(sessionSnapshot));
+    this.setMap(map, networkPresentation);
     if (!this.count) return;
     gl.useProgram(this.program);
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_resolution'), logicalWidth, logicalHeight);
@@ -1104,7 +958,7 @@ class NebulaRenderer {
     gl.uniform2f(gl.getUniformLocation(this.program, 'u_camera'), viewCamera.x, viewCamera.y);
     gl.uniform1f(gl.getUniformLocation(this.program, 'u_viewScale'), viewCamera.scale);
     const waveAge = researchWave && researchWave.mapId === map.id && !reducedNetworkMotion.matches
-      ? (performance.now() - researchWave.startedAt) / 1000 : -1;
+      ? (sessionSnapshot.runTick - researchWave.startedTick) / AUTHORITY_TICK_RATE : -1;
     gl.uniform3f(gl.getUniformLocation(this.program, 'u_researchWave'),
       researchWave?.x || 0, researchWave?.y || 0, waveAge >= 0 && waveAge < 4 ? waveAge : -1);
     gl.bindVertexArray(this.vao);
@@ -1118,8 +972,8 @@ const nebulaRenderer = new NebulaRenderer();
 // Presentation only: one wave, replaced by the next purchase; never queued.
 let researchWave = null;
 let devToolsOpen = false;
-const quietNetwork = [0.025, 0.12, 0.105, 1];
-const quietPulse = [0.06, 0.25, 0.21, 1];
+let networkPresentation = new Map();
+const baseDamage = new BaseDamagePresentation();
 const reducedNetworkMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const enemyRenderer = new EnemyRenderer(PROTOTYPE_SESSION_CONFIG.swarm.initialCapacity);
 const shapes = new ShapeBatch();
@@ -1454,6 +1308,7 @@ function bindPeerCoordinator(bundle, role, code = null) {
       bundle.map = getMapDefinition(snapshot.mapId, snapshot.seed);
       if (session === networkSession) {
         sessionSnapshot = snapshot;
+        resetWorldPresentation();
         if (firstSync || currentMap.id !== snapshot.mapId || (currentMap.randomRifts && currentMap.layoutSeed !== snapshot.seed)) adoptActiveMap(snapshot.mapId);
       }
       if (!firstSync) {
@@ -1644,6 +1499,7 @@ async function restoreGameBundle(bundle) {
     bundle.map = getMapDefinition(bundle.authority.state.mapId, bundle.authority.state.seed);
     if (sessionMode === 'game' && session === bundle.session) {
       sessionSnapshot = bundle.session.latestSnapshot;
+      resetWorldPresentation();
       currentMap = bundle.map;
       selectedRunMapId = currentMap.id;
       cameraByMode.delete('game');
@@ -1691,6 +1547,12 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') void saveGameBundle();
 });
 
+function resetWorldPresentation() {
+  baseDamage.reset();
+  researchWave = null;
+  relayCollapse = null;
+}
+
 function activateSession(mode) {
   cameraByMode.set(sessionMode, { ...camera, mapId: currentMap.id });
   const bundle = sessions.get(mode) || createSessionBundle(mode);
@@ -1699,7 +1561,7 @@ function activateSession(mode) {
   session = bundle.session;
   sessionSnapshot = session.snapshot();
   currentMap = getMapDefinition(sessionSnapshot.mapId, sessionSnapshot.seed);
-  researchWave = null;
+  resetWorldPresentation();
   devToolsOpen = false;
   bundle.map = currentMap;
   const savedCamera = cameraByMode.get(mode);
@@ -2207,6 +2069,7 @@ function clearTransientUi() {
 }
 
 function adoptActiveMap(mapId) {
+  resetWorldPresentation();
   const map = getMapDefinition(mapId, sessionSnapshot.seed);
   currentMap = map;
   const bundle = sessions.get(sessionMode);
@@ -2660,13 +2523,10 @@ function drawTower(tower, override = null) {
     : null;
   const period = Math.max(1, Math.round((control?.periodSeconds || 6) * AUTHORITY_TICK_RATE));
   const pulseTick = tick % period;
-  const scale = 3 / camera.scale;
-  const rectangles = [];
-  const body = { rect: (...args) => rectangles.push(args) };
-  drawTowerSprite(body, COLOR, p, tower, override, {
-    runTick: tick,
+  const bounds = drawCompactTowerSprite(shapes, COLOR, p, tower, camera.scale, override, {
+    runTick: reducedNetworkMotion.matches ? 0 : tick,
     sweepPhase: (() => {
-      if (tower.definitionId !== 'sweeper') return null;
+      if (tower.definitionId !== 'sweeper' || reducedNetworkMotion.matches) return null;
       const field = sessionSnapshot?.attackFields.find((f) => f.kind === 'sweep_line' && f.attack.sourceTowerId === tower.id);
       const pose = field ? sweepPose(field, tick) : null;
       return pose ? (field.sweepDirection < 0 ? 1-pose.phase : pose.phase) : null;
@@ -2674,12 +2534,7 @@ function drawTower(tower, override = null) {
     controlActive: pulseTick < Math.round((control?.durationSeconds || 2) * AUTHORITY_TICK_RATE)
       && tick - pulseTick >= (tower.controlReadyTick || 0)
   });
-  const extent = Math.max(1, ...rectangles.flatMap(([x,y,w,h]) => [Math.abs(x-p.x),Math.abs(y-p.y),Math.abs(x+w-p.x),Math.abs(y+h-p.y)]));
-  const nearest = Math.min(56, ...(sessionSnapshot?.towers || []).filter((other) => other.id !== tower.id).map((other) => Math.hypot(other.x-tower.x,other.y-tower.y)));
-  const footprint = Math.max(6, Math.min(54, nearest-2));
-  const artScale = Math.min(scale, footprint / (2*Math.SQRT2*extent) / camera.scale);
-  for (const [x,y,w,h,color] of rectangles) shapes.rect(p.x+(x-p.x)*artScale,p.y+(y-p.y)*artScale,w*artScale,h*artScale,color);
-  if (session.networkRole && tower.ownerId) shapes.rect(p.x - 1, p.y + Math.max(5, extent * artScale) + 2, 3, 2, playerColor(tower.ownerId));
+  if (session.networkRole && tower.ownerId) shapes.rect(p.x - 1, p.y + bounds.bottom + 4, 3, 2, playerColor(tower.ownerId));
   if (tower.definitionId === 'hardpoint') {
     const point = socketPoint(sessionSnapshot, currentMap, tower);
     if (point) {
@@ -2744,6 +2599,10 @@ function drawPerimeterIntel(snapshot, frame) {
   }
 }
 
+function relayColors(areaId) {
+  return networkPresentation.get(areaId)?.palette || DEFAULT_RELAY_PALETTE;
+}
+
 function drawNetworkLinks(snapshot) {
   const definitions = new Map(snapshot.towerCatalog.map((definition) => [definition.id, definition]));
   const relayPairs = new Set();
@@ -2759,15 +2618,16 @@ function drawNetworkLinks(snapshot) {
     if (!targetCenter) continue;
     const from = project(source.x, source.y);
     const to = project(targetCenter.x, targetCenter.y);
+    const palette = relayColors(source.areaId);
     const focused = source.id === selectedTowerId;
-    drawDashedLink(from, to, focused ? COLOR.dimMint : quietNetwork);
-    shapes.rect(to.x - 1, to.y - 1, 2, 2, focused ? COLOR.cyan : quietPulse);
+    drawDashedLink(from, to, focused ? palette.pulse : palette.link);
+    shapes.rect(to.x - 1, to.y - 1, 2, 2, focused ? palette.focus : palette.pulse);
     // One two-pixel packet across the entire network, followed by six quiet seconds.
     const phase = pulseClock % 8;
     if (!reducedNetworkMotion.matches && source === pulseSource && phase < 2) {
       const progress = phase / 2;
       shapes.rect(from.x + (to.x - from.x) * progress,
-        from.y + (to.y - from.y) * progress, 2, 1, quietPulse);
+        from.y + (to.y - from.y) * progress, 2, 1, palette.pulse);
     }
   }
 
@@ -2789,14 +2649,15 @@ function drawNetworkLinks(snapshot) {
     if (!sourceCenter || !targetCenter) continue;
     const from = project(sourceCenter.x, sourceCenter.y);
     const to = project(targetCenter.x, targetCenter.y);
+    const palette = relayColors(areaA);
     if (Math.max(from.x, to.x) < 0 || Math.min(from.x, to.x) > logicalWidth || Math.max(from.y, to.y) < 0 || Math.min(from.y, to.y) > logicalHeight) continue;
-    drawDashedLink(from, to, quietNetwork);
-    shapes.rect(from.x - 1, from.y - 1, 2, 2, quietPulse);
-    shapes.rect(to.x - 1, to.y - 1, 2, 2, quietPulse);
+    drawDashedLink(from, to, palette.link);
+    shapes.rect(from.x - 1, from.y - 1, 2, 2, palette.pulse);
+    shapes.rect(to.x - 1, to.y - 1, 2, 2, palette.pulse);
     const phase = (pulseClock + index * 0.37) % 8;
     if (!reducedNetworkMotion.matches && relays.length === 0 && phase < 2 && index === Math.floor(pulseClock / 8) % persistedLinks.length) {
       const progress = phase / 2;
-      shapes.rect(from.x + (to.x - from.x) * progress, from.y + (to.y - from.y) * progress, 2, 1, quietPulse);
+      shapes.rect(from.x + (to.x - from.x) * progress, from.y + (to.y - from.y) * progress, 2, 1, palette.pulse);
     }
   }
 
@@ -2812,26 +2673,17 @@ function drawNetworkLinks(snapshot) {
     })
     .slice(0, 32);
   const from = project(selected.x, selected.y);
+  const palette = relayColors(selected.areaId);
   for (const target of targets) {
     const to = project(target.x, target.y);
-    shapes.line(from.x, from.y, to.x, to.y, 1, COLOR.dimMint);
-    shapes.rect(to.x, to.y, 1, 1, COLOR.green);
+    shapes.line(from.x, from.y, to.x, to.y, 1, palette.link);
+    shapes.rect(to.x, to.y, 1, 1, palette.pulse);
   }
 }
 
-function drawBase(time, base) {
-  const p = project(base.x, base.y);
-  const pulse = Math.floor(time * 4) % 2;
-  shapes.rect(p.x - 13, p.y - 6, 27, 13, COLOR.black);
-  shapes.rect(p.x - 11, p.y - 5, 23, 1, COLOR.cyan);
-  shapes.rect(p.x - 11, p.y + 5, 23, 1, COLOR.cyan);
-  shapes.rect(p.x - 11, p.y - 4, 1, 9, COLOR.cyan);
-  shapes.rect(p.x + 11, p.y - 4, 1, 9, COLOR.cyan);
-  shapes.rect(p.x - 4, p.y - 9, 9, 3, COLOR.mint);
-  shapes.rect(p.x - 5, p.y + 7, 11, 2, COLOR.mint);
-  shapes.rect(p.x - 2, p.y - 2, 5, 5, pulse ? COLOR.green : COLOR.mint);
-  shapes.rect(p.x - 15, p.y - 1, 3, 3, COLOR.amber);
-  shapes.rect(p.x + 13, p.y - 1, 3, 3, COLOR.amber);
+function drawBase(snapshot) {
+  const p = project(snapshot.base.x, snapshot.base.y);
+  drawBaseSprite(shapes, COLOR, p, baseDamage.appearance(snapshot, reducedNetworkMotion.matches));
 }
 
 function presentProjectiles(projectiles, dt) {
@@ -3388,34 +3240,38 @@ function drawAttackFlashes(dt) {
 function startRelayCollapse(event) {
   const links = event.payload.retired
     .map((record) => ({ ...record, target: record.targetAreaId ? defenseAreaCenterById(record.targetAreaId) : null }));
-  relayCollapse = { age: 0, links, areaIds: event.payload.areaIds || [], mapId: currentMap.id };
+  relayCollapse = { startedTick: event.payload.tick ?? sessionSnapshot.runTick,
+    links, areaIds: event.payload.areaIds || [], mapId: currentMap.id };
 }
 
-function drawRelayCollapse(dt) {
+function drawRelayCollapse(snapshot) {
   if (!relayCollapse) return;
-  relayCollapse.age += dt;
-  if (relayCollapse.age >= RELAY_COLLAPSE_SECONDS || relayCollapse.mapId !== currentMap.id) { relayCollapse = null; return; }
-  const age = relayCollapse.age;
+  const age = (snapshot.runTick - relayCollapse.startedTick) / AUTHORITY_TICK_RATE;
+  if (age < 0 || age >= RELAY_COLLAPSE_SECONDS || relayCollapse.mapId !== currentMap.id || reducedNetworkMotion.matches) {
+    relayCollapse = null;
+    return;
+  }
+  const scale = towerScreenBounds('relay', camera.scale).scale;
   for (const record of relayCollapse.links) {
     const from = project(record.x, record.y);
     if (from.x < -80 || from.x > logicalWidth + 80 || from.y < -80 || from.y > logicalHeight + 80) continue;
+    const palette = relayColors(record.areaId);
+    const box = (x, y, w, h, color) => shapes.rect(from.x + x * scale, from.y + y * scale, w * scale, h * scale, color);
     const seed = hashString32(record.towerId);
-    // Phase 1 (0-0.5s): the relay mast collapses into its socket. Phase 2 (0.3-1.6s):
-    // eight pixel packets climb the link line and vanish into the linked nebula.
     const collapse = Math.min(1, age / 0.5);
     const mastHeight = Math.round(15 * (1 - collapse));
     if (mastHeight > 0) {
-      shapes.rect(from.x, from.y - 8 + (15 - mastHeight), 1, mastHeight, collapse < 0.5 ? COLOR.cyan : COLOR.dimMint);
-      shapes.rect(from.x - 5 + Math.round(collapse * 4), from.y + 4, 11 - Math.round(collapse * 8), 2, COLOR.green);
+      box(0, -8 + (15 - mastHeight), 1, mastHeight, collapse < 0.5 ? palette.focus : palette.link);
+      box(-5 + Math.round(collapse * 4), 4, 11 - Math.round(collapse * 8), 2, palette.pulse);
     }
     if (collapse >= 1) {
       const fade = Math.max(0, 1 - (age - 0.5) / 0.6);
       const halo = Math.round(2 + (1 - fade) * 6);
       if (fade > 0) {
-        shapes.rect(from.x - halo, from.y, 2, 1, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
-        shapes.rect(from.x + halo - 1, from.y, 2, 1, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
-        shapes.rect(from.x, from.y - halo, 1, 2, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
-        shapes.rect(from.x, from.y + halo - 1, 1, 2, fade > 0.5 ? COLOR.mint : COLOR.dimMint);
+        box(-halo, 0, 2, 1, fade > 0.5 ? palette.pulse : palette.link);
+        box(halo - 1, 0, 2, 1, fade > 0.5 ? palette.pulse : palette.link);
+        box(0, -halo, 1, 2, fade > 0.5 ? palette.pulse : palette.link);
+        box(0, halo - 1, 1, 2, fade > 0.5 ? palette.pulse : palette.link);
       }
     }
     if (!record.target) continue;
@@ -3430,19 +3286,19 @@ function drawRelayCollapse(dt) {
       const x = Math.round(from.x + dx * eased - dy / length * wobble);
       const y = Math.round(from.y + dy * eased + dx / length * wobble);
       const size = progress < 0.85 ? 2 : 1;
-      shapes.rect(x, y, size, size, packet % 3 === 0 ? COLOR.cyan : packet % 3 === 1 ? COLOR.mint : COLOR.green);
+      shapes.rect(x, y, size, size, packet % 3 === 0 ? palette.focus : palette.pulse);
     }
   }
-  // Phase 3 (1.2-2.2s): every joined nebula answers with one expanding ring.
   const ringAge = age - 1.2;
-  if (ringAge >= 0 && !reducedNetworkMotion.matches) {
+  if (ringAge >= 0) {
     for (const areaId of relayCollapse.areaIds) {
       const center = defenseAreaCenterById(areaId);
       if (!center) continue;
       const area = currentMap.defenseAreas.find((candidate) => candidate.id === areaId);
       const reach = Math.max(area?.shape.radiusX || 60, area?.shape.radiusY || 40) * 0.9;
       const radius = Math.max(4, reach * Math.min(1, ringAge / 0.8));
-      drawWorldRing(center.x, center.y, radius, ringAge < 0.4 ? COLOR.mint : COLOR.dimMint);
+      const palette = relayColors(areaId);
+      drawWorldRing(center.x, center.y, radius, ringAge < 0.4 ? palette.pulse : palette.link);
     }
   }
 }
@@ -3558,7 +3414,8 @@ function drawRelayTargetOverlay(snapshot, tower) {
   for (const area of candidates) {
     const selected = area.id === tower.relayTargetAreaId;
     const hovered = area.id === hoveredAreaId;
-    const color = hovered ? COLOR.mint : selected ? COLOR.amber : COLOR.green;
+    const palette = relayColors(area.id);
+    const color = hovered ? palette.glint : selected ? COLOR.amber : palette.focus;
     const center = project(area.shape.x, area.shape.y);
     drawAreaTargetBrackets(area, color);
     shapes.rect(center.x - 2, center.y - 2, 5, 5, COLOR.black);
@@ -3754,10 +3611,7 @@ function drawBuildState(snapshot) {
         drawControlGeometryShape(selected, selectedDefinition, selected.controlGeometry, COLOR.amber);
       }
     }
-    shapes.rect(p.x - 7, p.y - 7, 4, 1, COLOR.amber);
-    shapes.rect(p.x + 4, p.y - 7, 4, 1, COLOR.amber);
-    shapes.rect(p.x - 7, p.y + 7, 4, 1, COLOR.amber);
-    shapes.rect(p.x + 4, p.y + 7, 4, 1, COLOR.amber);
+    drawBodyBrackets(shapes, p, towerScreenBounds(selected.definitionId, camera.scale), COLOR.amber);
   }
   if (sessionMode === 'test') {
     for (const tower of snapshot.towers) {
@@ -3790,6 +3644,8 @@ function drawBuildState(snapshot) {
     { ...snappedPoint, definitionId: placementDefinitionId },
     { accent: canPlace ? COLOR.green : COLOR.red, core: canPlace ? COLOR.cyan : COLOR.red }
   );
+  drawBodyBrackets(shapes, project(snappedPoint.x, snappedPoint.y),
+    towerScreenBounds(placementDefinitionId, camera.scale), canPlace ? COLOR.cyan : COLOR.red);
 }
 
 // The threat clock runs at the run's pace; countdowns are shown in real seconds.
@@ -3828,50 +3684,29 @@ function surgeStatus(snapshot) {
 }
 
 function drawTestFieldWorld(snapshot) {
-  if (sessionMode !== 'test') {
-    const surge = snapshot.swarm?.surge;
-    const hotRifts = new Set(surge && surge.phase !== 'idle' ? surge.riftIds : []);
-    for (const source of currentMap.spawnSources) {
-      const remaining = source.unlockSeconds > threatSecondsOf(snapshot) ? realSecondsUntil(snapshot, source.unlockSeconds) : source.unlockSeconds - threatSecondsOf(snapshot);
-      const hot = hotRifts.has(source.id);
-      if (remaining > 10 && !hot) continue;
-      const p = project(source.x, source.y);
-      if (p.x < -30 || p.x > logicalWidth + 30 || p.y < HUD_TOP_HEIGHT || p.y > hudBottomY) continue;
-      const color = hot ? COLOR.amber : remaining > 0 ? COLOR.amber : COLOR.red;
-      const pulse = Math.floor(snapshot.runTick / (hot ? 5 : 8)) % 4;
-      for (const side of [-1, 1]) {
-        shapes.rect(p.x + side * (8 + pulse), p.y - 12, 2, 24, color);
-        shapes.rect(p.x + side * 8 - 3, p.y - 14, 7, 2, color);
-        shapes.rect(p.x + side * 8 - 3, p.y + 12, 7, 2, color);
-      }
-      shapes.rect(p.x - 2, p.y - 7 + pulse * 3, 4, 5, COLOR.amber);
-      if (hot) {
-        // hot rifts get a second bracket so the surge arc reads at a glance
-        for (const side of [-1, 1]) shapes.rect(p.x + side * (16 + pulse), p.y - 16, 2, 32, COLOR.amber);
-        const status = surgeStatus(snapshot);
-        bitmapText.draw(status?.phase === 'warning' ? `surge ${status.seconds}s` : 'surge // hot', p.x - 30, p.y + 19, COLOR.amber, 1);
-        continue;
-      }
-      bitmapText.draw(remaining > 0 ? `rift ${Math.ceil(remaining)}s` : 'rift // live', p.x - 30, p.y + 19, color, 1);
-    }
-    return;
-  }
-  const active = new Set(snapshot.test.activeSpawnSourceIds || []);
-  const overrides = snapshot.test.spawnSourceOverrides || {};
+  const overrides = snapshot.test?.spawnSourceOverrides || {};
   for (const source of currentMap.spawnSources) {
+    const appearance = riftAppearance(snapshot, source, reducedNetworkMotion.matches);
+    if (!appearance.visible) continue;
     const position = overrides[source.id] || source;
     const p = project(position.x, position.y);
-    const enabled = active.has(source.id);
-    shapes.rect(p.x - 5, p.y - 5, 11, 11, COLOR.black);
-    shapes.rect(p.x - 4, p.y - 4, 9, 1, enabled ? COLOR.red : COLOR.dimMint);
-    shapes.rect(p.x - 4, p.y + 4, 9, 1, enabled ? COLOR.red : COLOR.dimMint);
-    shapes.rect(p.x - 4, p.y - 3, 1, 7, enabled ? COLOR.red : COLOR.dimMint);
-    shapes.rect(p.x + 4, p.y - 3, 1, 7, enabled ? COLOR.red : COLOR.dimMint);
-    shapes.rect(p.x - 1, p.y - 1, 3, 3, enabled ? COLOR.amber : COLOR.ink);
-    bitmapText.draw(source.id.replace('test_', ''), p.x + 8, p.y - 3, enabled ? COLOR.red : COLOR.dimMint, 1);
-    registerHitbox(`spawn_${source.id}`, p.x - 7, p.y - 7, 15, 15, {
-      drag: { kind: 'spawn-point', sourceId: source.id }
-    });
+    if (p.x + RIFT_BOUNDS.right < 0 || p.x + RIFT_BOUNDS.left > logicalWidth
+        || p.y + RIFT_BOUNDS.bottom < HUD_TOP_HEIGHT || p.y + RIFT_BOUNDS.top > hudBottomY) continue;
+    drawRiftSprite(shapes, COLOR, p, appearance);
+    if (sessionMode === 'test') {
+      const enabled = appearance.state === 'live';
+      bitmapText.draw(source.id.replace('test_', ''), p.x + 25, p.y - 3, enabled ? COLOR.red : COLOR.dimMint, 1);
+      registerHitbox(`spawn_${source.id}`, p.x + RIFT_BOUNDS.left, p.y + RIFT_BOUNDS.top,
+        RIFT_BOUNDS.right - RIFT_BOUNDS.left, RIFT_BOUNDS.bottom - RIFT_BOUNDS.top, {
+          drag: { kind: 'spawn-point', sourceId: source.id }
+        });
+      continue;
+    }
+    const color = appearance.hot || appearance.remaining > 0 ? COLOR.amber : COLOR.red;
+    const status = appearance.hot ? surgeStatus(snapshot) : null;
+    const label = status ? (status.phase === 'warning' ? `surge ${status.seconds}s` : 'surge // hot')
+      : appearance.remaining > 0 ? `rift ${Math.ceil(appearance.remaining)}s` : 'rift // live';
+    bitmapText.draw(label, p.x - label.length * 3, p.y + 25, color, 1);
   }
 }
 
@@ -5493,18 +5328,15 @@ function drawRemotePresence(now) {
     if (p.y <= HUD_TOP_HEIGHT || p.y >= hudBottomY) continue;
     if (presence.activity === 'placing' && presence.definitionId) {
       const ghost = { definitionId: presence.definitionId, x: presence.x, y: presence.y };
-      drawTower(ghost, presence.valid ? color : COLOR.red);
-      shapes.rect(p.x - 8, p.y - 8, 17, 1, presence.valid ? color : COLOR.red);
-      shapes.rect(p.x - 8, p.y + 8, 17, 1, presence.valid ? color : COLOR.red);
+      const tint = presence.valid ? color : COLOR.red;
+      drawTower(ghost, { accent: tint, core: tint });
+      drawBodyBrackets(shapes, p, towerScreenBounds(ghost.definitionId, camera.scale), tint);
     }
     if (presence.towerId) {
       const tower = sessionSnapshot.towers.find((candidate) => candidate.id === presence.towerId);
       if (tower) {
         const selected = project(tower.x, tower.y);
-        shapes.rect(selected.x - 9, selected.y - 9, 19, 1, color);
-        shapes.rect(selected.x - 9, selected.y + 9, 19, 1, color);
-        shapes.rect(selected.x - 9, selected.y - 8, 1, 17, color);
-        shapes.rect(selected.x + 9, selected.y - 8, 1, 17, color);
+        drawBodyBrackets(shapes, selected, towerScreenBounds(tower.definitionId, camera.scale), color);
       }
     }
     shapes.rect(p.x - 4, p.y, 3, 1, color);
@@ -5756,7 +5588,7 @@ function frame(now) {
       researchDetailPage=0;
       const station = sessionSnapshot.towers.find((tower) => tower.id === event.payload.towerId);
       if (station && (event.payload.cost || 0) > 0) researchWave = {
-        x: station.x, y: station.y, mapId: currentMap.id, startedAt: performance.now()
+        x: station.x, y: station.y, mapId: currentMap.id, startedTick: sessionSnapshot.runTick
       };
       void saveGameBundle();
     } else if (event.type === EVENT.TOWER_PLACED && event.payload.tower.ownerId === session.playerId) {
@@ -5802,6 +5634,8 @@ function frame(now) {
       towerMenuMode = sessionMode === 'game' ? 'actions' : null;
       controlDrag = null;
       setStatus('control locked // rebooting 1s');
+    } else if (event.type === EVENT.BASE_BREACHED) {
+      baseDamage.breach(event.payload, sessionSnapshot.runTick);
     } else if (event.type === EVENT.RELAY_NETWORK_COMPLETED) {
       if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) startRelayCollapse(event);
       if (event.payload.retired.some((record) => record.towerId === selectedTowerId)) { selectedTowerId = null; towerMenuMode = null; }
@@ -5877,6 +5711,7 @@ function frame(now) {
   updateHudBounds();
   const enemyFrame = session.presentation();
   uiHitboxes.length = 0;
+  networkPresentation = relayNetworkPresentation(sessionSnapshot);
   drawBackground();
   if (!['main', 'map_select', 'coop'].includes(frontEndScreen)) {
     // Background technology stays underneath enemies, including at intersections.
@@ -5906,8 +5741,8 @@ function frame(now) {
     gl.disable(gl.BLEND);
     drawImpactBursts(dt);
     for (const tower of sessionSnapshot.towers) drawTower(tower);
-    drawRelayCollapse(dt);
-    drawBase(time, sessionSnapshot.base);
+    drawRelayCollapse(sessionSnapshot);
+    drawBase(sessionSnapshot);
     if (currentMap.arena) drawArenaFrame(currentMap);
     else {
       const wall = project(0, currentMap.bounds.bottom);
