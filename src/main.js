@@ -6,7 +6,7 @@ import { RESEARCH_NODES, researchNode, arsenalChoices, hasResearch, reactorRank,
 import { towerPlacementClear, MIN_TOWER_SPACING } from './core/placement.js';
 import { drawCompactTowerSprite, drawTowerPortrait, TOWER_PORTRAIT_SIZE, towerScreenBounds } from './render/tower-sprites.js';
 import { AssemblyPresentation, drawAssemblyFrame } from './render/assembly.js';
-import { drawMapThumbnail, mapThumbnail } from './render/map-thumbnail.js';
+import { drawMapThumbnail, mapThumbnail, mapWalls } from './render/map-thumbnail.js';
 import { BURST_SECONDS, MAX_CONTROL_LINKS, admitBurst, combatMetrics, drawImpactMark, impactColors, impactFamily } from './render/combat-marks.js';
 import { NEBULA_FRAGMENT } from './render/nebula-shader.js';
 import { BaseDamagePresentation, DEFAULT_RELAY_PALETTE, enemyPointSize,
@@ -125,6 +125,11 @@ let authority = null;
 let session = null;
 let sessionSnapshot = null;
 let currentMap = getMapDefinition(PROTOTYPE_SESSION_CONFIG.mapId);
+
+// Maps are resolved from authoritative state only: seed and the per-run rift option.
+function resolveMap(mapId, state) {
+  return getMapDefinition(mapId, state?.seed ?? 0, { randomRifts: Boolean(state?.randomRifts) });
+}
 let gl = null;
 
 function showFatal(message, kind = 'gpu') {
@@ -1097,10 +1102,11 @@ function loadGameplayPreferences() {
     return {
       autoSelectPlacedFrame: saved?.autoSelectPlacedFrame !== false,
       pace: normalizePace(saved?.pace ?? DEFAULT_PACE),
-      hostilePalette: saved?.hostilePalette === 'magenta' ? 'magenta' : 'red'
+      hostilePalette: saved?.hostilePalette === 'magenta' ? 'magenta' : 'red',
+      randomRifts: saved?.randomRifts === true
     };
   } catch {
-    return { autoSelectPlacedFrame: true, pace: DEFAULT_PACE, hostilePalette: 'red' };
+    return { autoSelectPlacedFrame: true, pace: DEFAULT_PACE, hostilePalette: 'red', randomRifts: false };
   }
 }
 
@@ -1216,7 +1222,7 @@ function createHostNetworkBundle() {
     mode: 'game',
     authority: bundleAuthority,
     session: bundleSession,
-    map: getMapDefinition(bundleAuthority.state.mapId, bundleAuthority.state.seed),
+    map: resolveMap(bundleAuthority.state.mapId, bundleAuthority.state),
     networkRole: 'host'
   };
 }
@@ -1235,7 +1241,7 @@ function createGuestNetworkBundle(code) {
     mode: 'game',
     authority: bundleAuthority,
     session: bundleSession,
-    map: getMapDefinition(bundleAuthority.state.mapId, bundleAuthority.state.seed),
+    map: resolveMap(bundleAuthority.state.mapId, bundleAuthority.state),
     networkRole: 'guest'
   };
 }
@@ -1317,11 +1323,12 @@ function bindPeerCoordinator(bundle, role, code = null) {
 
   if (role === 'guest') {
     networkSession.onReady = (snapshot, { firstSync = true } = {}) => {
-      bundle.map = getMapDefinition(snapshot.mapId, snapshot.seed);
+      bundle.map = resolveMap(snapshot.mapId, snapshot);
       if (session === networkSession) {
         sessionSnapshot = snapshot;
         resetWorldPresentation();
-        if (firstSync || currentMap.id !== snapshot.mapId || (currentMap.randomRifts && currentMap.layoutSeed !== snapshot.seed)) adoptActiveMap(snapshot.mapId);
+        if (firstSync || currentMap.id !== snapshot.mapId || Boolean(currentMap.randomizedRifts) !== Boolean(snapshot.randomRifts || currentMap.randomRifts)
+          || (currentMap.randomizedRifts && currentMap.layoutSeed !== snapshot.seed)) adoptActiveMap(snapshot.mapId);
       }
       if (!firstSync) {
         setStatus('host correction applied');
@@ -1508,7 +1515,7 @@ async function restoreGameBundle(bundle) {
     bundle.authority.applyCorrectionSnapshot(saved.correction);
     bundle.session.sequence = bundle.authority.lastSequenceByClient.get(bundle.session.clientId) || bundle.session.sequence;
     bundle.session.latestSnapshot = bundle.authority.snapshot();
-    bundle.map = getMapDefinition(bundle.authority.state.mapId, bundle.authority.state.seed);
+    bundle.map = resolveMap(bundle.authority.state.mapId, bundle.authority.state);
     if (sessionMode === 'game' && session === bundle.session) {
       sessionSnapshot = bundle.session.latestSnapshot;
       resetWorldPresentation();
@@ -1574,7 +1581,7 @@ function activateSession(mode) {
   authority = bundle.authority;
   session = bundle.session;
   sessionSnapshot = session.snapshot();
-  currentMap = getMapDefinition(sessionSnapshot.mapId, sessionSnapshot.seed);
+  currentMap = resolveMap(sessionSnapshot.mapId, sessionSnapshot);
   resetWorldPresentation();
   devToolsOpen = false;
   bundle.map = currentMap;
@@ -1887,6 +1894,8 @@ addEventListener('keydown', (event) => {
       adjustRunPace(-1);
     } else if (event.key === ']' || event.key === '=' || event.key === '+') {
       adjustRunPace(1);
+    } else if (event.key.toLowerCase() === 'x') {
+      toggleRandomRifts();
     }
     return;
   }
@@ -2087,7 +2096,7 @@ function clearTransientUi() {
 
 function adoptActiveMap(mapId) {
   resetWorldPresentation();
-  const map = getMapDefinition(mapId, sessionSnapshot.seed);
+  const map = resolveMap(mapId, sessionSnapshot);
   currentMap = map;
   const bundle = sessions.get(sessionMode);
   if (bundle) bundle.map = map;
@@ -2156,6 +2165,17 @@ function selectedRunPace() {
   return normalizePace(gameplayPreferences.pace ?? DEFAULT_PACE);
 }
 
+function selectedRandomRifts() {
+  return Boolean(gameplayPreferences.randomRifts);
+}
+
+function toggleRandomRifts() {
+  gameplayPreferences.randomRifts = !selectedRandomRifts();
+  saveGameplayPreferences();
+  menuConfirm = null;
+  setStatus(gameplayPreferences.randomRifts ? 'rifts shuffled // seeded per run' : 'rifts authored // fixed layout');
+}
+
 function adjustRunPace(direction) {
   const next = normalizePace(selectedRunPace() + direction * PACE_STEP);
   if (next === selectedRunPace()) return;
@@ -2198,8 +2218,9 @@ function deploySelectedMap() {
     return;
   }
   const pace = selectedRunPace();
-  if (sessionSnapshot.phase === 'lobby') session.send(COMMAND.SESSION_START, { mapId: map.id, pace });
-  else session.send(COMMAND.SESSION_RESTART, { mapId: map.id, pace });
+  const randomRifts = selectedRandomRifts();
+  if (sessionSnapshot.phase === 'lobby') session.send(COMMAND.SESSION_START, { mapId: map.id, pace, randomRifts });
+  else session.send(COMMAND.SESSION_RESTART, { mapId: map.id, pace, randomRifts });
   gameHasEnteredGameplay = true;
   frontEndScreen = 'game';
   menuConfirm = null;
@@ -2846,6 +2867,46 @@ function drawClusterPayloads(fields, runTick) {
     const shot = combatMetrics(camera.scale).shot;
     shapes.rect(head.x - Math.floor(shot / 2), head.y - Math.floor(shot / 2), shot, shot, COLOR.red);
     if (shot >= 3) shapes.rect(head.x, head.y, 1, 1, COLOR.mint);
+  }
+}
+
+// Reworked-weapon shots (pellets, nails, orbits, seeds, shells) live in state.turretRework,
+// which turret-rework.js recreates every tick; the reset only clears it between runs.
+function drawReworkedCombat(snapshot) {
+  const state = snapshot.turretRework;
+  if (!state) return;
+  const marks = combatMetrics(camera.scale);
+  const heavyHalf = Math.floor(marks.heavy / 2);
+  for (const shot of state.shots) {
+    const p = project(shot.x, shot.y);
+    const damage = ['pellet','nail','embedded','splinter','orbit'].includes(shot.type);
+    const color = damage ? COLOR.amber : shot.type === 'gravity_seed' ? COLOR.mint : COLOR.cyan;
+    const size = ['freeze_shell','gravity_seed','embedded'].includes(shot.type) ? Math.max(marks.shot, heavyHalf + 1) : marks.shot;
+    shapes.rect(p.x - Math.floor(size / 2), p.y - Math.floor(size / 2), size, size, color);
+    if (shot.type === 'nail' || shot.type === 'splinter') shapes.line(p.x, p.y, p.x - shot.dx * marks.tower * 0.5, p.y - shot.dy * marks.tower * 0.5, 1, color);
+    if (shot.type === 'chain') drawWorldRing(shot.x, shot.y, marks.burst * 2, COLOR.cyan);
+  }
+  for (const v of state.visuals) {
+    if (v.x2 !== undefined) {
+      const p = project(v.x, v.y), q = project(v.x2, v.y2);
+      shapes.line(p.x, p.y, q.x, q.y, v.type === 'ray' ? marks.rail : 1, COLOR.cyan);
+      if (v.type === 'ray') shapes.rect(q.x - Math.floor(marks.shot / 2), q.y - Math.floor(marks.shot / 2), marks.shot, marks.shot, COLOR.mint);
+    } else {
+      drawWorldRing(v.x, v.y, v.radius, v.type === 'gravity' ? COLOR.dimMint : COLOR.cyan);
+      if (v.type === 'gravity') drawWorldRing(v.x, v.y, v.radius * ((snapshot.runTick % 30) / 30), COLOR.cyan);
+    }
+  }
+  // Enemy positions come from the already received swarm presentation.
+  if (!state.chains.length) return;
+  const presentation = session.presentation();
+  const positions = new Map();
+  for (let i = 0; i < presentation.count; i++) {
+    const id = presentation.ids?.[i] ?? presentation.idByIndex?.[i];
+    if (id !== undefined) positions.set(id, { x: presentation.state[i * 4], y: presentation.state[i * 4 + 1] });
+  }
+  for (const chain of state.chains) for (let i = 1; i < chain.members.length; i++) {
+    const a = positions.get(chain.members[i - 1].id), b = positions.get(chain.members[i].id);
+    if (a && b) drawDashedLink(project(a.x, a.y), project(b.x, b.y), COLOR.cyan);
   }
 }
 
@@ -4029,7 +4090,7 @@ function drawMapSelection(snapshot) {
   const selected=maps.find((map)=>map.id===selectedRunMapId);
   if (layout.thumbnail && selected) {
     const thumb = layout.thumbnail;
-    drawMapThumbnail(shapes, COLOR, selected, thumb.x, thumb.y, thumb.width, thumb.height, COLOR.mint);
+    drawMapThumbnail(shapes, COLOR, selected, thumb.x, thumb.y, thumb.width, thumb.height, COLOR.mint, { riftColor: selectedRandomRifts() ? COLOR.amber : COLOR.red });
   }
   if(layout.descriptionY < height - 78) bitmapText.draw(selected?.menuLines[1] || '',x+16,y+layout.descriptionY,COLOR.ink,1);
   // horde pace row: [-] pace x1.0 [+], with a small tick bar across the allowed range
@@ -4053,19 +4114,25 @@ function drawMapSelection(snapshot) {
 
   const buttonY = layout.buttonY;
   const backWidth = 76;
+  // Rift layout toggle: authored entries or a seeded shuffle of positions and unlock order.
+  const shuffled = selectedRandomRifts();
+  const riftWidth = width >= 400 ? 112 : 58;
+  const riftLabel = width >= 400 ? (shuffled ? 'x rifts shuffled' : 'x rifts authored') : (shuffled ? 'x shuf' : 'x auth');
+  drawMenuButton('map_rifts', riftLabel, x + 16 + backWidth + 6, buttonY, riftWidth, shuffled ? COLOR.amber : COLOR.cyan, toggleRandomRifts, shuffled);
+  const deployX = x + 16 + backWidth + 6 + riftWidth + 6;
   const deployLabel = menuConfirm === 'map_deploy' ? 'confirm wipe // deploy' : `deploy ${selectedRunMapId.replace('map_', 'map ')}`;
   drawMenuButton('map_back', 'back // esc', x + 16, buttonY, backWidth, COLOR.cyan, closeMapSelection);
   drawMenuButton(
     'map_deploy',
     deployLabel,
-    x + 16 + backWidth + 6,
+    deployX,
     buttonY,
-    width - 38 - backWidth,
+    x + width - 16 - deployX,
     menuConfirm === 'map_deploy' ? COLOR.red : COLOR.mint,
     deploySelectedMap,
     true
   );
-  bitmapText.draw(`1-${maps.length} select // [ ] pace // enter deploys`, x + 17, y + height - 16, COLOR.ink, 1);
+  bitmapText.draw(clippedUiText(`1-${maps.length} select // [ ] pace // x rifts // enter deploys`, width - 34), x + 17, y + height - 16, COLOR.ink, 1);
 }
 
 function resetTestFieldFromMenu() {
@@ -4164,7 +4231,7 @@ function drawEscapeMenu(snapshot) {
   } else {
     drawMenuHeader(layout, 'command interrupt', COLOR.cyan, 'simulation is not paused', COLOR.red);
     shapes.rect(x + 17, y + MENU_HEADER.runLabelY, 1, 7, COLOR.cyan);
-    const runState = networkActive ? `${runLabel} // ${seconds}s` : `${seconds}s // ${compactMetric(snapshot.swarm.activeEnemies)} hostiles`;
+    const runState = `${networkActive ? `${runLabel} // ${seconds}s` : `${seconds}s // ${compactMetric(snapshot.swarm.activeEnemies)} hostiles`}${snapshot.randomRifts ? ' // shuffled' : ''}`;
     bitmapText.draw(clippedUiText(runState, runTierWidth - 4), x + 21, y + MENU_HEADER.runLabelY, COLOR.ink, 1);
     if (layout.thumbnail && currentMap.playable) {
       const thumb = layout.thumbnail;
@@ -5755,16 +5822,20 @@ function frame(now) {
     drawNetworkLinks(sessionSnapshot);
     shapes.flush();
     enemyRenderer.draw(camera, enemyFrame);
-    if (currentMap.sideWalls) for (const wallX of [currentMap.bounds.left,currentMap.bounds.right]) {
-      const a=project(wallX,currentMap.bounds.top),b=project(wallX,currentMap.bounds.bottom);
-      shapes.line(a.x,a.y,b.x,b.y,4,COLOR.dimMint);
-      shapes.line(a.x,a.y,b.x,b.y,1,COLOR.amber);
+    for (const wall of mapWalls(currentMap)) {
+      if (wall === 'left' || wall === 'right') {
+        const wallX = wall === 'left' ? currentMap.bounds.left : currentMap.bounds.right;
+        const a=project(wallX,currentMap.bounds.top),b=project(wallX,currentMap.bounds.bottom);
+        shapes.line(a.x,a.y,b.x,b.y,4,COLOR.dimMint);
+        shapes.line(a.x,a.y,b.x,b.y,1,COLOR.amber);
+      }
     }
     drawTestFieldWorld(sessionSnapshot);
     drawPerimeterIntel(sessionSnapshot,enemyFrame);
     drawProjectiles(presentProjectiles(sessionSnapshot.projectiles, dt));
     drawClusterPayloads(sessionSnapshot.attackFields, sessionSnapshot.runTick);
     drawControlFields(sessionSnapshot);
+    drawReworkedCombat(sessionSnapshot);
     drawSelectedBondLinks(sessionSnapshot, enemyFrame);
     shapes.flush();
     gl.enable(gl.BLEND);
@@ -5781,10 +5852,16 @@ function frame(now) {
     drawRelayCollapse(sessionSnapshot);
     drawBase(sessionSnapshot);
     if (currentMap.arena) drawArenaFrame(currentMap);
-    else {
-      const wall = project(0, currentMap.bounds.bottom);
-      shapes.rect(0, wall.y - 3, logicalWidth, 3, COLOR.dimMint);
-      for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, wall.y - 3, 12, 1, COLOR.amber);
+    else for (const wall of mapWalls(currentMap)) {
+      if (wall === 'bottom') {
+        const edge = project(0, currentMap.bounds.bottom);
+        shapes.rect(0, edge.y - 3, logicalWidth, 3, COLOR.dimMint);
+        for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, edge.y - 3, 12, 1, COLOR.amber);
+      } else if (wall === 'top') {
+        const edge = project(0, currentMap.bounds.top);
+        shapes.rect(0, edge.y, logicalWidth, 3, COLOR.dimMint);
+        for (let x = 0; x < logicalWidth; x += 24) shapes.rect(x, edge.y + 2, 12, 1, COLOR.amber);
+      }
     }
     drawBuildState(sessionSnapshot);
     drawRemotePresence(now);

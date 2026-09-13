@@ -49,9 +49,10 @@ export function sendPeerPacket(transport, kind, value) {
 }
 
 export class PeerPacketReceiver {
-  constructor({ onControl, onPacket, onError } = {}) {
+  constructor({ onControl, onPacket, onPacketProgress, onError } = {}) {
     this.onControl = onControl;
     this.onPacket = onPacket;
+    this.onPacketProgress = onPacketProgress;
     this.onError = onError;
     this.pending = null;
   }
@@ -66,6 +67,7 @@ export class PeerPacketReceiver {
       || this.pending.parts.length >= this.pending.chunks) return this.fail('peer packet chunk is invalid');
     this.pending.parts.push(bytes.slice());
     this.pending.received += bytes.byteLength;
+    this.onPacketProgress?.({ kind: this.pending.kind, received: this.pending.received, bytes: this.pending.bytes });
     if (this.pending.parts.length < this.pending.chunks) return true;
     const pending = this.pending;
     this.pending = null;
@@ -113,14 +115,19 @@ export class PeerPacketReceiver {
         received: 0,
         parts: []
       };
+      this.onPacketProgress?.({ kind: message.kind, received: 0, bytes: message.bytes });
       return true;
     }
     this.onControl?.(message);
     return true;
   }
 
-  fail(message) {
+  reset() {
     this.pending = null;
+  }
+
+  fail(message) {
+    this.reset();
     this.onError?.(message);
     return false;
   }

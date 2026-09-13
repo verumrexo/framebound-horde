@@ -7,6 +7,13 @@ import { nebulaPalette } from './world-appearance.js';
 const cache = new Map();
 const TERRAIN = nebulaPalette({ tier: 0 });
 
+// Wall sides: authored `walls`, else the southern wall (plus side walls) for flow maps.
+export function mapWalls(map) {
+  if (map.arena) return [];
+  if (map.walls) return map.walls;
+  return ['bottom', ...(map.sideWalls ? ['left', 'right'] : [])];
+}
+
 export function mapThumbnailLayout(map, width, height) {
   const bounds = map.cameraBounds;
   const worldWidth = bounds.right - bounds.left;
@@ -62,13 +69,13 @@ export function mapThumbnail(map, width, height) {
   }
   const thumbnail = Object.freeze({
     ...layout, interior, edge, rifts, base: toPixel(map.base.x, map.base.y),
-    arena: Boolean(map.arena), wallY: map.arena ? null : toPixel(0, map.bounds.bottom).y
+    arena: Boolean(map.arena), walls: mapWalls(map)
   });
   cache.set(key, thumbnail);
   return thumbnail;
 }
 
-export function drawMapThumbnail(shapes, colors, map, x, y, width, height, accent) {
+export function drawMapThumbnail(shapes, colors, map, x, y, width, height, accent, { riftColor = colors.red } = {}) {
   const thumb = mapThumbnail(map, width, height);
   const left = x + thumb.offsetX, top = y + thumb.offsetY;
   shapes.rect(left, top, thumb.frameWidth, thumb.frameHeight, colors.black);
@@ -79,15 +86,21 @@ export function drawMapThumbnail(shapes, colors, map, x, y, width, height, accen
     shapes.rect(left, top + thumb.frameHeight - 1, thumb.frameWidth, 1, colors.dimMint);
     shapes.rect(left, top, 1, thumb.frameHeight, colors.dimMint);
     shapes.rect(left + thumb.frameWidth - 1, top, 1, thumb.frameHeight, colors.dimMint);
-  } else if (thumb.wallY !== null) {
-    shapes.rect(left, top + thumb.wallY, thumb.frameWidth, 1, colors.dimMint);
-    for (let px = 0; px < thumb.frameWidth; px += 6) shapes.rect(left + px, top + thumb.wallY, 3, 1, colors.amber);
+  }
+  for (const wall of thumb.walls) {
+    const horizontal = wall === 'top' || wall === 'bottom';
+    const wx = wall === 'right' ? left + thumb.frameWidth - 1 : left;
+    const wy = wall === 'bottom' ? top + thumb.frameHeight - 1 : top;
+    shapes.rect(wx, wy, horizontal ? thumb.frameWidth : 1, horizontal ? 1 : thumb.frameHeight, colors.dimMint);
+    for (let step = 0; step < (horizontal ? thumb.frameWidth : thumb.frameHeight); step += 6) {
+      shapes.rect(horizontal ? wx + step : wx, horizontal ? wy : wy + step, horizontal ? 3 : 1, horizontal ? 1 : 3, colors.amber);
+    }
   }
   // Rift jaws: two red blocks around a one-pixel black fault.
   for (const rift of thumb.rifts) {
     shapes.rect(left + rift.x - 1, top + rift.y - 1, 3, 3, colors.black);
-    shapes.rect(left + rift.x - 1, top + rift.y - 1, 1, 3, colors.red);
-    shapes.rect(left + rift.x + 1, top + rift.y - 1, 1, 3, colors.red);
+    shapes.rect(left + rift.x - 1, top + rift.y - 1, 1, 3, riftColor);
+    shapes.rect(left + rift.x + 1, top + rift.y - 1, 1, 3, riftColor);
   }
   shapes.rect(left + thumb.base.x - 2, top + thumb.base.y - 2, 5, 5, colors.black);
   shapes.rect(left + thumb.base.x - 2, top + thumb.base.y - 1, 5, 3, colors.cyan);

@@ -278,7 +278,8 @@ for (const world of playableMaps()) {
   for (const source of world.spawnSources) {
     const beyondField = world.arena
       ? Math.abs(source.x) >= 1700 || Math.abs(source.y) >= 1700
-      : world.sideWalls ? source.y <= -950 : Math.abs(source.x) >= 3000 || source.y <= -2600;
+      : world.flow === 'west' ? source.x >= world.bounds.right - 200
+        : world.sideWalls ? source.y <= -950 : Math.abs(source.x) >= 3000 || source.y <= -2600;
     assert.ok(beyondField, 'rift must sit beyond the defense field');
     assert.ok(source.x - source.spreadX >= world.bounds.left);
     assert.ok(source.x + source.spreadX <= world.bounds.right);

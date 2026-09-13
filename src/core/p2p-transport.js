@@ -137,6 +137,7 @@ export class WebSocketRelayTransport {
     socket.onerror = () => this.handleClose('relay_error');
   }
 
+  get bufferedAmount() { return this.socket.bufferedAmount || 0; }
   send(message) {
     if (this.readyState !== 'open') return false;
     try { this.socket.send(message); return true; } catch { this.handleClose('relay_send_failed'); return false; }
@@ -171,7 +172,8 @@ class RelayLaneTransport {
   }
   get readyState() { return this.parent.readyState; }
   send(message) {
-    if (this.laneId === 2 && (this.parent.socket.bufferedAmount || 0) > 64 * 1024) return false;
+    if (this.readyState !== 'open') return false;
+    if (this.laneId === 2 && this.parent.bufferedAmount > 64 * 1024) return false;
     const binary = typeof message !== 'string';
     const body = binary ? normalizeChannelData(message) : new TextEncoder().encode(message);
     if (!body) return false;
@@ -205,6 +207,8 @@ class RoutedRelayTransport {
     this.unsubscribeClose = parent.onClose((reason) => this.handleClose(reason));
   }
   get readyState() { return this.closed ? 'closed' : this.parent.readyState; }
+  // Every guest route shares the host socket's send buffer.
+  get bufferedAmount() { return this.parent.bufferedAmount; }
   send(message) {
     const body = normalizeChannelData(message);
     if (!(body instanceof ArrayBuffer) || this.readyState !== 'open') return false;

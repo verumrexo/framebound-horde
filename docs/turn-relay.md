@@ -59,7 +59,7 @@ when direct UDP hole punching fails.
 `host-relay.command` runs a one-guest relay on the host mac. it serves the
 current production build and accepts a Cloudflare quick tunnel, which works
 over an outgoing phone-hotspot connection. install `cloudflared` first, then
-double-click `host-relay.command`. copy the printed `https://...trycloudflare.com`
-address, append `?relay=1`, and send that whole link to the guest. this is a
-temporary game relay, not a permanent public server; closing the terminal ends
-the session.
+double-click `host-relay.command`. once the tunnel connects, the complete
+`https://...trycloudflare.com/?relay=1` link is copied to the clipboard and printed
+on the last line. send that link to the guest. this is a temporary game relay,
+not a permanent public server; closing the terminal ends the session.

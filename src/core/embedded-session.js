@@ -152,8 +152,8 @@ export class EmbeddedAuthority {
     this.emit(EVENT.SESSION_STARTED, { sessionId, seed, mapId: this.map.id, mode: this.mode });
   }
 
-  bindMap(mapId) {
-    this.map = getMapDefinition(mapId, this.seed);
+  bindMap(mapId, randomRifts = Boolean(this.state?.randomRifts)) {
+    this.map = getMapDefinition(mapId, this.seed, { randomRifts });
     this.networkAreasByArea = new Map();
     this.relayTargetByTowerId = new Map();
     this.modifierCache = null;
@@ -164,12 +164,13 @@ export class EmbeddedAuthority {
     return new EnemySwarm({ seed: this.seed, map: this.map, ...this.swarmConfig });
   }
 
-  resetFreshRun(mapId = this.map.id, pace = this.state.pace ?? DEFAULT_PACE) {
+  resetFreshRun(mapId = this.map.id, pace = this.state.pace ?? DEFAULT_PACE, randomRifts = Boolean(this.state.randomRifts)) {
     this.state.dev = {};
     const nextMap = getMapDefinition(mapId);
     if (this.mode === 'game' && !nextMap.playable) throw new Error('map is not playable');
     if (this.mode === 'game') this.seed = mix32((this.seed + 0x9e3779b9) >>> 0);
-    this.bindMap(nextMap.id);
+    this.state.randomRifts = Boolean(randomRifts);
+    this.bindMap(nextMap.id, this.state.randomRifts);
     this.state.seed = this.seed;
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
@@ -205,6 +206,7 @@ export class EmbeddedAuthority {
       mapCatalog: playableMaps().map((map) => ({ id: map.id, label: map.label })),
       seed: this.seed,
       pace: DEFAULT_PACE,
+      randomRifts: false,
       tick: 0,
       runTick: 0,
       runNumber: 1,
@@ -1688,7 +1690,7 @@ export class EmbeddedAuthority {
     if (player.id !== this.state.hostPlayerId) return this.reject(command, 'only the host may start the run');
     if (this.connectedPlayers().length < 1) return this.reject(command, 'the lobby has no players');
     try {
-      this.resetFreshRun(command.payload.mapId || this.map.id, command.payload.pace ?? DEFAULT_PACE);
+      this.resetFreshRun(command.payload.mapId || this.map.id, command.payload.pace ?? DEFAULT_PACE, command.payload.randomRifts ?? this.state.randomRifts);
     } catch {
       return this.reject(command, 'selected map is unavailable');
     }
@@ -1706,7 +1708,7 @@ export class EmbeddedAuthority {
     if (this.state.phase === 'lobby') return this.reject(command, 'start the lobby instead of restarting it');
     if (this.connectedPlayers().length !== 1) return this.reject(command, 'multiplayer restart voting is not implemented');
     try {
-      this.resetFreshRun(command.payload.mapId || this.map.id, command.payload.pace ?? DEFAULT_PACE);
+      this.resetFreshRun(command.payload.mapId || this.map.id, command.payload.pace ?? DEFAULT_PACE, command.payload.randomRifts ?? this.state.randomRifts);
     } catch {
       return this.reject(command, 'selected map is unavailable');
     }
@@ -2174,7 +2176,7 @@ export class EmbeddedAuthority {
     try {
       const correctionMap = getMapDefinition(correction.mapId);
       if (this.mode === 'game' && !correctionMap.playable) throw new Error('map is not playable');
-      this.bindMap(correctionMap.id);
+      this.bindMap(correctionMap.id, Boolean(correction.state?.randomRifts));
     } catch {
       throw new Error('session correction map is incompatible');
     }
@@ -2202,6 +2204,7 @@ export class EmbeddedAuthority {
     this.state.research = { ...freshResearch(), ...(this.state.research || {}) };
     this.state.relayNetwork = { ...freshRelayNetwork(), ...(this.state.relayNetwork || {}) };
     this.state.pace = normalizePace(this.state.pace ?? DEFAULT_PACE);
+    this.state.randomRifts = Boolean(this.state.randomRifts);
     this.state.mapId = this.map.id;
     this.state.mapLabel = this.map.label;
     this.state.mapCatalog = playableMaps().map((map) => ({ id: map.id, label: map.label }));
