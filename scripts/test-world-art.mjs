@@ -1,6 +1,11 @@
+import { createAppState } from '../src/app/state.js';
+import { resetWorldPresentation } from '../src/app/presentation.js';
+import { drawTower } from '../src/render/world.js';
+import { drawReworkedCombat } from '../src/render/projectiles.js';
+import { drawNetworkLinks, startRelayCollapse, drawRelayCollapse } from '../src/render/network.js';
+import { drawRelayTargetOverlay } from '../src/render/placement-overlay.js';
+import { reactorShutdownAppearance } from '../src/ui/hud.js';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import vm from 'node:vm';
 import { TOWER_DEFINITIONS } from '../src/core/tower-catalog.js';
 import { AUTHORITY_TICK_RATE } from '../src/core/protocol.js';
 import { EmbeddedAuthority } from '../src/core/embedded-session.js';
@@ -263,90 +268,78 @@ assert.equal(damage.appearance(authority.state).hit, false, 'replacement snapsho
 assert.deepEqual(baseAppearance({ lives: 100 }, 100, 0, null, true), baseAppearance({ lives: 100 }, 100, 999, null, true));
 
 // Exercise the production draw routes, not just the standalone artwork helpers.
-const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
-const extract = (name) => {
-  const start = main.indexOf(`function ${name}(`);
-  assert.ok(start >= 0, name);
-  return main.slice(start, main.indexOf('\nfunction ', start + 1));
-};
 const calls = [];
 const shapes = Object.fromEntries(['rect', 'line', 'ring'].map((kind) => [kind, (...args) => calls.push({ kind, args })]));
 const template = getMapDefinition('map_01').defenseAreas[0].shape;
 const areas = ['a', 'b', 'd', 'e', 'pending'].map((id, index) => ({ id, shape: { ...template, x: 60 + index * 80, y: 200 } }));
-const context = vm.createContext({
-  drawCompactTowerSprite, towerScreenBounds, drawBodyBrackets, AUTHORITY_TICK_RATE, DEFAULT_RELAY_PALETTE, combatMetrics,
-  hashString32, isRelayForm, defenseAreaBounds, shapes, COLOR: colors,
-  camera: { x: 0, y: 0, scale: 1 }, logicalWidth: 800, logicalHeight: 600,
-  session: { networkRole: null, presentation: () => ({ count: 0, state: new Float32Array(0) }) }, sessionSnapshot: { runTick: 0, towers: [], attackFields: [], towerCatalog: Object.values(TOWER_DEFINITIONS) },
-  currentMap: { id: 'test', defenseAreas: areas }, reducedNetworkMotion: { matches: false },
-  project: (x, y) => ({ x, y }), socketPoint: () => null, sweepPose: () => null,
-  selectedTowerId: null, networkPresentation: shown, relayCollapse: null, RELAY_COLLAPSE_SECONDS: 2.2,
-  pointer: { x: 0, y: 0 }, unproject: () => origin, findDefenseAreaAt: () => 'b', relayCandidateAreas: () => areas,
-  baseDamage: damage, researchWave: null
-});
-vm.runInContext(['reactorShutdownAppearance', 'catalogDefinition', 'drawReworkedCombat', 'drawTower', 'defenseAreaCenterById', 'drawDashedLink', 'relayColors', 'drawNetworkLinks',
-  'drawWorldRing', 'drawAreaTargetBrackets', 'drawRelayTargetOverlay', 'startRelayCollapse', 'drawRelayCollapse',
-  'resetWorldPresentation'].map(extract).join('\n'), context);
+const app = createAppState();
+Object.assign(app.viewport, { logicalWidth: 800, logicalHeight: 600, camera: { x: 0, y: 0, scale: 1 } });
+app.renderer.shapes = shapes;
+app.game.session = { networkRole: null, presentation: () => ({ count: 0, state: new Float32Array(0) }) };
+app.game.sessionSnapshot = { runTick: 0, towers: [], attackFields: [], towerCatalog: Object.values(TOWER_DEFINITIONS) };
+app.game.currentMap = { id: 'test', defenseAreas: areas };
+app.effects.networkPresentation = shown;
+app.effects.baseDamage = damage;
 const draw = (operation) => { calls.length = 0; operation(); return structuredClone(calls); };
 for (const definitionId of Object.keys(TOWER_DEFINITIONS)) for (const zoom of zooms) {
   const tower = { id: 'subject', definitionId, x: 200, y: 200 };
-  context.camera.scale = zoom;
-  context.sessionSnapshot.towers = [tower];
-  const alone = draw(() => context.drawTower(tower));
+  app.viewport.camera.scale = zoom;
+  app.game.sessionSnapshot.towers = [tower];
+  const alone = draw(() => drawTower(app, tower));
   for (const distance of [100, 24, 12, 0]) {
-    context.sessionSnapshot.towers = [tower, { id: 'neighbour', x: 200 + distance, y: 200 }];
-    assert.deepEqual(draw(() => context.drawTower(tower)), alone, `${definitionId}/${zoom}: neighbours cannot resize bodies`);
+    app.game.sessionSnapshot.towers = [tower, { id: 'neighbour', x: 200 + distance, y: 200 }];
+    assert.deepEqual(draw(() => drawTower(app, tower)), alone, `${definitionId}/${zoom}: neighbours cannot resize bodies`);
   }
-  context.sessionSnapshot.towers = [];
-  assert.deepEqual(draw(() => context.drawTower({ ...tower, id: undefined })), alone, 'placement ghost and retired/sold neighbours keep identical size');
+  app.game.sessionSnapshot.towers = [];
+  assert.deepEqual(draw(() => drawTower(app, { ...tower, id: undefined })), alone, 'placement ghost and retired/sold neighbours keep identical size');
 }
 // Barrage descendants (broadside pellets, flechette nails, cyclone orbits) and the
 // reworked control forms draw from state.turretRework, which is recreated every tick.
 for (const zoom of zooms) {
-  context.camera.scale = zoom;
+  app.viewport.camera.scale = zoom;
   const shots = ['pellet', 'nail', 'splinter', 'orbit', 'embedded', 'freeze_shell', 'gravity_seed', 'chain']
     .map((type, index) => ({ type, x: 100 + index * 20, y: 100, dx: 1, dy: 0 }));
   const visuals = [{ type: 'ray', x: 0, y: 0, x2: 50, y2: 0 }, { type: 'gravity', x: 0, y: 0, radius: 40 }];
-  const result = draw(() => context.drawReworkedCombat({ runTick: 5, turretRework: { shots, chains: [], visuals } }));
+  const result = draw(() => drawReworkedCombat(app, { runTick: 5, turretRework: { shots, chains: [], visuals } }));
   const rectangles = result.filter(({ kind }) => kind === 'rect');
   assert.ok(rectangles.length >= shots.length + 1, `${zoom}: every reworked shot draws a visible head`);
   const reach = combatMetrics(zoom).heavy + 2;
   for (const { args } of rectangles) assert.ok(args[2] <= reach && args[3] <= reach, `${zoom}: reworked heads stay proportional`);
-  assert.equal(draw(() => context.drawReworkedCombat({ runTick: 5 })).length, 0, 'no rework state draws nothing');
+  assert.equal(draw(() => drawReworkedCombat(app, { runTick: 5 })).length, 0, 'no rework state draws nothing');
 }
-context.camera.scale = 4;
+app.viewport.camera.scale = 4;
 const linked = { ...topology, towers: topology.towers.map((tower, index) => ({ ...tower, x: 60 + index * 80, y: 200 })),
   runTick: 30, towerCatalog: Object.values(TOWER_DEFINITIONS) };
 const assertNoGreen = (result) => {
   assert.ok(result.length);
   for (const { args } of result) assert.ok(nonGreen(args.at(-1)), 'relay route emitted green');
 };
-assertNoGreen(draw(() => context.drawNetworkLinks(linked)));
-assertNoGreen(draw(() => context.drawNetworkLinks({ ...linked, ...completed })));
-assertNoGreen(draw(() => context.drawRelayTargetOverlay(linked, linked.towers[0])));
-context.sessionSnapshot.runTick = 0;
-context.startRelayCollapse({ payload: { tick: 0, retired: [{ towerId: 'r1', areaId: 'a', targetAreaId: 'b', x: 60, y: 200 }], areaIds: ['a', 'b'] } });
+assertNoGreen(draw(() => drawNetworkLinks(app, linked)));
+assertNoGreen(draw(() => drawNetworkLinks(app, { ...linked, ...completed })));
+assertNoGreen(draw(() => drawRelayTargetOverlay(app, linked, linked.towers[0])));
+app.game.sessionSnapshot.runTick = 0;
+startRelayCollapse(app, { payload: { tick: 0, retired: [{ towerId: 'r1', areaId: 'a', targetAreaId: 'b', x: 60, y: 200 }], areaIds: ['a', 'b'] } });
 for (const runTick of [0, 25, 55, 90, 120]) {
-  const result = draw(() => context.drawRelayCollapse({ runTick }));
+  const result = draw(() => drawRelayCollapse(app, { runTick }));
   assertNoGreen(result);
-  assert.deepEqual(draw(() => context.drawRelayCollapse({ runTick })), result, 'completion freezes with paused ticks');
+  assert.deepEqual(draw(() => drawRelayCollapse(app, { runTick })), result, 'completion freezes with paused ticks');
 }
-context.reducedNetworkMotion.matches = true;
-assert.deepEqual(draw(() => context.drawRelayCollapse({ runTick: 120 })), []);
+app.effects.reducedNetworkMotion.matches = true;
+assert.deepEqual(draw(() => drawRelayCollapse(app, { runTick: 120 })), []);
 for (const [age, state] of [[0, 'healthy'], [0.2, 'damaged'], [0.35, 'critical'], [0.6, 'destroyed'], [Infinity, 'destroyed']]) {
-  const appearance = context.reactorShutdownAppearance({}, age);
+  const appearance = reactorShutdownAppearance({}, age);
   assert.equal(appearance.state, state);
   capture((shapes) => drawBaseSprite(shapes, colors, origin, appearance));
 }
-context.researchWave = { startedTick: 0 };
-context.assembly = assembly;
-context.defeatSeenAt = 5;
+app.effects.researchWave = { startedTick: 0 };
+app.effects.assembly = assembly;
+app.effects.defeatSeenAt = 5;
 assembly.begin({ id: 't9', x: 0, y: 0 }, 'placed', 0);
-context.resetWorldPresentation();
+resetWorldPresentation(app);
 assert.equal(assembly.items.length, 0, 'replacement sessions clear pending reveals');
-assert.equal(context.defeatSeenAt, null);
-assert.equal(context.relayCollapse, null);
-assert.equal(context.researchWave, null);
+assert.equal(app.effects.defeatSeenAt, null);
+assert.equal(app.effects.relayCollapse, null);
+assert.equal(app.effects.researchWave, null);
 assert.equal(damage.hitTick, null);
 
 console.log('world art: fixed tower bounds, combat mark proportions, assembly reveal, map contours, reactor shutdown, relay palettes/routes, rift states, base damage, reduced motion and pause passed');

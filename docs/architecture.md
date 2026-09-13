@@ -60,7 +60,17 @@ nebulae do not run a fifty-area loop inside every fullscreen fragment. the rende
 
 ## renderer
 
-`main.js` owns one webgl2 canvas for the complete world and hud. its backing resolution is recalculated from the available window using an integer 1× or 2× display-pixel scale. the camera and projected geometry are rounded to logical pixels.
+`src/main.js` creates the webgl2 canvas and renderers, installs browser lifecycle/input handlers, activates the initial session, and starts the frame loop. the implementation is split by responsibility:
+
+| location | responsibility |
+| --- | --- |
+| `src/app/` | live client state, camera, input, session/save lifecycle, multiplayer, commands, event handling, and frame scheduling |
+| `src/render/` | gpu programs and batches, bitmap atlas, world art, combat effects, links, and placement overlays |
+| `src/ui/` | bitmap widgets, menus, catalog, research, tower panels, hud, and social overlays |
+
+`app/state.js` creates the shared client state. controllers receive it explicitly and read current snapshots and viewport dimensions from its objects; rendering classes receive the gpu context and live viewport. module imports have no browser startup side effects and no cycles. `app/frame-loop.js` advances the session, `app/session-events.js` handles its events, and `app/render-frame.js` preserves draw order. `core/` retains authority, simulation, protocol, and transport logic.
+
+the single canvas contains the complete world and hud. its backing resolution is recalculated from the available window using an integer 1× or 2× display-pixel scale. the camera and projected geometry are rounded to logical pixels.
 
 rendering uses:
 
@@ -108,7 +118,7 @@ allowed automated diagnostics are syntax/compiler checks, production builds, det
 
 ## tower presentation and regression gates
 
-`src/render/tower-sprites.js` renders all 40 tower bodies using rectangles only. the caller supplies position, palette, placement tint and animation state; it has no authority or browser dependency. `src/main.js` owns world-space socket links and derives bond illumination from effective control cadence, including network buffs.
+`src/render/tower-sprites.js` renders all 40 tower bodies using rectangles only. the caller supplies position, palette, placement tint and animation state; it has no authority or browser dependency. `src/render/world.js` and `src/render/network.js` own world-space socket links and derive bond illumination from effective control cadence, including network buffs.
 
 `npm run check` runs syntax checks, tower-art contracts, persistence event regressions and the network-descendant regression suite. `npm run build` produces the playable bundle. these checks do not establish browser visual acceptance or multi-machine connectivity.
 
