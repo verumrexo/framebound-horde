@@ -206,7 +206,7 @@ use the framebound visual system for this project: a dominant #010607 near-black
 
 frame and its three direct replacements (assault, tether, network) are the reference. every existing and future turret is assembled from horizontal and vertical rectangles: square housings, inset cores, blunt barrels, cooling fins, rails, sockets and mechanical blocks. no diagonals, slanted silhouettes, angled components, triangular bodies or rotating body parts. animation moves indicators along straight rails or changes illumination. silhouettes remain stable.
 
-`src/render/tower-sprites.js` owns body art for the world, placement previews and catalog. world-space links and combat geometry are separate. `npm run test:art` exercises every catalog entry with a rectangle-only drawing interface and checks integer geometry, sprite bounds, distinct designs and placement tint. preserve this gate for future forms. the bitmap atlas in `src/main.js` remains the typography source of truth.
+`src/render/tower-sprites.js` owns body art for the world, placement previews and catalog. world-space links and combat geometry are separate. `npm run test:art` exercises every catalog entry with a rectangle-only drawing interface and checks integer geometry, sprite bounds, distinct designs and placement tint. preserve this gate for future forms. the bitmap atlas in `src/render/bitmap-text.js` remains the typography source of truth.
 
 ## reduced motion
 
