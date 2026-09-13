@@ -15,6 +15,7 @@ const NETWORK_PRESENTATION_DELAY_TICKS = 3;
 const MAX_PLAYERS = 4;
 const MAX_INVALID_MESSAGES = 8;
 const RESYNC_COOLDOWN_MS = 2000;
+const RECOVERY_RETRY_MS = 10_000;
 const CHAT_WINDOW_MS = 5000;
 const CHAT_WINDOW_LIMIT = 4;
 const PING_COOLDOWN_MS = 1000;
@@ -87,6 +88,7 @@ export class P2PHostSession {
       ready: false,
       invalidMessages: 0,
       lastResyncAt: -Infinity,
+      resyncRequested: false,
       socialRate: { chat: [], pingAt: -Infinity },
       incomingPresenceSequence: -1
     };
@@ -201,10 +203,8 @@ export class P2PHostSession {
       return;
     }
     if (message.type === 'resync_request') {
-      const now = performance.now();
-      if (now - peer.lastResyncAt < RESYNC_COOLDOWN_MS) return;
-      peer.lastResyncAt = now;
-      this.sendCorrection(peer, 'requested');
+      peer.resyncRequested = true;
+      this.flushPeerResyncs();
       return;
     }
     if (message.type === 'pong') return;
@@ -367,6 +367,16 @@ export class P2PHostSession {
     }
   }
 
+  flushPeerResyncs() {
+    const now = performance.now();
+    for (const peer of this.peers.values()) {
+      if (!peer.ready || !peer.resyncRequested || now - peer.lastResyncAt < RESYNC_COOLDOWN_MS) continue;
+      peer.resyncRequested = false;
+      peer.lastResyncAt = now;
+      this.sendCorrection(peer, 'requested');
+    }
+  }
+
   sendCorrection(peer, reason) {
     const payload = {
       reason,
@@ -436,6 +446,7 @@ export class P2PHostSession {
       }
     }
     this.flushPeerWelcomes();
+    this.flushPeerResyncs();
     this.syncElapsedMs += elapsedMs;
     if (this.syncElapsedMs >= NETWORK_SYNC_INTERVAL_MS) {
       this.syncElapsedMs %= NETWORK_SYNC_INTERVAL_MS;
@@ -479,6 +490,7 @@ export class P2PGuestSession {
     this.receiver = null;
     this.unsubscribeMessage = null;
     this.connected = false;
+    this.welcomed = false;
     this.synced = false;
     this.latestHostTick = 0;
     this.hostTickEstimate = 0;
@@ -487,6 +499,7 @@ export class P2PGuestSession {
     this.lastMismatchKey = null;
     this.mismatchCount = 0;
     this.resyncRequestedAt = -Infinity;
+    this.lastCorrectionProgressAt = -Infinity;
     this.resyncPending = false;
     this.lastHostMessageAt = performance.now();
     this.stalled = false;
@@ -515,6 +528,11 @@ export class P2PGuestSession {
     this.receiver = new PeerPacketReceiver({
       onControl: (message) => this.receiveControl(message),
       onPacket: (kind, payload) => this.receivePacket(kind, payload),
+      onPacketProgress: ({ kind }) => {
+        if (kind !== 'correction') return;
+        this.lastCorrectionProgressAt = performance.now();
+        this.resyncPending = true;
+      },
       onError: (message) => this.fail(message)
     });
     this.unsubscribeMessage = this.transport.onMessage((raw) => this.receiver.receive(raw));
@@ -546,7 +564,11 @@ export class P2PGuestSession {
     this.presenceTransport = null;
     this.receiver = null;
     this.connected = false;
+    this.welcomed = false;
     this.synced = false;
+    this.resyncPending = false;
+    this.resyncRequestedAt = -Infinity;
+    this.lastCorrectionProgressAt = -Infinity;
     this.onStatus?.('disconnected', reason);
   }
 
@@ -596,6 +618,8 @@ export class P2PGuestSession {
         return this.fail('host welcome is invalid');
       }
       this.playerId = message.playerId;
+      this.welcomed = true;
+      this.lastHostMessageAt = performance.now();
       this.sequence = Math.max(this.sequence, message.sequence);
       this.latestHostTick = Math.max(this.latestHostTick, Number(message.authorityTick) || 0);
       this.resumeToken = typeof message.resumeToken === 'string' ? message.resumeToken.slice(0, 128) : this.resumeToken;
@@ -616,8 +640,10 @@ export class P2PGuestSession {
       this.lastHostMessageAt = performance.now();
       this.latestHostTick = Math.max(this.latestHostTick, message.authorityTick);
       const clockError = message.authorityTick - this.hostTickEstimate;
-      if (this.synced && Math.abs(clockError) > AUTHORITY_TICK_RATE * 0.5) {
-        this.requestResync('clock_gap');
+      if (Math.abs(clockError) > AUTHORITY_TICK_RATE * 0.5) {
+        // A slow snapshot queues newer clock samples behind it. Catch up from
+        // the valid state we received; clock drift alone is not state divergence.
+        this.hostTickEstimate = message.authorityTick;
       } else {
         this.hostTickEstimate += Math.max(-2, Math.min(4, clockError * 0.5));
       }
@@ -664,10 +690,13 @@ export class P2PGuestSession {
   requestResync(reason) {
     const now = performance.now();
     if (!this.transport || now - this.resyncRequestedAt < RESYNC_COOLDOWN_MS) return false;
+    if (this.resyncPending && now - Math.max(this.resyncRequestedAt, this.lastCorrectionProgressAt) < RECOVERY_RETRY_MS) return false;
+    // The reliable stream delivers any old trailing chunks before the new
+    // header. Discard an incomplete packet so it cannot poison the retry.
+    this.receiver?.reset();
     this.resyncRequestedAt = now;
-    const sent = sendPeerControl(this.transport, 'resync_request', { reason });
-    if (sent) this.resyncPending = true;
-    return sent;
+    this.resyncPending = true;
+    return sendPeerControl(this.transport, 'resync_request', { reason });
   }
 
   checkSync() {
@@ -700,7 +729,13 @@ export class P2PGuestSession {
 
   advance(elapsedMs) {
     let adjusted = 0;
-    this.stalled = this.connected && this.synced && performance.now() - this.lastHostMessageAt > 1500;
+    const now = performance.now();
+    this.stalled = this.connected && this.synced && now - this.lastHostMessageAt > 1500;
+    const recoveryProgressAt = this.resyncPending
+      ? Math.max(this.resyncRequestedAt, this.lastCorrectionProgressAt)
+      : this.lastHostMessageAt;
+    if (this.connected && this.welcomed && (this.resyncPending || this.stalled || !this.synced)
+      && now - recoveryProgressAt >= RECOVERY_RETRY_MS) this.requestResync('snapshot_timeout');
     if (this.connected && this.synced && !this.resyncPending && !this.stalled) {
       this.hostTickEstimate += Math.max(0, elapsedMs) / AUTHORITY_TICK_MS;
       const targetTick = this.hostTickEstimate - NETWORK_PRESENTATION_DELAY_TICKS;

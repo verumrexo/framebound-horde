@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EmbeddedAuthority } from '../src/core/embedded-session.js';
 import { P2PGuestSession, P2PHostSession, REMOTE_COMMANDS } from '../src/core/p2p-session.js';
+import { RelayConnectionCoordinator } from '../src/core/p2p-transport.js';
 import { PROTOTYPE_SESSION_CONFIG } from '../src/core/session-config.js';
 import { AUTHORITY_TICK_RATE, COMMAND } from '../src/core/protocol.js';
 import { sendPeerControl } from '../src/core/p2p-wire.js';
@@ -217,6 +218,138 @@ test('four-peer host session authenticates social presence and reconnects withou
   pumpHost();
   assert.equal(hostAuthority.state.players[1].connectionState, 'connected');
   assert.equal(guests[0].guest.synced, true);
+});
+
+// Exercise the production coordinators, routed transports and sessions without
+// requiring socket binding. Only the relay server's outer route byte is mocked.
+function relaySessionFixture() {
+  let hostSocket;
+  const guestSockets = [];
+  class RelaySocket {
+    constructor(url) {
+      this.readyState = WebSocket.CONNECTING;
+      this.bufferedAmount = 0;
+      this.slot = new URL(url).searchParams.get('role') === 'host' ? 0 : guestSockets.length + 1;
+      if (this.slot) guestSockets.push(this);
+      else hostSocket = this;
+    }
+    open() {
+      this.readyState = WebSocket.OPEN;
+      if (this.slot) hostSocket.onmessage({ data: JSON.stringify({ type: 'peer_joined', peerId: `relay-guest-${this.slot}` }) });
+      this.onopen();
+    }
+    send(data) {
+      assert.equal(this.readyState, WebSocket.OPEN);
+      if (typeof data === 'string') return;
+      const bytes = new Uint8Array(data);
+      if (this.slot) {
+        const routed = new Uint8Array(bytes.length + 1);
+        routed[0] = this.slot;
+        routed.set(bytes, 1);
+        hostSocket.onmessage({ data: routed.buffer });
+      } else guestSockets[bytes[0] - 1].onmessage({ data: bytes.slice(1).buffer });
+    }
+    close() { this.readyState = WebSocket.CLOSED; this.onclose(); }
+  }
+  const options = { relayUrl: 'ws://relay.test/relay', WebSocketClass: RelaySocket };
+  const host = new P2PHostSession(authority(), { clientId: 'relay_host', label: 'host' });
+  host.connect();
+  host.advance(20);
+  const advanceHost = () => { for (let index = 0; index < 4; index += 1) host.advance(100); };
+  const hostCoordinator = new RelayConnectionCoordinator(options);
+  hostCoordinator.onConnected = ({ peerId, transport }) => host.attachPeer(peerId, transport);
+  hostCoordinator.host();
+  hostSocket.open();
+  const guests = [];
+  const guestCoordinators = [];
+  for (let index = 0; index < 3; index += 1) {
+    const guest = new P2PGuestSession(authority(), { clientId: `relay_guest_${index}` });
+    const coordinator = new RelayConnectionCoordinator(options);
+    coordinator.onConnected = ({ transport }) => guest.attachTransport(transport);
+    coordinator.join(hostCoordinator.code);
+    guestSockets[index].open();
+    advanceHost();
+    assert.equal(guest.synced, true);
+    guests.push(guest);
+    guestCoordinators.push(coordinator);
+  }
+  return {
+    host, guests, hostSocket, guestSockets, hostCoordinator, advanceHost,
+    close() { hostCoordinator.disconnect(); for (const coordinator of guestCoordinators) coordinator.disconnect(); }
+  };
+}
+
+test('relay sessions deliver host presence, forwarded guest presence and departure markers', () => {
+  const fixture = relaySessionFixture();
+  const { host, guests } = fixture;
+  try {
+    const received = guests.map(() => []);
+    guests.forEach((guest, index) => { guest.onPresence = (message) => received[index].push(message); });
+    const point = host.authority.map.base;
+    assert.equal(host.sendPresence({ active: true, x: point.x, y: point.y, activity: 'looking' }), true);
+    for (const messages of received) {
+      assert.equal(messages.at(-1).playerId, host.playerId);
+      assert.equal(messages.at(-1).x, Math.round(point.x));
+    }
+    const hostPresence = [];
+    host.onPresence = (message) => hostPresence.push(message);
+    assert.equal(guests[0].sendPresence({ active: true, x: point.x + 1, y: point.y }), true);
+    assert.equal(hostPresence.at(-1).playerId, guests[0].playerId);
+    assert.equal(received[0].length, 1, 'presence is not echoed to its sender');
+    for (const messages of received.slice(1)) {
+      assert.equal(messages.at(-1).playerId, guests[0].playerId);
+      assert.equal(messages.at(-1).x, Math.round(point.x + 1));
+    }
+    host.detachPeer('relay-guest-1');
+    for (const messages of received.slice(1)) {
+      assert.equal(messages.at(-1).playerId, guests[0].playerId);
+      assert.equal(messages.at(-1).active, false);
+    }
+    const previousTick = guests[1].latestHostTick;
+    fixture.advanceHost();
+    assert.ok(guests[1].latestHostTick > previousTick, 'host sync continues after sending presence');
+  } finally { fixture.close(); }
+});
+
+test('relay presence drops under shared socket pressure, resumes after drain and rejects closed routes', () => {
+  const fixture = relaySessionFixture();
+  const { host, guests, hostSocket, guestSockets, hostCoordinator } = fixture;
+  try {
+    const received = guests.map(() => []);
+    guests.forEach((guest, index) => { guest.onPresence = (message) => received[index].push(message); });
+    const hostPresence = [];
+    host.onPresence = (message) => hostPresence.push(message);
+    hostSocket.bufferedAmount = 64 * 1024 + 1;
+    host.sendPresence({ active: false });
+    assert.equal(guests[0].sendPresence({ active: false }), true);
+    assert.equal(hostPresence.length, 1, 'guest presence still reaches the host');
+    assert.ok(received.every((messages) => messages.length === 0), 'all host routes share the socket pressure');
+    const social = [];
+    guests[0].onSocial = (message) => social.push(message);
+    assert.equal(host.sendChat('still connected'), true);
+    assert.equal(social.at(-1).text, 'still connected');
+    const previousTick = guests[0].latestHostTick;
+    fixture.advanceHost();
+    assert.ok(guests[0].latestHostTick > previousTick, 'gameplay sync is not dropped with presence');
+    let correctionReason = null;
+    guests[0].onReady = (_snapshot, { reason }) => { correctionReason = reason; };
+    assert.equal(host.sendCorrection(host.peers.get('relay-guest-1'), 'buffer_pressure'), true);
+    assert.equal(correctionReason, 'buffer_pressure', 'binary snapshots still arrive under presence pressure');
+    hostSocket.bufferedAmount = 0;
+    host.sendPresence({ active: false });
+    assert.ok(received.every((messages) => messages.length === 1), 'dropped presence is not replayed after drain');
+    guestSockets[0].bufferedAmount = 64 * 1024 + 1;
+    assert.equal(guests[0].sendPresence({ active: false }), false);
+    assert.equal(hostPresence.length, 1);
+    guestSockets[0].bufferedAmount = 0;
+    assert.equal(guests[0].sendPresence({ active: false }), true);
+    assert.equal(hostPresence.length, 2);
+    const peer = host.peers.get('relay-guest-1');
+    hostCoordinator.hostPeers.get(peer.id).handleClose('peer_left');
+    assert.equal(sendPeerControl(peer.presenceTransport, 'presence', { active: false }), false);
+    guestSockets[0].close();
+    assert.equal(guests[0].sendPresence({ active: false }), false);
+  } finally { fixture.close(); }
 });
 
 async function waitUntil(predicate, timeoutMs = 3000) {
