@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { fitPixelTelemetry, pixelActionLayout, pixelHudLayout } from '../src/ui/pixel-layout.js';
-import { attachedPanelPosition, catalogLayout, centeredPanel, coopMenuLayout, defeatLayout, escapeMenuLayout,
+import { attachedPanelPosition, catalogLayout, centeredPanel, coopMenuLayout, defeatLayout, escapeMenuLayout, optionsLayout,
   mainMenuLayout, mapSelectionLayout } from '../src/ui/panel-layout.js';
 
 for (const width of [320, 480, 640, 960]) {
@@ -56,6 +56,7 @@ for (const [width, height] of viewports) {
     }
   }
   within(coopMenuLayout(viewport), viewport);
+  within(optionsLayout(viewport), viewport);
   const defeat = defeatLayout(viewport);
   within(defeat, viewport);
   assert.ok(defeat.rows.retry < defeat.rows.map && defeat.rows.map < defeat.rows.menu && defeat.rows.menu + 17 <= defeat.height);

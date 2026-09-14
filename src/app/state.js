@@ -1,4 +1,5 @@
 import { loadGameplayPreferences, loadPlayerName } from './preferences.js';
+import { createSoundPresentation } from './sound-presentation.js';
 import { PROTOTYPE_SESSION_CONFIG } from '../core/session-config.js';
 import { getMapDefinition } from '../core/world-config.js';
 import { AssemblyPresentation } from '../render/assembly.js';
@@ -60,8 +61,18 @@ export function createAppState({ canvas = null, errorPanel = null, reducedNetwor
       perimeterIntel: [],
       perimeterIntelTick: -1,
     },
+    // Audio and the part lab are presentation-only; main.js fills manager/forge at startup.
+    audio: {
+      manager: null,
+      forge: null,
+      ready: false,
+      presentation: createSoundPresentation(),
+    },
+    partLab: null,
+    openPartLab: null,
     ui: {
       devToolsOpen: false,
+      partLabOpen: false,
       frontEndScreen: 'main',
       menuConfirm: null,
       escapeMenuPage: 'main',

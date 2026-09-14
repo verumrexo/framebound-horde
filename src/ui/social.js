@@ -110,7 +110,7 @@ export function drawChat(app, snapshot, now) {
 }
 
 export function drawCursor(app) {
-  const color = app.ui.frontEndScreen === 'main' ? COLOR.mint : ['escape', 'map_select'].includes(app.ui.frontEndScreen) ? COLOR.amber : app.ui.frontEndScreen === 'coop' ? COLOR.green : COLOR.cyan;
+  const color = app.ui.frontEndScreen === 'main' ? COLOR.mint : ['escape', 'map_select', 'options'].includes(app.ui.frontEndScreen) ? COLOR.amber : app.ui.frontEndScreen === 'coop' ? COLOR.green : COLOR.cyan;
   app.renderer.shapes.rect(app.ui.pointer.x - 4, app.ui.pointer.y, 3, 1, color);
   app.renderer.shapes.rect(app.ui.pointer.x + 2, app.ui.pointer.y, 3, 1, color);
   app.renderer.shapes.rect(app.ui.pointer.x, app.ui.pointer.y - 4, 1, 3, color);

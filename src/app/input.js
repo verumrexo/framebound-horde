@@ -1,10 +1,11 @@
 import { allowedZoomLevels, canvasPoint, clampCameraToMap, unproject } from './camera.js';
 import { beginHostingCoop, beginJoiningCoop, cancelMultiplayer, openJoinCoop, updateMultiplayerStatus } from './multiplayer.js';
-import { adjustRunPace, closeEscapeOptions, closeMapSelection, deploySelectedMap, enterTestField, openCoopMapSelection, openEscapeMenu, resumeSession, selectRunMap, startOrContinueGame, toggleAutoSelectPlacedFrame, toggleHostilePalette, toggleRandomRifts } from './navigation.js';
+import { adjustRunPace, closeEscapeOptions, closeMainOptions, openMainOptions, setVolume, closeMapSelection, deploySelectedMap, enterTestField, openCoopMapSelection, openEscapeMenu, resumeSession, selectRunMap, startOrContinueGame, toggleAutoSelectPlacedFrame, toggleHostilePalette, toggleRandomRifts } from './navigation.js';
 import { savePlayerName } from './preferences.js';
 import { catalogDefinition, weaponView } from './queries.js';
 import { openResearchStation, purchaseStationItem, stationItems } from './research-actions.js';
 import { activateSession } from './sessions.js';
+import { playUiClick } from './sound-presentation.js';
 import { setTestConfig } from './test-field.js';
 import { armFramePlacement, clearSelectedStrikePoint, closeBuildCatalog, cycleSelectedTargeting, evolveSelectedTower, handleWorldClick, openBuildCatalog, openControlGeometryMenu, openRelayTargetMenu, openStrikeTargetMenu, openUpgradeMenu, resetSelectedControlGeometry, selectBulkPlacementDefinition, sellSelectedTower, sendSelectedControlGeometry, switchTestTowerForm } from './tower-actions.js';
 import { cancelPointerGesture, hitboxAt, setStatus } from './ui-state.js';
@@ -34,6 +35,9 @@ export function handleUiDrag(app, point, final = false) {
       else active.add(app.ui.uiDrag.sourceId);
       setTestConfig(app, { activeSpawnSourceIds: [...active] });
     }
+  } else if (app.ui.uiDrag.kind === 'volume') {
+    const { sliderX, sliderWidth, channel } = app.ui.uiDrag;
+    setVolume(app, channel, (point.x - sliderX) / Math.max(1, sliderWidth - 1));
   } else if (app.ui.uiDrag.kind === 'tower') {
     if (final && app.ui.uiDrag.distance <= 2) {
       app.ui.selectedTowerId = app.ui.uiDrag.towerId;
@@ -47,12 +51,16 @@ export function handleUiDrag(app, point, final = false) {
 
 export function installInput(app) {
   app.renderer.canvas.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || !event.isPrimary) return;
+    app.audio.manager?.unlock();
+    if (event.button !== 0 || !event.isPrimary || app.ui.partLabOpen) return;
     app.ui.pointer = canvasPoint(app, event);
     const hitbox = hitboxAt(app, app.ui.pointer);
     if (hitbox) {
       event.preventDefault();
-      if (hitbox.action) hitbox.action();
+      if (hitbox.action) {
+        playUiClick(app);
+        hitbox.action();
+      }
       if (hitbox.drag) {
         app.ui.uiDrag = {
           ...hitbox.drag,
@@ -179,8 +187,10 @@ export function installInput(app) {
   }, { passive: false });
 
   addEventListener('keydown', (event) => {
+    if (app.ui.partLabOpen) return;
     if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
     if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+    app.audio.manager?.unlock();
     const key = event.key.toLowerCase();
     if (app.multiplayer.editingName) {
       if (event.key === 'Escape') app.multiplayer.editingName = false;
@@ -201,6 +211,11 @@ export function installInput(app) {
       } else if (event.key === 'Backspace') app.social.chatInput = app.social.chatInput.slice(0, -1);
       else if (event.key.length === 1 && app.social.chatInput.length < 160) app.social.chatInput += event.key;
       event.preventDefault();
+      return;
+    }
+    if (event.key === 'F3' && ['game', 'escape'].includes(app.ui.frontEndScreen) && app.openPartLab) {
+      event.preventDefault(); cancelPointerGesture(app);
+      if (app.partLab) app.partLab.toggle(); else void app.openPartLab().then((lab) => lab.open());
       return;
     }
     if (event.key === 'F2' && app.ui.frontEndScreen === 'game') {
@@ -233,12 +248,14 @@ export function installInput(app) {
       else if (app.ui.frontEndScreen === 'escape' && app.ui.escapeMenuPage !== 'main') closeEscapeOptions(app);
       else if (app.ui.frontEndScreen === 'escape') resumeSession(app);
       else if (app.ui.frontEndScreen === 'map_select') closeMapSelection(app);
+      else if (app.ui.frontEndScreen === 'options') closeMainOptions(app);
       else if (app.ui.frontEndScreen === 'coop') cancelMultiplayer(app, true);
       return;
     }
     if (app.ui.frontEndScreen === 'main') {
       if (event.key === 'Enter') startOrContinueGame(app);
       else if (key === 't') enterTestField(app);
+      else if (key === 'o') openMainOptions(app);
       else if (key === 'h') {
         if (app.game.sessions.get('game')?.networkRole) app.ui.frontEndScreen = 'coop';
         else beginHostingCoop(app);

@@ -27,7 +27,7 @@ export function mainMenuLayout(viewport) {
 }
 
 export function escapeMenuLayout(viewport, { page = 'main', networkActive = false } = {}) {
-  const full = page === 'help' ? 222 : networkActive ? 212 : 191;
+  const full = page === 'help' ? 222 : page === 'options' ? 246 : networkActive ? 212 : 191;
   const panel = centeredPanel(viewport, page === 'help' ? 288 : 264, full, 20, 16);
   const compact = page === 'main' && panel.height < full;
   const tierGap = compact ? 0 : 6;
@@ -40,6 +40,11 @@ export function escapeMenuLayout(viewport, { page = 'main', networkActive = fals
     rowY: (index) => panel.y + (compact ? 43 : 64) + index * (compact ? 18 : 21) + (index >= 2 ? tierGap : 0),
     dividerY: compact ? null : panel.y + 64 + 2 * 21 + 2
   };
+}
+
+export function optionsLayout(viewport) {
+  const panel = centeredPanel(viewport, 264, 156, 20, 16);
+  return { ...panel, buttonX: panel.x + 17, buttonWidth: panel.width - 34 };
 }
 
 export function coopMenuLayout(viewport) {

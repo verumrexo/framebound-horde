@@ -158,6 +158,48 @@ export function closeEscapeOptions(app) {
 // Colour-vision fallback: hostiles swap to a magenta-led ramp that stays apart from
 // system green. Presentation only; hp values, statuses and packets are unchanged.
 
+export const VOLUME_CHANNELS = Object.freeze([
+  Object.freeze({ id: 'master', label: 'master', getter: 'masterVolume', setter: 'setMasterVolume' }),
+  Object.freeze({ id: 'music', label: 'music', getter: 'musicVolume', setter: 'setMusicVolume' }),
+  Object.freeze({ id: 'sfx', label: 'sfx', getter: 'sfxVolume', setter: 'setSfxVolume' })
+]);
+
+export function volumeLabel(value) {
+  if (!Number.isFinite(value)) return 'n/a';
+  return value <= 0 ? 'off' : `${Math.round(value * 100)}%`;
+}
+
+export function getVolume(app, channelId) {
+  const channel = VOLUME_CHANNELS.find((entry) => entry.id === channelId);
+  const manager = app.audio.manager;
+  return channel && manager?.available ? manager[channel.getter] : null;
+}
+
+export function setVolume(app, channelId, value) {
+  const channel = VOLUME_CHANNELS.find((entry) => entry.id === channelId);
+  const manager = app.audio.manager;
+  if (!channel || !manager?.available) return;
+  manager[channel.setter](Math.round(Math.max(0, Math.min(1, value)) * 20) / 20);
+}
+
+export function nudgeVolume(app, channelId, direction) {
+  const current = getVolume(app, channelId);
+  if (current === null) return;
+  setVolume(app, channelId, current + direction * 0.1);
+  setStatus(app, `${channelId} ${volumeLabel(getVolume(app, channelId))}`);
+}
+
+export function openMainOptions(app) {
+  app.ui.frontEndScreen = 'options';
+  app.ui.menuConfirm = null;
+  setStatus(app, 'options // saved on this browser');
+}
+
+export function closeMainOptions(app) {
+  app.ui.frontEndScreen = 'main';
+  setStatus(app, 'main menu');
+}
+
 export function toggleHostilePalette(app) {
   app.preferences.hostilePalette = app.preferences.hostilePalette === 'magenta' ? 'red' : 'magenta';
   saveGameplayPreferences(app);

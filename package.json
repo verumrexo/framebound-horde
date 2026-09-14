@@ -18,16 +18,18 @@
     "test:persistence": "node scripts/test-persistence.mjs",
     "test:progression": "node scripts/test-progression.mjs && node scripts/test-placement-escalator.mjs",
     "test:research": "node scripts/test-research.mjs",
-    "test:dev": "node scripts/test-dev-tools.mjs",
+    "test:dev": "node scripts/test-dev-tools.mjs && node scripts/test-part-lab.mjs",
     "test:turrets": "node scripts/test-turret-rework.mjs",
     "test:lasers": "node scripts/test-laser-effects.mjs",
     "test:sweep": "node scripts/test-sweep-collision.mjs",
     "test:options": "node scripts/test-gameplay-options.mjs && node scripts/test-arena-map.mjs",
     "test:ui": "node scripts/test-pixel-ui.mjs && node scripts/test-tactical-actions.mjs",
     "test:visual": "node scripts/test-world-art.mjs",
-    "test:client": "node scripts/test-client-modules.mjs"
+    "test:client": "node scripts/test-client-modules.mjs",
+    "bake:sounds": "node scripts/bake-default-sounds.mjs"
   },
   "dependencies": {
+    "jfxr": "^0.13.0",
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {

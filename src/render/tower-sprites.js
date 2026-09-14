@@ -1,7 +1,10 @@
 import { NETWORK_DESCENDANT_IDS } from '../core/network-descendants.js';
+import { drawRasterOverride, getTowerRasterOverride, onTowerRasterChange } from './tower-raster.js';
 
 export const TOWER_WORLD_DIAMETER = 22;
 const metricsByForm = new Map();
+// Part lab raster overrides replace one form's measured body until cleared.
+onTowerRasterChange((formId) => metricsByForm.delete(formId));
 const boundsPalette = Object.fromEntries(['black', 'amber', 'mint', 'cyan', 'green', 'red', 'dimMint']
   .map((key) => [key, [1, 1, 1, 1]]));
 
@@ -56,6 +59,11 @@ export function drawCompactTowerSprite(shapes, colors, p, tower, viewScale, over
 // Preserve the frame / assault / tether / network vocabulary: square housing,
 // inset core, straight rails and blunt mechanical attachments. Never rotate a body.
 export function drawTowerSprite(shapes, COLOR, p, tower, override = null, context = {}) {
+  const raster = getTowerRasterOverride(tower.definitionId);
+  if (raster) {
+    drawRasterOverride(shapes, COLOR, p, raster, override);
+    return;
+  }
   const { runTick = 0 } = context;
   const palette = override ? Object.fromEntries(['amber', 'mint', 'cyan', 'green', 'red', 'dimMint'].map(
     (key) => [key, override?.accent || COLOR[key]]

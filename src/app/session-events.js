@@ -69,7 +69,7 @@ export function handleSessionEvents(app, events) {
     } else if (event.type === EVENT.BASE_BREACHED) {
       app.effects.baseDamage.breach(event.payload, app.game.sessionSnapshot.runTick);
     } else if (event.type === EVENT.RELAY_NETWORK_COMPLETED) {
-      if (!['main', 'map_select', 'coop'].includes(app.ui.frontEndScreen)) startRelayCollapse(app, event);
+      if (!['main', 'map_select', 'coop', 'options'].includes(app.ui.frontEndScreen)) startRelayCollapse(app, event);
       if (event.payload.retired.some((record) => record.towerId === app.ui.selectedTowerId)) { app.ui.selectedTowerId = null; app.ui.towerMenuMode = null; }
       const refund = event.payload.retired.reduce((sum, record) => sum + (record.refund || 0), 0);
       setStatus(app, `relay network complete // ${event.payload.retired.length} connector-s uploaded${refund > 0 ? ` // +${compactMetric(refund)} cr` : ''}`);
@@ -116,11 +116,11 @@ export function handleSessionEvents(app, events) {
       addSystemMessage(app, `${player?.label || 'pilot'} departed`);
       setStatus(app, 'pilot departed // towers remain shared');
     } else if (event.type === EVENT.ATTACK_RESOLVED) {
-      if (!['main', 'map_select', 'coop'].includes(app.ui.frontEndScreen)) addAttackFlash(app, event);
+      if (!['main', 'map_select', 'coop', 'options'].includes(app.ui.frontEndScreen)) addAttackFlash(app, event);
     } else if (event.type === EVENT.KILLS_RECORDED) {
-      if (!['main', 'map_select', 'coop'].includes(app.ui.frontEndScreen)) addImpactBurst(app, event);
+      if (!['main', 'map_select', 'coop', 'options'].includes(app.ui.frontEndScreen)) addImpactBurst(app, event);
     } else if (event.type === EVENT.SUPPORT_TRIGGERED) {
-      if (!['main', 'map_select', 'coop'].includes(app.ui.frontEndScreen)) addSupportFlash(app, event);
+      if (!['main', 'map_select', 'coop', 'options'].includes(app.ui.frontEndScreen)) addSupportFlash(app, event);
       if (event.payload.sourceTowerId === app.ui.selectedTowerId) setStatus(app, `forge +${compactMetric(event.payload.credits)} credits`);
     } else if (event.type === EVENT.TEST_CONFIG_CHANGED) {
       saveTestPreferences(app, event.payload.test);

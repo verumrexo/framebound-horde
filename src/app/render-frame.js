@@ -10,7 +10,7 @@ import { drawClusterPayloads, drawProjectiles, drawReworkedCombat, presentProjec
 import { relayNetworkPresentation } from '../render/world-appearance.js';
 import { drawArenaFrame, drawAssembly, drawBase, drawPerimeterIntel, drawTestFieldWorld, drawTower } from '../render/world.js';
 import { drawHud } from '../ui/hud.js';
-import { drawCoopMenu, drawDevTools, drawEscapeMenu, drawMainMenu, drawMapSelection } from '../ui/menus.js';
+import { drawCoopMenu, drawDevTools, drawEscapeMenu, drawMainMenu, drawMapSelection, drawOptionsScreen } from '../ui/menus.js';
 import { COLOR } from '../ui/palette.js';
 import { drawResearchStation, drawStatsPanel } from '../ui/research.js';
 import { drawChat, drawCursor, drawGameplayRoster, drawRemotePresence } from '../ui/social.js';
@@ -20,7 +20,7 @@ export function renderFrame(app, now, dt, fps) {
   app.ui.uiHitboxes.length = 0;
   app.effects.networkPresentation = relayNetworkPresentation(app.game.sessionSnapshot);
   drawBackground(app);
-  if (!['main', 'map_select', 'coop'].includes(app.ui.frontEndScreen)) {
+  if (!['main', 'map_select', 'coop', 'options'].includes(app.ui.frontEndScreen)) {
     // Background technology stays underneath enemies, including at intersections.
     drawNetworkLinks(app, app.game.sessionSnapshot);
     app.renderer.shapes.flush();
@@ -75,6 +75,7 @@ export function renderFrame(app, now, dt, fps) {
     app.effects.attackFlashes.length = 0;
     if (app.ui.frontEndScreen === 'main') drawMainMenu(app, app.game.sessionSnapshot);
     else if (app.ui.frontEndScreen === 'map_select') drawMapSelection(app, app.game.sessionSnapshot);
+    else if (app.ui.frontEndScreen === 'options') drawOptionsScreen(app);
     else drawCoopMenu(app, app.game.sessionSnapshot);
   }
   if (app.ui.frontEndScreen === 'game' && app.ui.towerMenuMode === 'research') {

@@ -1,6 +1,6 @@
 import { viewport } from '../app/camera.js';
 import { beginHostingCoop, beginJoiningCoop, cancelMultiplayer, copyRoomCode, openJoinCoop, retryMultiplayer } from '../app/multiplayer.js';
-import { adjustRunPace, closeEscapeOptions, closeMapSelection, deploySelectedMap, enterTestField, hostilePaletteLabel, openCoopMapSelection, openEscapeOptions, openMapSelection, openNewSoloRun, resumeSession, returnToMainMenu, selectRunMap, selectedRandomRifts, selectedRunPace, startOrContinueGame, toggleAutoSelectPlacedFrame, toggleHostilePalette, toggleRandomRifts } from '../app/navigation.js';
+import { VOLUME_CHANNELS, adjustRunPace, closeMainOptions, getVolume, openMainOptions, volumeLabel, closeEscapeOptions, closeMapSelection, deploySelectedMap, enterTestField, hostilePaletteLabel, openCoopMapSelection, openEscapeOptions, openMapSelection, openNewSoloRun, resumeSession, returnToMainMenu, selectRunMap, selectedRandomRifts, selectedRunPace, startOrContinueGame, toggleAutoSelectPlacedFrame, toggleHostilePalette, toggleRandomRifts } from '../app/navigation.js';
 import { playerColor } from '../app/social.js';
 import { resetTestFieldFromMenu } from '../app/test-field.js';
 import { compactMetric } from '../core/format.js';
@@ -10,7 +10,8 @@ import { AUTHORITY_TICK_RATE, COMMAND } from '../core/protocol.js';
 import { playableMaps } from '../core/world-config.js';
 import { drawMapThumbnail } from '../render/map-thumbnail.js';
 import { COLOR } from './palette.js';
-import { MENU_HEADER, coopMenuLayout, escapeMenuLayout, mainMenuLayout, mapSelectionLayout } from './panel-layout.js';
+import { registerHitbox } from '../app/ui-state.js';
+import { MENU_HEADER, coopMenuLayout, escapeMenuLayout, mainMenuLayout, mapSelectionLayout, optionsLayout } from './panel-layout.js';
 import { clippedUiText, drawButton, drawMenuButton, drawMenuHeader, drawTechPanel, drawTierDivider } from './widgets.js';
 
 export function mainMenuRunLabel(app, snapshot) {
@@ -62,9 +63,46 @@ export function drawMainMenu(app, snapshot) {
     networkActive ? COLOR.red : COLOR.cyan,
     networkActive ? () => cancelMultiplayer(app, true) : openJoinCoop.bind(null, app)
   );
-  drawMenuButton(app, 'menu_test', 'test field // t', buttonX, y + rows.test, buttonWidth, COLOR.cyan, enterTestField.bind(null, app));
+  drawMenuButton(app, 'menu_test', 'test field // t', buttonX, y + rows.test, halfWidth, COLOR.cyan, enterTestField.bind(null, app));
+  drawMenuButton(app, 'menu_options', 'o options', buttonX + halfWidth + gap, y + rows.test, buttonWidth - halfWidth - gap, COLOR.cyan, openMainOptions.bind(null, app));
   app.renderer.bitmapText.draw(networkActive ? 'p2p session active' : 'coop // 2-4 pilots // p2p beta', x + 17, y + rows.footer, networkActive ? COLOR.green : COLOR.dimMint, 1);
   app.renderer.bitmapText.draw('enter selects', x + width - 85, y + rows.footer, COLOR.ink, 1);
+}
+
+// Volume rows: label, draggable pixel slider, readout. Drags resolve in input.js.
+export const VOLUME_ROW_HEIGHT = 16;
+
+export function drawVolumeSliders(app, x, y, width) {
+  const labelWidth = 44;
+  const readoutWidth = 30;
+  const sliderX = x + labelWidth;
+  const sliderWidth = Math.max(60, width - labelWidth - readoutWidth);
+  VOLUME_CHANNELS.forEach((channel, index) => {
+    const rowY = y + index * VOLUME_ROW_HEIGHT;
+    const value = getVolume(app, channel.id);
+    const fraction = Number.isFinite(value) ? value : 0;
+    const hovered = app.ui.uiDrag?.kind === 'volume' && app.ui.uiDrag.channel === channel.id;
+    app.renderer.bitmapText.draw(channel.label, x, rowY + 4, COLOR.ink, 1);
+    app.renderer.shapes.rect(sliderX, rowY + 6, sliderWidth, 3, COLOR.dimMint);
+    app.renderer.shapes.rect(sliderX, rowY + 6, Math.max(0, Math.round(sliderWidth * fraction)), 3, hovered ? COLOR.cyan : COLOR.mint);
+    const knobX = Math.round(sliderX + (sliderWidth - 1) * fraction);
+    app.renderer.shapes.rect(knobX - 2, rowY + 3, 5, 9, hovered ? COLOR.cyan : COLOR.amber);
+    app.renderer.bitmapText.draw(volumeLabel(value), sliderX + sliderWidth + 6, rowY + 4, value === 0 ? COLOR.red : COLOR.cyan, 1);
+    registerHitbox(app, `volume_${channel.id}`, sliderX - 3, rowY, sliderWidth + 6, VOLUME_ROW_HEIGHT - 1, { drag: { kind: 'volume', channel: channel.id, sliderX, sliderWidth } });
+  });
+  return y + VOLUME_CHANNELS.length * VOLUME_ROW_HEIGHT;
+}
+
+export function drawOptionsScreen(app) {
+  const layout = optionsLayout(viewport(app));
+  const { x, y, width, height, buttonX, buttonWidth } = layout;
+  app.ui.uiHitboxes.length = 0;
+  drawTechPanel(app, x, y, width, height, COLOR.cyan);
+  drawMenuHeader(app, layout, 'options', COLOR.cyan, 'audio // saved on this browser', COLOR.dimMint);
+  app.renderer.bitmapText.draw('volume // drag the sliders', x + 18, y + 46, COLOR.ink, 1);
+  const end = drawVolumeSliders(app, x + 18, y + 60, buttonWidth - 2);
+  app.renderer.bitmapText.draw(clippedUiText('music // menu + gameplay tracks // sfx // part lab', width - 36), x + 18, end + 6, COLOR.dimMint, 1);
+  drawMenuButton(app, 'options_back', 'back // esc', buttonX, y + height - 29, buttonWidth, COLOR.cyan, closeMainOptions.bind(null, app), true);
 }
 
 export function drawPlayerNameEditor(app, x, y, width) {
@@ -219,7 +257,7 @@ export function drawMapSelection(app, snapshot) {
 
 export function drawDevTools(app, snapshot) {
   app.ui.uiHitboxes.length = 0;
-  const width = Math.min(300, app.viewport.logicalWidth - 20), height = 212;
+  const width = Math.min(300, app.viewport.logicalWidth - 20), height = 228;
   const x = (app.viewport.logicalWidth - width) / 2, y = (app.viewport.logicalHeight - height) / 2;
   const host = app.game.session.playerId === snapshot.hostPlayerId;
   drawTechPanel(app, x, y, width, height, COLOR.amber);
@@ -235,7 +273,9 @@ export function drawDevTools(app, snapshot) {
     () => { if (host) app.game.session.send(COMMAND.DEV_TOOLS, { action: 'clearEnemies' }); });
   drawMenuButton(app, 'dev_heal', 'heal base / revive', x + 12, y + 156, width - 24, COLOR.mint,
     () => { if (host) app.game.session.send(COMMAND.DEV_TOOLS, { action: 'healBase' }); });
-  drawMenuButton(app, 'dev_close', 'close // f2 or esc', x + 12, y + 184, width - 24, COLOR.cyan, () => { app.ui.devToolsOpen = false; });
+  drawMenuButton(app, 'dev_part_lab', 'part lab // f3 // art + sounds', x + 12, y + 178, width - 24, COLOR.mint,
+    () => { void app.openPartLab?.().then((lab) => lab.open()); });
+  drawMenuButton(app, 'dev_close', 'close // f2 or esc', x + 12, y + 200, width - 24, COLOR.cyan, () => { app.ui.devToolsOpen = false; });
 }
 
 export function drawEscapeMenu(app, snapshot) {
@@ -292,6 +332,9 @@ export function drawEscapeMenu(app, snapshot) {
       app.preferences.hostilePalette === 'magenta'
     );
     app.renderer.bitmapText.draw(app.preferences.hostilePalette === 'magenta' ? 'magenta ramp keeps hostiles apart from green' : 'red ramp // switch if red and green blur', x + 18, y + 132, COLOR.dimMint, 1);
+    drawTierDivider(app, buttonX, y + 144, buttonWidth);
+    app.renderer.bitmapText.draw('audio // drag the sliders', x + 18, y + 150, COLOR.ink, 1);
+    drawVolumeSliders(app, x + 18, y + 162, buttonWidth - 2);
     drawMenuButton(app, 'options_back', 'back // esc', buttonX, y + height - 29, buttonWidth, COLOR.cyan, closeEscapeOptions.bind(null, app), true);
     app.renderer.bitmapText.draw('saved on this browser', x + 18, y + height - 10, COLOR.ink, 1);
     return;

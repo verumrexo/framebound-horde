@@ -1,0 +1,274 @@
+/* part lab // dev overlays. dom is allowed here because these are authoring
+   tools, not gameplay ui; the game itself stays a single pixel canvas. */
+:root {
+  --ui-ink: #bde9df;
+  --ui-bright: #dffcff;
+  --ui-muted: #66978f;
+  --ui-line: rgba(85, 255, 194, 0.22);
+  --ui-line-strong: rgba(53, 242, 255, 0.58);
+  --ui-panel: rgba(2, 12, 13, 0.97);
+  --ui-panel-soft: rgba(4, 24, 24, 0.84);
+  --ui-black: #010607;
+  --ui-cyan: #35f2ff;
+  --ui-cyan-bright: #7cf7ff;
+  --ui-green: #74ff6a;
+  --ui-green-bright: #b8ff5a;
+  --ui-amber: #ffc857;
+  --ui-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+#part-lab-window,
+#part-sound-editor,
+#tower-visual-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: none;
+  place-items: stretch;
+  background: rgba(1, 6, 7, 0.9);
+  color: var(--ui-ink);
+  font: 11px/1.4 var(--ui-mono);
+  cursor: default;
+}
+#part-sound-editor { z-index: 1200; }
+#tower-visual-editor { z-index: 1200; }
+#part-lab-window.is-open,
+#part-sound-editor.is-open,
+#tower-visual-editor.is-open { display: grid; }
+#part-lab-window *,
+#part-sound-editor *,
+#tower-visual-editor * { box-sizing: border-box; }
+#part-lab-window :focus-visible,
+#part-sound-editor :focus-visible,
+#tower-visual-editor :focus-visible { outline: 2px solid var(--ui-cyan); outline-offset: 2px; }
+.ui-kicker { color: var(--ui-muted); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; }
+
+.part-lab-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--ui-line-strong);
+  border-top: 2px solid var(--ui-cyan);
+  background: var(--ui-panel);
+}
+.part-lab-header,
+.part-lab-toolbar,
+.part-lab-footer { display: flex; align-items: center; gap: 12px; padding: 12px 16px; }
+.part-lab-header { border-bottom: 1px solid var(--ui-line); }
+.part-lab-header h2 { margin: 3px 0 0; color: var(--ui-bright); font: 700 18px var(--ui-mono); text-transform: lowercase; }
+.part-lab-header-copy { flex: 1; color: var(--ui-muted); font-size: 11px; }
+.part-lab-close { border: 0; background: transparent; color: var(--ui-muted); cursor: pointer; font-size: 22px; }
+.part-lab-close:hover { color: var(--ui-bright); }
+.part-lab-toolbar { flex-wrap: wrap; border-bottom: 1px solid var(--ui-line); background: var(--ui-panel-soft); }
+.part-lab-search,
+.part-lab-type {
+  min-height: 32px;
+  border: 1px solid var(--ui-line);
+  background: var(--ui-black);
+  color: var(--ui-bright);
+  font: 11px var(--ui-mono);
+  padding: 7px 9px;
+}
+.part-lab-search { flex: 1 1 240px; }
+.part-lab-type { flex: 0 1 170px; }
+.part-lab-volume { display: flex; align-items: center; gap: 6px; color: var(--ui-muted); font-size: 10px; }
+.part-lab-volume input { width: 90px; accent-color: var(--ui-cyan); }
+.part-lab-count { margin-left: auto; color: var(--ui-muted); font-size: 10px; }
+.part-lab-button {
+  border: 1px solid var(--ui-line);
+  background: transparent;
+  color: var(--ui-ink);
+  cursor: pointer;
+  font: 10px var(--ui-mono);
+  padding: 7px 9px;
+  text-transform: lowercase;
+}
+.part-lab-button:hover:not(:disabled) { border-color: var(--ui-cyan); color: var(--ui-bright); }
+.part-lab-button:disabled { cursor: not-allowed; opacity: 0.4; }
+.part-lab-button.is-accent { border-color: var(--ui-cyan); color: var(--ui-cyan-bright); }
+.part-lab-button.is-selected { border-color: var(--ui-cyan); background: rgba(53, 242, 255, 0.12); color: var(--ui-cyan-bright); }
+.part-lab-button.is-danger,
+.part-lab-reset { color: #ff9e9e; }
+.part-lab-list { overflow: auto; padding: 10px 16px 18px; }
+.part-lab-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(85, 255, 194, 0.12);
+}
+.part-lab-card.is-done { opacity: 0.55; }
+.part-lab-portrait { display: block; width: 68px; height: 68px; border: 1px solid var(--ui-line); background: var(--ui-black); image-rendering: pixelated; }
+.part-lab-card-copy { min-width: 0; }
+.part-lab-card-copy strong { display: block; color: var(--ui-bright); font-size: 13px; }
+.part-lab-card-copy small { display: block; margin-top: 3px; color: var(--ui-cyan); font-size: 9px; }
+.part-lab-card-copy p { margin: 5px 0 0; color: var(--ui-muted); font-size: 10px; line-height: 1.45; }
+.part-lab-badges { display: grid; gap: 4px; min-width: 88px; text-align: center; }
+.part-lab-badge { display: inline-block; border: 1px solid var(--ui-line); color: var(--ui-muted); font-size: 9px; padding: 4px 6px; text-transform: lowercase; }
+.part-lab-badge.is-edited { border-color: var(--ui-amber); color: var(--ui-amber); }
+.part-lab-badge.is-saved { border-color: var(--ui-green); color: var(--ui-green); }
+.part-lab-badge.is-visual { border-color: var(--ui-cyan); color: var(--ui-cyan); }
+.part-lab-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; max-width: 330px; }
+.part-lab-done { opacity: 0.42; }
+.part-lab-done.is-selected { border-color: var(--ui-green); background: rgba(85, 255, 194, 0.12); color: var(--ui-green-bright); opacity: 1; }
+.part-lab-footer { border-top: 1px solid var(--ui-line-strong); }
+.part-lab-status { flex: 1; min-width: 0; color: var(--ui-muted); font-size: 10px; }
+.part-lab-save-all { border-color: var(--ui-green); color: var(--ui-green-bright); }
+
+/* sound lab */
+.part-sound-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--ui-line-strong);
+  border-top: 2px solid var(--ui-cyan);
+  background: var(--ui-panel);
+}
+.part-sound-header,
+.part-sound-footer { display: flex; align-items: center; gap: 12px; padding: 13px 16px; }
+.part-sound-header { border-bottom: 1px solid var(--ui-line); }
+.part-sound-title { flex: 1; min-width: 0; }
+.part-sound-title strong,
+.part-sound-title small { display: block; }
+.part-sound-title strong { overflow: hidden; color: var(--ui-bright); font-size: 15px; text-overflow: ellipsis; text-transform: lowercase; white-space: nowrap; }
+.part-sound-title small { margin-top: 4px; color: var(--ui-muted); font-size: 9px; }
+.part-sound-close { border: 0; background: transparent; color: var(--ui-muted); cursor: pointer; font-size: 20px; }
+.part-sound-body { min-height: 0; overflow: auto; padding: 16px; }
+.part-sound-intro { margin: 0 0 14px; color: var(--ui-muted); font-size: 10px; line-height: 1.45; }
+.part-sound-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+#part-sound-editor select,
+#part-sound-editor button,
+#part-sound-editor .part-sound-button {
+  border: 1px solid var(--ui-line);
+  background: var(--ui-black);
+  color: var(--ui-ink);
+  cursor: pointer;
+  font: 10px var(--ui-mono);
+  padding: 7px 8px;
+  text-transform: lowercase;
+}
+#part-sound-editor select { width: 100%; min-height: 32px; }
+#part-sound-editor button:hover:not(:disabled),
+#part-sound-editor select:hover { border-color: var(--ui-cyan); color: var(--ui-bright); }
+#part-sound-editor button:disabled { cursor: wait; opacity: 0.45; }
+.part-sound-slots button.is-selected { border-color: var(--ui-cyan); color: var(--ui-cyan-bright); }
+.part-sound-forge-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  align-items: start;
+  gap: 10px;
+  margin-top: 12px;
+}
+.part-sound-panel { min-width: 0; padding: 11px; border: 1px solid var(--ui-line); background: var(--ui-panel-soft); }
+.part-sound-panel h3 { margin: 0 0 9px; color: var(--ui-bright); font-size: 12px; text-transform: lowercase; }
+.part-sound-parameters { grid-column: 1 / -1; }
+.part-sound-parameters summary { cursor: pointer; color: var(--ui-muted); font-size: 10px; text-transform: lowercase; }
+.part-sound-parameters[open] summary { margin-bottom: 10px; color: var(--ui-cyan-bright); }
+#part-sound-editor.has-no-slots .part-sound-composer,
+#part-sound-editor.has-no-slots .part-sound-parameters,
+#part-sound-editor.has-no-slots .part-sound-libraries { display: none; }
+#part-sound-editor.has-no-slots .part-sound-assignment { grid-column: 1 / -1; }
+.part-sound-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.part-sound-field { display: grid; gap: 4px; color: var(--ui-muted); font-size: 9px; }
+.part-sound-field-help { color: var(--ui-muted); font-size: 8px; line-height: 1.4; }
+.part-sound-field input,
+.part-sound-field select { min-width: 0; border: 1px solid var(--ui-line); background: var(--ui-black); color: var(--ui-ink); font: 10px var(--ui-mono); padding: 7px; }
+.part-sound-actions,
+.part-sound-assignment-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.part-sound-param-group-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0 8px; }
+.part-sound-panel-help { margin: -2px 0 9px; color: var(--ui-muted); font-size: 8px; line-height: 1.4; }
+#part-sound-editor .part-sound-button.is-cyan { color: var(--ui-cyan-bright); }
+#part-sound-editor .part-sound-button.is-pink { border-color: #ff7eb8; color: #ff9ac8; }
+#part-sound-editor .part-sound-button.is-amber { color: var(--ui-amber); }
+#part-sound-editor .part-sound-button.is-danger { color: #ff9e9e; }
+#part-sound-editor .part-sound-button.is-muted { color: var(--ui-muted); }
+.part-sound-editor-state,
+.part-sound-meter,
+.part-sound-assignment-state,
+.part-sound-empty { margin-top: 8px; color: var(--ui-muted); font-size: 9px; line-height: 1.4; }
+.part-sound-wave { display: block; width: 100%; height: 100px; margin-top: 9px; border: 1px solid var(--ui-line); background: #010405; image-rendering: pixelated; }
+.part-sound-meter.is-clipping { color: #ff9e9e; }
+.part-sound-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-right: 3px; }
+.part-sound-param-group { min-width: 0; padding: 9px; border: 1px solid rgba(85, 255, 194, 0.12); background: rgba(1, 4, 5, 0.35); }
+.part-sound-param-group h4 { margin: 0; color: var(--ui-cyan); font-size: 10px; text-transform: lowercase; }
+.part-sound-param-group-help { margin: 4px 0 9px; color: var(--ui-muted); font-size: 8px; line-height: 1.4; }
+.part-sound-param { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 0.75fr); align-items: center; gap: 9px; margin-bottom: 9px; }
+.part-sound-param label { display: grid; gap: 3px; min-width: 0; color: var(--ui-muted); font-size: 8px; }
+.part-sound-param label span:last-child { color: var(--ui-cyan); }
+.part-sound-param-help { color: var(--ui-muted); font-size: 8px; line-height: 1.35; }
+.part-sound-param input[type="range"],
+.part-sound-param select { width: 100%; accent-color: var(--ui-cyan); }
+.part-sound-libraries { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; }
+.part-sound-library { max-height: 330px; overflow: auto; }
+.part-sound-library-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 7px 0; border-bottom: 1px solid rgba(85, 255, 194, 0.12); }
+.part-sound-library-row.is-current { border-left: 2px solid var(--ui-cyan); padding-left: 6px; }
+.part-sound-library-row.is-generated.is-current { border-left-color: var(--ui-amber); }
+.part-sound-library-row strong,
+.part-sound-library-row small { display: block; }
+.part-sound-library-row strong { color: var(--ui-bright); font-size: 10px; }
+.part-sound-library-row small { margin-top: 3px; color: var(--ui-muted); font-size: 8px; }
+.part-sound-library-row > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.part-sound-assignment-state { padding: 8px; border: 1px solid var(--ui-line); background: var(--ui-black); }
+.part-sound-assignment-state strong,
+.part-sound-assignment-state span { display: block; }
+.part-sound-assignment-state strong { margin-bottom: 4px; color: var(--ui-bright); font-size: 9px; }
+.part-sound-assignment-steps { display: grid; gap: 5px; color: var(--ui-muted); font-size: 9px; line-height: 1.4; }
+.part-sound-assignment-state.is-custom { color: var(--ui-cyan); }
+.part-sound-assignment-state.is-default { color: var(--ui-green); }
+.part-sound-assignment-state.is-missing { color: #ff9e9e; }
+.part-sound-scratch-warning { flex: 1 1 100%; color: var(--ui-amber); font-size: 8px; line-height: 1.4; }
+.part-sound-footer { justify-content: flex-end; flex-wrap: wrap; border-top: 1px solid var(--ui-line); }
+.part-sound-status { flex: 1; min-width: 180px; color: var(--ui-muted); font-size: 9px; }
+.part-sound-footer button[data-action="save"] { border-color: var(--ui-green); color: var(--ui-green-bright); }
+.part-sound-footer button[data-action="save-next"] { border-color: var(--ui-cyan); color: var(--ui-cyan-bright); }
+.part-sound-footer button[data-action="cancel"] { color: #ff9e9e; }
+
+/* docked sound lab: side panel, game stays interactive underneath */
+#part-sound-editor.is-docked { left: auto; width: min(520px, 100%); background: transparent; pointer-events: none; }
+#part-sound-editor.is-docked .part-sound-dialog { pointer-events: auto; box-shadow: -12px 0 40px rgba(0, 0, 0, 0.6); }
+#part-sound-editor.is-docked .part-sound-forge-layout,
+#part-sound-editor.is-docked .part-sound-libraries,
+#part-sound-editor.is-docked .part-sound-params,
+#part-sound-editor.is-docked .part-sound-fields { grid-template-columns: 1fr; }
+#part-sound-editor.is-docked .part-sound-intro { display: none; }
+#part-sound-editor .part-sound-button.is-selected { border-color: var(--ui-cyan); background: rgba(53, 242, 255, 0.12); color: var(--ui-cyan-bright); }
+
+/* visual editor */
+.tower-visual-dialog { grid-template-rows: auto minmax(0, 1fr) auto; }
+.tower-visual-main { display: grid; grid-template-columns: 210px minmax(0, 1fr) 250px; min-height: 0; }
+.tower-visual-side { overflow: auto; padding: 12px; border-right: 1px solid var(--ui-line); }
+.tower-visual-preview-side { border-right: 0; border-left: 1px solid var(--ui-line); }
+.tower-visual-section { margin-bottom: 14px; }
+.tower-visual-label { display: block; margin-bottom: 6px; color: var(--ui-muted); font-size: 9px; text-transform: lowercase; }
+.tower-visual-palette { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.tower-visual-swatch { height: 30px; padding: 0; cursor: pointer; border: 2px solid transparent; box-shadow: 0 0 0 1px var(--ui-line); }
+.tower-visual-swatch.is-selected { border-color: #fff; }
+.tower-visual-tools,
+.tower-visual-raster-actions { display: grid; gap: 5px; }
+.tower-visual-help { color: var(--ui-muted); font-size: 9px; line-height: 1.6; }
+.tower-visual-canvas-wrap { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 14px; overflow: auto; background: #020a0b; }
+.tower-visual-canvas { max-width: 100%; max-height: 100%; cursor: crosshair; image-rendering: pixelated; border: 1px solid var(--ui-line-strong); touch-action: none; }
+.tower-visual-preview { display: block; width: 100%; height: auto; image-rendering: pixelated; border: 1px solid var(--ui-line); background: var(--ui-black); }
+.tower-visual-bounds { color: var(--ui-cyan); font-size: 9px; line-height: 1.5; }
+.tower-visual-bounds.is-invalid { color: #ff9e9e; }
+
+@media (max-width: 960px) {
+  .part-sound-forge-layout,
+  .part-sound-libraries,
+  .part-sound-params { grid-template-columns: 1fr; }
+  .tower-visual-main { grid-template-columns: 170px 1fr; }
+  .tower-visual-preview-side { grid-column: 1 / 3; border-top: 1px solid var(--ui-line); border-left: 0; }
+}
+@media (max-width: 760px) {
+  .part-lab-card { grid-template-columns: auto 1fr; }
+  .part-lab-badges { text-align: left; }
+  .part-lab-card-actions { grid-column: 1 / -1; justify-content: flex-start; max-width: none; }
+  .part-lab-header-copy { display: none; }
+  .part-sound-fields,
+  .part-sound-slots { grid-template-columns: 1fr; }
+}

@@ -35,6 +35,29 @@ export function captureLosslessFramebuffer(app) {
   capture.dataset.ready = 'true';
 }
 
+export function audioDiagnostics(app) {
+  const manager = app.audio?.manager;
+  if (!manager?.available) return { available: false };
+  return {
+    available: true,
+    ready: Boolean(app.audio.ready),
+    contextState: manager.context.state,
+    masterVolume: manager.masterVolume,
+    sfxVolume: manager.sfxVolume,
+    musicVolume: manager.musicVolume,
+    loadedSounds: manager.sounds.size,
+    defaultSounds: manager.defaultSounds.size,
+    bindings: manager.eventBindings.size,
+    musicTrack: manager.music?.trackId || null,
+    musicPending: Boolean(manager.musicPending),
+    forgeReady: Boolean(app.audio.forge?.ready),
+    forgeError: app.audio.forge?.error ? String(app.audio.forge.error.message || app.audio.forge.error) : null,
+    savedSounds: app.audio.forge?.sounds?.size ?? 0,
+    combatLoad: Number(app.audio.presentation?.combatLoad?.toFixed(1) ?? 0),
+    combatGain: Number(app.audio.presentation?.combatGain?.toFixed(2) ?? 1)
+  };
+}
+
 export function syncDiagnostics(app, snapshot = app.game.sessionSnapshot) {
   const towerForms = {};
   for (const tower of snapshot.towers) towerForms[tower.definitionId] = (towerForms[tower.definitionId] || 0) + 1;
@@ -87,7 +110,8 @@ export function syncDiagnostics(app, snapshot = app.game.sessionSnapshot) {
     buildCatalogOpen: app.ui.buildCatalogOpen,
     buildCatalogPageId: app.ui.buildCatalogPageId,
     network,
-    towerForms
+    towerForms,
+    audio: audioDiagnostics(app)
   };
   window.__hordeDiagnostics = diagnostics;
   app.renderer.canvas.dataset.gpuBackend = diagnostics.backend;

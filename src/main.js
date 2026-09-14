@@ -4,8 +4,12 @@ import { frame } from './app/frame-loop.js';
 import { installInput } from './app/input.js';
 import { activateSession, saveGameBundle } from './app/sessions.js';
 import { createAppState } from './app/state.js';
+import { AudioManager } from './audio/audio-manager.js';
+import { SignalForgeRuntime } from './audio/signal-forge-runtime.js';
 import { PROTOTYPE_SESSION_CONFIG } from './core/session-config.js';
 import { playableMaps } from './core/world-config.js';
+import { applyPromotedVisuals, loadPromotedPartLabPack } from './dev/part-lab-pack.js';
+import { PART_LAB_DRAFT_STORAGE_KEY } from './dev/part-lab-store.js';
 import { BACKGROUND_FRAGMENT, FULLSCREEN_VERTEX } from './render/background.js';
 import { BitmapText } from './render/bitmap-text.js';
 import { EnemyRenderer } from './render/enemy-renderer.js';
@@ -78,6 +82,37 @@ installInput(app);
 
 window.__saveHordeRun = saveGameBundle.bind(null, app);
 
+// Audio and the part lab are presentation-only. The promoted pack (art
+// overrides, saved sounds, bindings) loads first; local drafts then layer on top.
+app.audio.manager = new AudioManager();
+app.audio.forge = new SignalForgeRuntime(app.audio.manager);
+const partLabStartup = loadPromotedPartLabPack().then(async (promoted) => {
+  if (promoted) applyPromotedVisuals(promoted.visuals);
+  await app.audio.forge.initialize({ promotedPack: promoted?.soundPack || null });
+  app.audio.ready = true;
+  return promoted;
+}).catch((error) => {
+  console.warn('[part lab] startup failed:', error);
+  app.audio.ready = true;
+  return null;
+});
+
+// The lab's dom editors stay out of the gameplay bundle until first use.
+let partLabPromise = null;
+app.openPartLab = () => {
+  partLabPromise ??= partLabStartup.then(async (promoted) => {
+    const { PartLabWindow } = await import('./dev/part-lab-window.js');
+    app.partLab = new PartLabWindow(app, { promotedVisuals: promoted?.visuals || {} });
+    app.partLab.applyStoredSoundDrafts();
+    window.__hordePartLab = app.partLab;
+    return app.partLab;
+  });
+  return partLabPromise;
+};
+let hasPartLabDrafts = false;
+try { hasPartLabDrafts = Boolean(localStorage.getItem(PART_LAB_DRAFT_STORAGE_KEY)); } catch { /* storage is optional */ }
+if (hasPartLabDrafts) void app.openPartLab();
+
 addEventListener('pagehide', () => { void saveGameBundle(app); });
 
 document.addEventListener('visibilitychange', () => {
@@ -85,6 +120,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 window.__captureHordeFramebuffer = () => captureLosslessFramebuffer(app);
+window.__hordeAudio = app.audio;
 syncDiagnostics(app);
 
 // Prepare map thumbnails while the browser is idle.

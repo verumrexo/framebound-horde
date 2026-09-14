@@ -30,6 +30,8 @@ keep the host's game open and active. this beta uses the existing framebound sig
 - `b`: catalog for repeated placement of already-upgraded forms.
 - `q / e`: targeting. `a`: rocket strike point, laser direction, broadside fan facing, or editable control geometry. `0`: back to automatic.
 - `g`: all ranges. `k`: kills-per-second. `t`: solo test field.
+- `o` on the main menu, or `gameplay options` in the pause menu: master / music / sfx volume sliders, saved on this browser.
+- `f2`: dev tools. `f3`: part lab (per-form pixel art overrides and the sound lab).
 - drag: pan. wheel: integer pixel zoom. `esc`: menu; it does not pause a running game.
 - map selection `[ / ]`: horde pace x0.6–x1.6, a time stretch on the spawn curve, rift unlocks and surges.
 
@@ -43,6 +45,8 @@ npm run serve
 ```
 
 the preview is served at `http://127.0.0.1:4173/`. `npm run dev` starts the development server at the same address. use the server link, not a `file://` page.
+
+`npm run dev` also serves the part lab's promotion endpoint: `save all` inside the lab writes `public/part-lab/pack.json` (art overrides, saved sounds, hook bindings), which ships with the next build. production builds download the pack instead.
 
 github pages publishes the production build from `main`. no automated gameplay tests are created or run; the player owns browser and gameplay acceptance. runtime/gpu failures and peer state are exposed through the visible error panel and `window.__hordeDiagnostics`.
 

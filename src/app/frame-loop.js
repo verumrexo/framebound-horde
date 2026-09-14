@@ -3,6 +3,7 @@ import { showFatal, syncDiagnostics } from './diagnostics.js';
 import { renderFrame } from './render-frame.js';
 import { handleSessionEvents } from './session-events.js';
 import { saveGameBundle } from './sessions.js';
+import { presentMusic, presentSounds } from './sound-presentation.js';
 import { updatePresence } from './social.js';
 
 export function frame(app, now) {
@@ -15,6 +16,8 @@ export function frame(app, now) {
   const sessionFrame = app.game.session.advance(shouldAdvance ? elapsedMs * timeScale : 0);
   app.game.sessionSnapshot = sessionFrame.snapshot;
   handleSessionEvents(app, sessionFrame.events);
+  presentSounds(app, sessionFrame.events, sessionFrame.snapshot);
+  presentMusic(app);
   updatePresence(app, now);
   app.timing.frameCounter += 1;
   if (now - app.timing.fpsWindow >= 500) {
