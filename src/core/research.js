@@ -358,6 +358,21 @@ export function reactorQuote(state, id) {
   return { ...category, rank, cost };
 }
 
+// Sum the individually rounded prices so a batch costs exactly the same as
+// buying its ranks one at a time. Near a cap, quote only the remaining ranks.
+export function reactorBatchQuote(state, id, requestedCount = 1) {
+  if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 5) return null;
+  const first = reactorQuote(state, id);
+  if (!first) return null;
+  const count = Math.min(requestedCount, first.maxRank === null ? requestedCount : first.maxRank - first.rank);
+  let cost = 0;
+  for (let offset = 0; offset < count; offset += 1) {
+    cost += Math.ceil(first.firstCost * first.growth ** (first.rank + offset) - 1e-8);
+    if (!Number.isSafeInteger(cost)) return null;
+  }
+  return { ...first, count, targetRank: first.rank + count, cost };
+}
+
 export function researchStat(state, stat, baseValue, tower, swarm) {
   let extra = 0;
   const has = (id) => hasResearch(state, id);

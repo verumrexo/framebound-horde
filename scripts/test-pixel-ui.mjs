@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { fitPixelTelemetry, pixelActionLayout, pixelHudLayout } from '../src/ui/pixel-layout.js';
 import { attachedPanelPosition, catalogLayout, centeredPanel, coopMenuLayout, defeatLayout, escapeMenuLayout, optionsLayout,
   mainMenuLayout, mapSelectionLayout } from '../src/ui/panel-layout.js';
+import { reactorPanelLayout } from '../src/ui/reactor-view.js';
 
 for (const width of [320, 480, 640, 960]) {
   const hud = pixelHudLayout(width);
@@ -57,6 +58,15 @@ for (const [width, height] of viewports) {
   }
   within(coopMenuLayout(viewport), viewport);
   within(optionsLayout(viewport), viewport);
+  const reactor = reactorPanelLayout(width, height);
+  within(reactor, viewport);
+  assert.ok(reactor.footerY >= reactor.y + 44, 'compact reactor keeps its category navigation above the details');
+  assert.ok(reactor.footerY + 49 + 7 < reactor.y + reactor.height - 42, 'exact total clears the quantity and buy buttons');
+  const availableHeight = height - pixelHudLayout(width).bottomHeight - pixelHudLayout(width).topHeight - 8;
+  const detailRows = Math.min(2, Math.max(0, Math.floor((availableHeight - 80) / 11)));
+  const detailed = pixelActionLayout(actions, availableHeight, 0, detailRows);
+  assert.ok(detailed.height <= availableHeight, 'tower feedback keeps the actions inside the playable band');
+  assert.ok(detailed.actionsY >= 41 + detailRows * 11, 'tower details clear the action rows');
   const defeat = defeatLayout(viewport);
   within(defeat, viewport);
   assert.ok(defeat.rows.retry < defeat.rows.map && defeat.rows.map < defeat.rows.menu && defeat.rows.menu + 17 <= defeat.height);

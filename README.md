@@ -27,9 +27,12 @@ keep the host's game open and active. this beta uses the existing framebound sig
 
 - `1`: place one frame. click a tower, then `1` for replacements or `2` to sell.
 - replacement menu `1 / 2 / 3`: choose a branch.
+- selected weapons show recent hp damage/sec; larger panels also show tracked total damage, kills, effective range and firing cycle.
+- reactor: choose `x1` or `x5`, review the effect change and exact total, then click buy or press `enter`. near a cap, `x5` buys only the remaining ranks shown.
 - `b`: catalog for repeated placement of already-upgraded forms.
 - `q / e`: targeting. `a`: rocket strike point, laser direction, broadside fan facing, or editable control geometry. `0`: back to automatic.
 - `g`: all ranges. `k`: kills-per-second. `t`: solo test field.
+- `i`: toggle buffs. shows global bonuses, reactor ranks, every owned arsenal effect, and network buffs for the selected tower. use the panel arrows for more pages.
 - `o` on the main menu, or `gameplay options` in the pause menu: master / music / sfx volume sliders, saved on this browser.
 - `f2`: dev tools. `f3`: part lab (per-form pixel art overrides and the sound lab).
 - drag: pan. wheel: integer pixel zoom. `esc`: menu; it does not pause a running game.

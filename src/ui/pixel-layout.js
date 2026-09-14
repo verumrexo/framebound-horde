@@ -38,17 +38,18 @@ export function fitPixelTelemetry(items, left, right, gap = 12) {
   });
 }
 
-export function pixelActionLayout(actions, availableHeight, requestedPage = 0) {
+export function pixelActionLayout(actions, availableHeight, requestedPage = 0, detailRows = 0) {
   const rows = [...new Set(actions.map((action) => action.y))].sort((a, b) => a - b);
-  const allHeight = 41 + rows.length * 21 + 3;
+  const actionsY = 41 + detailRows * 11;
+  const allHeight = actionsY + rows.length * 21 + 3;
   const paginated = allHeight > availableHeight;
-  const perPage = paginated ? Math.max(1, Math.floor((availableHeight - 59) / 21)) : Math.max(1, rows.length);
+  const perPage = paginated ? Math.max(1, Math.floor((availableHeight - actionsY - 18) / 21)) : Math.max(1, rows.length);
   const pages = Math.max(1, Math.ceil(rows.length / perPage));
   const page = Math.min(pages - 1, Math.max(0, requestedPage));
   const visible = rows.slice(page * perPage, (page + 1) * perPage);
   return {
-    page, pages,
+    page, pages, actionsY,
     rows: visible.map((y) => actions.filter((action) => action.y === y)),
-    height: 41 + visible.length * 21 + (pages > 1 ? 18 : 3)
+    height: actionsY + visible.length * 21 + (pages > 1 ? 18 : 3)
   };
 }

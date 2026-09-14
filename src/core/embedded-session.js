@@ -1,6 +1,6 @@
 import { fireReworked, tickReworked } from './turret-rework.js';
 import { decorateResearchAttack, secondaryAttack, damageFixed, damageResearchBonus, researchSecondaryPlans, pruneResearchCombat, enemyKey, physicalBullet } from './research-combat.js';
-import { freshResearch, hasResearch, reactorRank, reactorQuote, researchNode, arsenalChoices, researchStat } from './research.js';
+import { freshResearch, hasResearch, reactorRank, reactorBatchQuote, researchNode, arsenalChoices, researchStat } from './research.js';
 import { towerPlacementClear } from './placement.js';
 import { DEFAULT_PACE, normalizePace, spawnProfileAt, surgeScheduleAt, surgeSpawnSources, threatTickAt } from './progression.js';
 import {
@@ -271,6 +271,8 @@ export class EmbeddedAuthority {
       researchPath: [...(tower.researchPath || [])],
       kills: Math.max(0, Math.floor(tower.kills || 0)),
       lastKillTick: Math.max(0, Math.floor(tower.lastKillTick || 0)),
+      hpPopped: Number.isFinite(tower.hpPopped) ? damageFixed(Math.max(0, tower.hpPopped)) : 0,
+      lastDamageTick: Math.max(0, Math.floor(tower.lastDamageTick || 0)),
       supportTriggers: Math.max(0, Math.floor(tower.supportTriggers || 0)),
       bonusCredits: Math.max(0, Math.floor(tower.bonusCredits || 0)),
       targetingMode: tower.targetingMode || 'closest',
@@ -1417,6 +1419,10 @@ export class EmbeddedAuthority {
     const totalReward = paidHp * result.attack.rewardPerKill;
     this.state.stats.hpPopped = damageFixed((this.state.stats.hpPopped || 0) + hpPopped);
     const sourceTower = this.state.towers.find((tower) => tower.id === result.attack.sourceTowerId);
+    if (sourceTower && hpPopped > 0) {
+      sourceTower.hpPopped = damageFixed((sourceTower.hpPopped || 0) + hpPopped);
+      sourceTower.lastDamageTick = this.state.runTick;
+    }
     const attributedPlayerId = sourceTower?.ownerId || result.attack.ownerId || null;
     const contribution = attributedPlayerId ? this.state.contributionByPlayer[attributedPlayerId] : null;
     if (contribution) {
@@ -1763,20 +1769,21 @@ export class EmbeddedAuthority {
   purchaseReactor(command, player) {
     const tower = this.state.towers.find((item) => item.id === command.payload.towerId);
     if (!tower || tower.definitionId !== 'reactor') return this.reject(command, 'a reactor is required to upgrade');
-    const quote = reactorQuote(this.state, command.payload.categoryId);
-    if (!quote || command.payload.expectedRank !== quote.rank || command.payload.expectedCost !== quote.cost) return this.reject(command, 'reactor rank or price changed');
+    const count = command.payload.count === undefined ? 1 : command.payload.count;
+    const quote = reactorBatchQuote(this.state, command.payload.categoryId, count);
+    if (!quote || quote.count !== count || command.payload.expectedRank !== quote.rank || command.payload.expectedCost !== quote.cost) return this.reject(command, 'reactor rank or price changed');
     const economy = this.state.teamEconomy;
     if (!this.state.dev?.infiniteMoney && economy.credits < quote.cost) return this.reject(command, 'insufficient reactor credits');
     if (!this.state.dev?.infiniteMoney) economy.credits -= quote.cost;
     economy.totalSpent += quote.cost;
     this.state.contributionByPlayer[player.id].creditsSpent += quote.cost;
-    this.state.research.reactor[quote.id] = quote.rank + 1;
+    this.state.research.reactor[quote.id] = quote.targetRank;
     if (quote.id === 'lives') {
-      this.state.base.maxLives = this.startingLives + (quote.rank + 1) * 5;
-      this.state.base.lives = Math.min(this.state.base.maxLives, this.state.base.lives + 5);
+      this.state.base.maxLives = this.startingLives + quote.targetRank * 5;
+      this.state.base.lives = Math.min(this.state.base.maxLives, this.state.base.lives + quote.count * 5);
     }
     this.modifierCache = null;
-    this.emit(EVENT.REACTOR_PURCHASED, { towerId: tower.id, categoryId: quote.id, rank: quote.rank + 1, cost: quote.cost });
+    this.emit(EVENT.REACTOR_PURCHASED, { towerId: tower.id, categoryId: quote.id, rank: quote.targetRank, count: quote.count, cost: quote.cost });
   }
 
   placeTower(command, player) {
@@ -2053,6 +2060,8 @@ export class EmbeddedAuthority {
       for (const tower of this.state.towers) {
         tower.kills = 0;
         tower.lastKillTick = 0;
+        tower.hpPopped = 0;
+        tower.lastDamageTick = 0;
         tower.supportTriggers = 0;
         tower.bonusCredits = 0;
         tower.controlStats = { activations: 0, affectedUnits: 0, affectedUnitTicks: 0, lastActiveTick: 0 };
@@ -2165,7 +2174,7 @@ export class EmbeddedAuthority {
   }
 
   applyCorrectionSnapshot(correction) {
-    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
+    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
       throw new Error('session correction is incompatible');
     }
     const correctionSeed = correction.state?.seed;

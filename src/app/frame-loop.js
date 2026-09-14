@@ -5,6 +5,7 @@ import { handleSessionEvents } from './session-events.js';
 import { saveGameBundle } from './sessions.js';
 import { presentMusic, presentSounds } from './sound-presentation.js';
 import { updatePresence } from './social.js';
+import { updateTowerTelemetry } from './tower-telemetry.js';
 
 export function frame(app, now) {
   const elapsedMs = Math.min(133, Math.max(1, now - app.timing.previousTime));
@@ -15,6 +16,7 @@ export function frame(app, now) {
   const shouldAdvance = Boolean(app.game.session.networkRole) || app.game.sessionMode !== 'game' || app.game.gameHasEnteredGameplay;
   const sessionFrame = app.game.session.advance(shouldAdvance ? elapsedMs * timeScale : 0);
   app.game.sessionSnapshot = sessionFrame.snapshot;
+  updateTowerTelemetry(app, sessionFrame.snapshot);
   handleSessionEvents(app, sessionFrame.events);
   presentSounds(app, sessionFrame.events, sessionFrame.snapshot);
   presentMusic(app);

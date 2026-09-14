@@ -314,7 +314,7 @@ export function installInput(app) {
       const visible=items.slice(app.ui.researchPage*perPage,(app.ui.researchPage+1)*perPage);
       if(event.key==='Tab') { event.preventDefault(); app.ui.researchPage=(app.ui.researchPage+1)%Math.max(1,Math.ceil(items.length/perPage)); app.ui.researchDetailPage=0; }
       else if(['1','2','3'].includes(event.key)) { app.ui.researchSelection=visible[Number(event.key)-1]?.id ?? app.ui.researchSelection; app.ui.researchDetailPage=0; }
-      else if(event.key==='Enter') { const item=items.find((item)=>item.id===app.ui.researchSelection); if(item) purchaseStationItem(app, tower,item); }
+      else if(event.key==='Enter') { event.preventDefault(); const item=items.find((item)=>item.id===app.ui.researchSelection); if(item) purchaseStationItem(app, tower,item); }
       return;
     }
     if (app.ui.buildCatalogOpen) {
@@ -417,6 +417,7 @@ export function installInput(app) {
       setStatus(app, `all ranges ${app.ui.showAllRanges ? 'shown' : 'hidden'}`);
     } else if (key === 'i' && app.ui.frontEndScreen === 'game') {
       app.ui.showStatsPanel = !app.ui.showStatsPanel;
+      app.ui.statsPage = 0;
       setStatus(app, `modifier summary ${app.ui.showStatsPanel ? 'shown' : 'hidden'}`);
     } else if (app.game.sessionMode === 'test' && ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(event.key)) {
       switchTestTowerForm(app, {

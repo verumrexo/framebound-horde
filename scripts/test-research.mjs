@@ -3,7 +3,7 @@ import { EmbeddedAuthority } from '../src/core/embedded-session.js';
 import { TEST_FIELD_SESSION_CONFIG } from '../src/core/session-config.js';
 import { TOWER_DEFINITIONS } from '../src/core/tower-catalog.js';
 import { createAttackSnapshot } from '../src/core/effect-system.js';
-import { RESEARCH_NODES, REACTOR_CATEGORIES, reactorQuote, arsenalChoices, researchNode } from '../src/core/research.js';
+import { RESEARCH_NODES, REACTOR_CATEGORIES, reactorQuote, reactorBatchQuote, arsenalChoices, researchNode } from '../src/core/research.js';
 import { secondaryAttack, damageResearchBonus, enemyKey } from '../src/core/research-combat.js';
 import { purchaseCost } from '../src/core/network-descendants.js';
 let tests=0;
@@ -90,6 +90,96 @@ test('old stations migrate in place; research and queued attacks survive correct
   const b=new EmbeddedAuthority(TEST_FIELD_SESSION_CONFIG);b.applyCorrectionSnapshot(correction);
   assert.deepEqual(b.state.research,a.state.research);
   a.resetFreshRun();assert.deepEqual(a.state.research.unlocked,[]);assert.deepEqual(a.state.research.reactor,{});
+});
+
+test('reactor batches match sequential prices, effects, healing and contribution accounting',()=>{
+  for (const category of REACTOR_CATEGORIES) {
+    const bulk = setup(), single = setup();
+    const bulkStation = bulk.tower('reactor'), singleStation = single.tower('reactor');
+    const rank = category.maxRank === null ? 7 : category.maxRank - 3;
+    for (const run of [bulk, single]) {
+      run.a.state.research.reactor[category.id] = rank;
+      run.a.state.base.lives = 10;
+    }
+    const quote = reactorBatchQuote(bulk.a.state, category.id, 5);
+    assert.equal(quote.count, category.maxRank === null ? 5 : 3);
+    bulk.a.purchaseReactor(bulk.command({ towerId: bulkStation.id, categoryId: category.id, count: quote.count, expectedRank: rank, expectedCost: quote.cost }), bulk.player);
+    for (let i = 0; i < quote.count; i++) {
+      const next = reactorQuote(single.a.state, category.id);
+      single.a.purchaseReactor(single.command({ towerId: singleStation.id, categoryId: category.id, expectedRank: next.rank, expectedCost: next.cost }), single.player);
+    }
+    assert.deepEqual(bulk.a.state.research.reactor, single.a.state.research.reactor, category.id);
+    assert.deepEqual(bulk.a.state.teamEconomy, single.a.state.teamEconomy, category.id);
+    assert.deepEqual(bulk.a.state.base, single.a.state.base, category.id);
+    assert.deepEqual(bulk.a.state.contributionByPlayer, single.a.state.contributionByPlayer, category.id);
+    assert.equal(bulk.a.events.filter(event => event.type === 'reactor.purchased').length, 1);
+  }
+});
+
+test('unaffordable, stale, malformed and over-cap batches never buy partial ranks',()=>{
+  const { a, player, command, tower } = setup();
+  const station = tower('reactor');
+  const quote = reactorBatchQuote(a.state, 'damage', 5);
+  const payload = { towerId: station.id, categoryId: 'damage', count: 5, expectedRank: 0, expectedCost: quote.cost };
+  a.state.teamEconomy.credits = quote.cost - 1;
+  const before = structuredClone(a.state.teamEconomy);
+  a.purchaseReactor(command(payload), player);
+  assert.deepEqual(a.state.teamEconomy, before);
+  assert.deepEqual(a.state.research.reactor, {});
+  a.state.teamEconomy.credits = 1e12;
+  for (const count of [null, 0, -1, 1.5, 6, '5', Infinity, NaN]) {
+    assert.equal(reactorBatchQuote(a.state, 'damage', count), null);
+    a.purchaseReactor(command({ ...payload, count }), player);
+    assert.equal(a.state.teamEconomy.totalSpent, 0);
+  }
+  a.join({ clientId: 'teammate', payload: { label: 'teammate' } });
+  const teammate = a.state.players.at(-1);
+  a.purchaseReactor(command(payload), teammate);
+  const after = structuredClone(a.state.teamEconomy);
+  a.purchaseReactor(command(payload), player);
+  assert.deepEqual(a.state.teamEconomy, after, 'second player uses a stale batch quote');
+  assert.equal(a.state.research.reactor.damage, 5);
+  assert.equal(a.state.contributionByPlayer[teammate.id].creditsSpent, quote.cost);
+  assert.equal(a.state.contributionByPlayer[player.id].creditsSpent, 0);
+  a.state.research.reactor.lives = 19;
+  const capped = reactorBatchQuote(a.state, 'lives', 5);
+  assert.equal(capped.count, 1);
+  a.purchaseReactor(command({ towerId: station.id, categoryId: 'lives', count: 5, expectedRank: 19, expectedCost: capped.cost }), player);
+  assert.equal(a.state.research.reactor.lives, 19, 'authority requires the exact quoted count');
+  assert.deepEqual(a.state.teamEconomy, after);
+  const unsafeRank = Array.from({ length: 200 }, (_, i) => i).find(rank => {
+    a.state.research.reactor.damage = rank;
+    return reactorQuote(a.state, 'damage') && !reactorBatchQuote(a.state, 'damage', 5);
+  });
+  assert.ok(unsafeRank > 0, 'reject an unsafe sum even while one rank is still safely priced');
+});
+
+test('tracked damage survives corrections, migrates honestly, and resets with test counters',()=>{
+  const { a, tower, enemy, hit, command, player } = setup([1]);
+  const t = tower(), e = enemy(2);
+  a.state.runTick = 60;
+  hit(t, e);
+  assert.equal(t.hpPopped, 1.2);
+  assert.equal(t.kills, 0, 'nonlethal hits count toward tower output');
+  assert.equal(t.lastDamageTick, 60);
+  hit(t, e);
+  assert.equal(t.hpPopped, 2, 'overkill is excluded');
+  assert.equal(t.kills, 1);
+  a.evolveTower(command({ towerId: t.id, definitionId: 'assault' }), player);
+  assert.equal(t.hpPopped, 2, 'replacement preserves tracked lifetime output');
+  const correction = a.correctionSnapshot();
+  const restored = new EmbeddedAuthority(TEST_FIELD_SESSION_CONFIG);
+  restored.applyCorrectionSnapshot(correction);
+  assert.equal(restored.state.towers[0].hpPopped, 2);
+  assert.equal(restored.state.towers[0].lastDamageTick, 60);
+  correction.protocolVersion = 23;
+  delete correction.state.towers[0].hpPopped;
+  delete correction.state.towers[0].lastDamageTick;
+  restored.applyCorrectionSnapshot(correction);
+  assert.equal(restored.state.towers[0].hpPopped, 0, 'old kills cannot reconstruct damage');
+  a.clearTestField(command({ resetCounters: true }));
+  assert.equal(t.hpPopped, 0);
+  assert.equal(t.lastDamageTick, 0);
 });
 
 test('fractional damage pays whole hp without rounding every upgrade into another hit',()=>{

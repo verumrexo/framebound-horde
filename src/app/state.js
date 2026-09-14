@@ -103,6 +103,7 @@ export function createAppState({ canvas = null, errorPanel = null, reducedNetwor
       researchPage: 0,
       researchSelection: null,
       researchDetailPage: 0,
+      reactorBuyCount: 1,
     },
     connection: {
       peerCoordinator: null,
@@ -135,6 +136,7 @@ export function createAppState({ canvas = null, errorPanel = null, reducedNetwor
     timing: {
       frameTiming: { last: 0, average: 0, worst: 0 },
       telemetryByMode: new Map(),
+      towerTelemetryByMode: new Map(),
       previousTime: now,
       fps: 0,
       frameCounter: 0,

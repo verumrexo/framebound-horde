@@ -1,5 +1,6 @@
 import { catalogDefinition, economyNetworkSummary, relayCandidateAreas, weaponView } from '../app/queries.js';
 import { openResearchStation } from '../app/research-actions.js';
+import { towerDamageRate } from '../app/tower-telemetry.js';
 import { clearSelectedStrikePoint, evolveSelectedTower, openControlGeometryMenu, openRelayTargetMenu, openStrikeTargetMenu, openUpgradeMenu, resetSelectedControlGeometry, sellSelectedTower } from '../app/tower-actions.js';
 import { registerHitbox, setStatus } from '../app/ui-state.js';
 import { compactMetric } from '../core/format.js';
@@ -38,6 +39,8 @@ export function towerActionView(app, snapshot, tower) {
   const height = definition.id === 'echo' && (canAim || canControl) ? 97 : ['echo', 'hardpoint'].includes(definition.id) ? 81 : hasManualControl ? 65 : 49;
   const supportLabel = tower.bonusCredits > 0 ? ` +${compactMetric(tower.bonusCredits)} cr` : '';
   const isPureControl = Boolean(weaponView(snapshot, tower)?.supportOnly);
+  const isWeapon = Boolean(definition.attack && !isPureControl);
+  const damageRate = isWeapon ? towerDamageRate(app, tower) : null;
   const controlLabels = {
     stasis_zone: 'held',
     recall_gate: 'recalled',
@@ -61,13 +64,19 @@ export function towerActionView(app, snapshot, tower) {
     ? `casts // ${compactMetric(tower.controlStats?.activations || 0)}`
     : isPureControl
     ? `${controlLabels[definition.control?.type] || 'affected'} // ${compactMetric(controlValue)}${discreteControl ? '' : ' unit-s'}`
+    : isWeapon ? `hp/s ${damageRate === null ? '--' : compactMetric(damageRate)} // recent`
     : `kills // ${compactMetric(tower.kills || 0)}${supportLabel}`;
   const recentlyActive = isPureControl
     ? tower.controlStats?.lastActiveTick > 0 && snapshot.runTick - tower.controlStats.lastActiveTick <= AUTHORITY_TICK_RATE * 0.45
-    : tower.lastKillTick > 0 && snapshot.runTick - tower.lastKillTick <= AUTHORITY_TICK_RATE * 0.45;
+    : tower.lastDamageTick > 0 && snapshot.runTick - tower.lastDamageTick <= AUTHORITY_TICK_RATE * 0.45;
+
+  const details = isWeapon ? [
+    `${compactMetric(tower.hpPopped || 0)} hp // ${compactMetric(tower.kills || 0)} kills`,
+    `range ${Math.round(tower.effectiveRange || definition.range)}u // cycle ${tower.effectiveCadence > 0 ? (1 / tower.effectiveCadence).toFixed(2) : '--'}s`
+  ] : [];
 
   const view = { title: definition.label, investment: compactMetric(tower.totalInvestment), metric: metricLabel,
-    width, height, accent: towerAccent(tower.definitionId), actions, inspectOnly, owner: owner?.label || 'pilot', recentlyActive };
+    width, height, accent: towerAccent(tower.definitionId), actions, details, inspectOnly, owner: owner?.label || 'pilot', recentlyActive };
   if (inspectOnly) return view;
   const refund = saleRefund(snapshot, tower);
   const hasChoices = definition.evolutionChoices?.length > 0;
@@ -162,7 +171,9 @@ export function drawPixelTowerActions(app, tower, view) {
     app.ui.towerActionPage = 0;
   }
   const width = Math.min(208, app.viewport.logicalWidth - 10);
-  const layout = pixelActionLayout(view.actions, app.viewport.hudBottomY - app.viewport.HUD_TOP_HEIGHT - 8, app.ui.towerActionPage);
+  const availableHeight = app.viewport.hudBottomY - app.viewport.HUD_TOP_HEIGHT - 8;
+  const details = (view.details || []).slice(0, Math.max(0, Math.floor((availableHeight - 80) / 11)));
+  const layout = pixelActionLayout(view.actions, availableHeight, app.ui.towerActionPage, details.length);
   app.ui.towerActionPage = layout.page;
   const height = view.inspectOnly ? 64 : layout.height;
   const panel = towerPanelPosition(app, tower, width, height);
@@ -171,8 +182,9 @@ export function drawPixelTowerActions(app, tower, view) {
   registerHitbox(app, `tower_panel_${tower.id}`, panel.x, panel.y, width, height);
   app.renderer.bitmapText.draw(clippedUiText(view.title, width - 24), panel.x + 8, panel.y + 6, view.accent, 1);
   app.renderer.bitmapText.draw(clippedUiText(view.metric, width - 16), panel.x + 8, panel.y + 17, COLOR.ink, 1);
-  app.renderer.bitmapText.draw(`invested ${view.investment} cr`, panel.x + 8, panel.y + 28, COLOR.uiMuted, 1);
-  app.renderer.shapes.rect(panel.x + 8, panel.y + 37, width - 16, 1, COLOR.dimMint);
+  details.forEach((line, index) => app.renderer.bitmapText.draw(clippedUiText(line, width - 16), panel.x + 8, panel.y + 28 + index * 11, COLOR.uiMuted, 1));
+  app.renderer.bitmapText.draw(`invested ${view.investment} cr`, panel.x + 8, panel.y + 28 + details.length * 11, COLOR.uiMuted, 1);
+  app.renderer.shapes.rect(panel.x + 8, panel.y + layout.actionsY - 4, width - 16, 1, COLOR.dimMint);
   if (view.inspectOnly) {
     app.renderer.bitmapText.draw(clippedUiText(`owner ${view.owner}`, width - 16), panel.x + 8, panel.y + 43, COLOR.cyan, 1);
     app.renderer.bitmapText.draw('inspect only', panel.x + 8, panel.y + 53, COLOR.uiMuted, 1);
@@ -181,7 +193,7 @@ export function drawPixelTowerActions(app, tower, view) {
   for (const [rowIndex, row] of layout.rows.entries()) {
     const buttonWidth = Math.floor((width - 16 - (row.length - 1) * 6) / row.length);
     for (const [index, button] of row.entries()) {
-      drawButton(app, button.id, button.label, panel.x + 8 + index * (buttonWidth + 6), panel.y + 41 + rowIndex * 21,
+      drawButton(app, button.id, button.label, panel.x + 8 + index * (buttonWidth + 6), panel.y + layout.actionsY + rowIndex * 21,
         buttonWidth, button.active, button.color, button.action, 17);
     }
   }

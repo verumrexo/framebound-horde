@@ -1,8 +1,10 @@
 import { purchaseStationItem, stationItems } from '../app/research-actions.js';
 import { registerHitbox } from '../app/ui-state.js';
 import { compactMetric } from '../core/format.js';
-import { REACTOR_CATEGORIES, RESEARCH_NODES, hasResearch, reactorRank, researchNode } from '../core/research.js';
+import { networkSources } from '../core/network-descendants.js';
+import { REACTOR_CATEGORIES, RESEARCH_NODES, hasResearch, reactorBatchQuote, reactorDamageFactor, reactorRank, researchNode } from '../core/research.js';
 import { COLOR } from './palette.js';
+import { reactorEffectView, reactorPanelLayout } from './reactor-view.js';
 import { clippedUiText, drawButton, drawMenuButton, drawTechPanel, pointInside } from './widgets.js';
 
 export function researchScope(id) {
@@ -107,8 +109,8 @@ export function drawReactorTile(app, id, item, x, y, width, height, color, selec
   app.renderer.shapes.rect(x, y, selected ? 3 : 1, height, rimColor);
   app.renderer.shapes.rect(x + width - 1, y, 1, height, rimColor);
   const icon = REACTOR_ICON_KIND[item.id];
-  if (icon && height >= 32) drawResearchIcon(app, icon, x + width - 19, y + 4, selected || hovered ? color : COLOR.dimMint, 2);
-  app.renderer.bitmapText.draw(clippedUiText(item.label, width - (icon && height >= 32 ? 26 : 8)), x + 4, y + 4, selected || hovered ? color : COLOR.ink, 1);
+  if (icon && height >= 28) drawResearchIcon(app, icon, x + width - 19, y + 4, selected || hovered ? color : COLOR.dimMint, 2);
+  app.renderer.bitmapText.draw(clippedUiText(item.label, width - (icon && height >= 28 ? 26 : 8)), x + 4, y + 4, selected || hovered ? color : COLOR.ink, 1);
   app.renderer.bitmapText.draw(item.maxRank === null ? `rank ${item.rank}` : `${item.rank}/${item.maxRank}`, x + 4, y + height - 11, COLOR.dimMint, 1);
   const meterX = x + 4, meterY = y + height - 6, meterW = width - 8;
   app.renderer.shapes.rect(meterX, meterY, meterW, 3, COLOR.black);
@@ -119,83 +121,126 @@ export function drawReactorTile(app, id, item, x, y, width, height, color, selec
 
 export function drawReactorGrid(app, snapshot, tower) {
   app.ui.uiHitboxes.length = 0;
-  const width = Math.min(560, app.viewport.logicalWidth - 16), height = Math.min(300, app.viewport.logicalHeight - 16);
-  const x = (app.viewport.logicalWidth - width) / 2, y = (app.viewport.logicalHeight - height) / 2;
+  const layout = reactorPanelLayout(app.viewport.logicalWidth, app.viewport.logicalHeight);
+  const { x, y, width, height, grid, perPage, footerY } = layout;
   const items = stationItems(snapshot, tower);
-  if (!items.some((item) => item.id === app.ui.researchSelection)) app.ui.researchSelection = items[0]?.id ?? null;
-  const selected = items.find((item) => item.id === app.ui.researchSelection) || items[0];
+  const pages = Math.ceil(items.length / perPage);
+  app.ui.researchPage = Math.max(0, Math.min(pages - 1, app.ui.researchPage));
+  const visible = grid ? items : items.slice(app.ui.researchPage * perPage, (app.ui.researchPage + 1) * perPage);
+  if (!visible.some((item) => item.id === app.ui.researchSelection)) app.ui.researchSelection = visible[0].id;
+  const selected = visible.find((item) => item.id === app.ui.researchSelection);
   const wallet = snapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : snapshot.teamEconomy?.credits || 0;
   drawTechPanel(app, x, y, width, height, COLOR.amber);
-  app.renderer.bitmapText.draw('reactor // global ranks', x + 12, y + 10, COLOR.amber, 2);
+  app.renderer.bitmapText.draw(grid ? 'reactor // global ranks' : 'reactor', x + 12, y + 9, COLOR.amber, 2);
   app.renderer.bitmapText.draw(`credits ${snapshot.dev?.infiniteMoney ? 'inf' : compactMetric(wallet)}`, x + 12, y + 30, COLOR.ink, 1);
-  const cols = 3, rows = Math.ceil(items.length / cols);
-  const detailHeight = 66;
-  const gridTop = y + 44, gridWidth = width - 24;
-  const tileW = (gridWidth - (cols - 1) * 4) / cols;
-  const tileH = Math.max(28, (height - 44 - detailHeight - (rows - 1) * 4) / rows);
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const col = i % cols, row = Math.floor(i / cols);
-    const tx = x + 12 + col * (tileW + 4), ty = gridTop + row * (tileH + 4);
-    const capped = item.cost === null;
-    const color = item.id === selected.id ? COLOR.amber : capped ? COLOR.mint : COLOR.cyan;
-    drawReactorTile(app, `reactor_tile_${item.id}`, item, tx, ty, tileW, tileH, color, item.id === selected.id, () => { app.ui.researchSelection = item.id; });
+  if (grid) {
+    const cols = 3, rows = Math.ceil(items.length / cols);
+    const tileW = Math.floor((width - 24 - (cols - 1) * 4) / cols);
+    const tileH = Math.floor((footerY - 8 - (y + 44) - (rows - 1) * 4) / rows);
+    items.forEach((item, i) => {
+      const tx = x + 12 + (i % cols) * (tileW + 4), ty = y + 44 + Math.floor(i / cols) * (tileH + 4);
+      const color = item.id === selected.id ? COLOR.amber : item.cost === null ? COLOR.mint : COLOR.cyan;
+      drawReactorTile(app, `reactor_tile_${item.id}`, item, tx, ty, tileW, tileH, color, item.id === selected.id, () => { app.ui.researchSelection = item.id; });
+    });
+  } else {
+    const changePage = (delta) => { app.ui.researchPage = (app.ui.researchPage + pages + delta) % pages; };
+    drawButton(app, 'research_prev', '<', x + width - 100, y + 29, 20, true, COLOR.cyan, () => changePage(-1));
+    drawButton(app, 'research_next', '>', x + width - 32, y + 29, 20, true, COLOR.cyan, () => changePage(1));
+    app.renderer.bitmapText.draw(`${app.ui.researchPage + 1}/${pages}`, x + width - 76, y + 32, COLOR.ink, 1);
+    if (perPage > 1) visible.forEach((item, i) => {
+      drawButton(app, `reactor_tile_${item.id}`, `${i + 1} ${item.label} // ${item.rank}`, x + 12, y + 50 + i * 21, width - 24, item.id === selected.id, COLOR.amber, () => { app.ui.researchSelection = item.id; }, 17);
+    });
   }
-  const detailY = gridTop + rows * (tileH + 4) + 4;
-  if (REACTOR_ICON_KIND[selected.id]) drawResearchIcon(app, REACTOR_ICON_KIND[selected.id], x + 12, detailY, COLOR.amber, 2);
-  app.renderer.bitmapText.draw(clippedUiText(selected.label, width - 44), x + 32, detailY, COLOR.amber, 1);
-  const lines = wrapResearchText(selected.description, Math.floor((width - 24) / 6));
-  lines.slice(0, 1).forEach((line, i) => app.renderer.bitmapText.draw(line, x + 32, detailY + 9 + i * 9, COLOR.ink, 1));
-  const available = selected.cost !== null && (snapshot.dev?.infiniteMoney || wallet >= selected.cost);
-  const label = selected.cost === null ? 'rank capped' : `rank ${selected.rank} -> ${selected.rank + 1} // ${compactMetric(selected.cost)} cr // enter`;
-  drawMenuButton(app, 'reactor_buy', label, x + 12, y + height - 42, width - 24, available ? COLOR.mint : COLOR.red, () => { if (available) purchaseStationItem(app, tower, selected); }, available);
+  const count = app.ui.reactorBuyCount || 1;
+  const quote = reactorBatchQuote(snapshot, selected.id, count);
+  const current = reactorEffectView(selected.id, selected.rank);
+  const next = quote ? reactorEffectView(selected.id, quote.targetRank) : current;
+  const available = quote && (snapshot.dev?.infiniteMoney || wallet >= quote.cost);
+  app.renderer.bitmapText.draw(selected.label, x + 12, footerY, COLOR.amber, 1);
+  app.renderer.bitmapText.draw(clippedUiText(current.scope, width - 24), x + 12, footerY + 11, COLOR.uiMuted, 1);
+  app.renderer.bitmapText.draw(`${current.label} ${current.value}${quote ? ` -> ${next.value}` : ''}`, x + 12, footerY + 25, COLOR.ink, 1);
+  const rankLabel = quote ? `rank ${quote.rank} -> ${quote.targetRank}${selected.id === 'lives' ? ` // heals up to ${quote.count * 5}` : ''}` : `rank ${selected.rank} // ${selected.maxRank === selected.rank ? 'capped' : 'price limit'}`;
+  app.renderer.bitmapText.draw(clippedUiText(rankLabel, width - 24), x + 12, footerY + 36, COLOR.uiMuted, 1);
+  app.renderer.bitmapText.draw(quote ? `total ${quote.cost.toLocaleString('en-US')} cr` : 'no further ranks available', x + 12, footerY + 49, available ? COLOR.amber : COLOR.red, 1);
+  for (const [i, amount] of [1, 5].entries()) drawButton(app, `reactor_count_${amount}`, `x${amount}`, x + 12 + i * 34, y + height - 42, 30, count === amount, COLOR.cyan, () => { app.ui.reactorBuyCount = amount; }, 17);
+  const label = quote ? `buy x${quote.count} // enter` : 'unavailable';
+  drawMenuButton(app, 'reactor_buy', label, x + 84, y + height - 42, width - 96, available ? COLOR.mint : COLOR.red, () => { if (available) purchaseStationItem(app, tower, selected, quote); }, Boolean(available));
   drawMenuButton(app, 'reactor_back', 'back // esc', x + 12, y + height - 21, width - 24, COLOR.cyan, () => app.ui.towerMenuMode = 'actions');
 }
 
 export function drawStatsPanel(app, snapshot) {
-  const reactorLines = REACTOR_CATEGORIES
-    .map((category) => ({ category, rank: reactorRank(snapshot, category.id) }))
-    .filter(({ rank }) => rank > 0)
-    .map(({ category, rank }) => `${category.label} // rank ${rank}${category.maxRank !== null ? `/${category.maxRank}` : ''}`);
-  const unlocked = snapshot.research?.unlocked || [];
-  const scopeCounts = new Map();
-  for (const node of RESEARCH_NODES) {
-    if (!hasResearch(snapshot, node.id)) continue;
-    const scope = researchScope(node.id).replace('affects ', '');
-    scopeCounts.set(scope, (scopeCounts.get(scope) || 0) + 1);
-  }
-  const mints = snapshot.towers.filter((tower) => tower.definitionId === 'mint');
-  const forges = snapshot.towers.filter((tower) => tower.definitionId === 'forge');
-  const constructionDiscount = Math.round((1 - Math.max(0.5, 0.98 ** reactorRank(snapshot, 'construction'))) * 100);
-  const economy = snapshot.teamEconomy;
-  const lines = [
-    { text: 'reactor ranks', color: COLOR.amber },
-    ...(reactorLines.length ? reactorLines : ['no ranks purchased']).map((text) => ({ text, color: COLOR.ink })),
-    { text: 'arsenal research', color: COLOR.amber },
-    { text: `${unlocked.length}/39 unlocked`, color: COLOR.ink },
-    ...[...scopeCounts.entries()].map(([scope, count]) => ({ text: `${scope} // ${count}`, color: COLOR.ink })),
-    { text: 'economy', color: COLOR.amber },
-    { text: `+${constructionDiscount}% build discount // construction rank ${reactorRank(snapshot, 'construction')}`, color: COLOR.ink },
-    { text: `${mints.length} mint-s // ${forges.length} forge-s deployed`, color: COLOR.ink },
-    { text: `${compactMetric(snapshot.stats?.bonusCredits || 0)}cr shared economy bonus // ${compactMetric(economy?.totalEarned || 0)}cr earned`, color: COLOR.ink }
-  ];
-  const width = Math.min(280, app.viewport.logicalWidth - 16);
-  const height = Math.min(20 + lines.length * 10 + 6, app.viewport.logicalHeight - app.viewport.HUD_TOP_HEIGHT - 20);
+  const width = Math.min(360, app.viewport.logicalWidth - 16);
+  const height = Math.min(320, app.viewport.hudBottomY - app.viewport.HUD_TOP_HEIGHT - 16);
   const x = app.viewport.logicalWidth - width - 8, y = app.viewport.HUD_TOP_HEIGHT + 8;
-  drawTechPanel(app, x, y, width, height, COLOR.cyan);
-  app.renderer.bitmapText.draw('modifier summary // i to close', x + 8, y + 6, COLOR.cyan, 1);
-  let row = 0;
-  for (const line of lines) {
-    const lineY = y + 20 + row * 10;
-    if (lineY > y + height - 8) break;
-    app.renderer.bitmapText.draw(clippedUiText(line.text, width - 16), x + 8, lineY, line.color, 1);
-    row += 1;
+  const lines = [];
+  const add = (text, color = COLOR.ink) => wrapResearchText(text, Math.floor((width - 16) / 6))
+    .forEach(text => lines.push({ text, color }));
+  const percent = value => `${Number((value * 100).toFixed(1))}%`;
+  add('global base bonuses // reactor + arsenal', COLOR.amber);
+  add(`damage x${(reactorDamageFactor(snapshot) * (hasResearch(snapshot, 1) ? 1.2 : 1)).toFixed(2)}`);
+  add(`fire rate +${percent(reactorRank(snapshot, 'cadence') * .02 + (hasResearch(snapshot, 2) ? .15 : 0))}`);
+  add(`targeting range +${percent(reactorRank(snapshot, 'range') * .02 + (hasResearch(snapshot, 3) ? .1 : 0))}`);
+
+  const selected = snapshot.towers.find(tower => tower.id === app.ui.selectedTowerId);
+  add(selected ? `network buffs // ${selected.definitionId}` : 'network buffs // select a tower to inspect', COLOR.amber);
+  if (selected) {
+    const sources = networkSources(snapshot, selected.areaId).sort((a, b) => a.id.localeCompare(b.id));
+    const amplified = sources.some(tower => tower.definitionId === 'amplifier' && tower.areaId === selected.areaId);
+    const stats = new Map(), groups = new Set();
+    const labels = { range: 'range', cadencePerSecond: 'fire rate', controlRecharge: 'control recharge', geometryRadius: 'blast radius', geometryWidth: 'beam width', controlRadius: 'control radius', controlWidth: 'control width' };
+    for (const source of sources) {
+      const definition = snapshot.towerCatalog.find(item => item.id === source.definitionId);
+      for (const modifier of definition?.modifiers || []) {
+        if (!labels[modifier.stat]) continue;
+        const key = `${modifier.stackGroup}/${modifier.stat}`;
+        const value = groups.has(key) ? modifier.additionalValue || 0 : modifier.value;
+        groups.add(key);
+        stats.set(modifier.stat, (stats.get(modifier.stat) || 0) + value * (amplified ? 1.5 : 1));
+      }
+    }
+    for (const [stat, value] of stats) add(`${labels[stat]} +${percent(value)} // network`);
+    if (amplified) add('local amplifier included // x1.5 network buffs');
+    const support = new Map();
+    for (const source of sources) if (['redline', 'mint', 'forge', 'echo', 'hardpoint'].includes(source.definitionId)) support.set(source.definitionId, (support.get(source.definitionId) || 0) + 1);
+    for (const [id, count] of support) {
+      const definition = snapshot.towerCatalog.find(item => item.id === id);
+      add(`${id} x${count}: ${definition.description.join('; ')}`);
+    }
+    if (!stats.size && !support.size && !amplified) add('no network bonuses');
   }
+
+  add('reactor breakdown', COLOR.amber);
+  const ranks = REACTOR_CATEGORIES.filter(category => reactorRank(snapshot, category.id) > 0);
+  for (const category of ranks) {
+    const rank = reactorRank(snapshot, category.id), effect = reactorEffectView(category.id, rank);
+    add(`${category.label}: ${effect.value} // rank ${rank}`);
+  }
+  if (!ranks.length) add('no ranks purchased');
+  add('arsenal effects // conditions shown below', COLOR.amber);
+  const research = RESEARCH_NODES.filter(node => hasResearch(snapshot, node.id));
+  for (const node of research) {
+    add(node.label, COLOR.cyan);
+    add(node.description);
+  }
+  if (!research.length) add('no research purchased');
+
+  const perPage = Math.max(1, Math.floor((height - 46) / 10));
+  const pages = Math.max(1, Math.ceil(lines.length / perPage));
+  const page = Math.max(0, Math.min(pages - 1, app.ui.statsPage || 0));
+  app.ui.statsPage = page;
+  drawTechPanel(app, x, y, width, height, COLOR.cyan);
+  registerHitbox(app, 'stats_panel', x, y, width, height);
+  app.renderer.bitmapText.draw('buffs // i to close', x + 8, y + 6, COLOR.cyan, 1);
+  lines.slice(page * perPage, (page + 1) * perPage).forEach((line, row) => app.renderer.bitmapText.draw(line.text, x + 8, y + 20 + row * 10, line.color, 1));
+  drawButton(app, 'stats_prev', '<', x + 8, y + height - 20, 24, true, COLOR.cyan, () => { app.ui.statsPage = (page + pages - 1) % pages; });
+  app.renderer.bitmapText.draw(`${page + 1}/${pages}`, x + 40, y + height - 17, COLOR.ink, 1);
+  drawButton(app, 'stats_next', '>', x + width - 72, y + height - 20, 24, true, COLOR.cyan, () => { app.ui.statsPage = (page + 1) % pages; });
+  drawButton(app, 'stats_close', 'close', x + width - 44, y + height - 20, 36, true, COLOR.cyan, () => { app.ui.showStatsPanel = false; });
 }
 
 export function drawResearchStation(app, snapshot, tower) {
   if(tower.definitionId==='arsenal' && app.viewport.logicalWidth>=400 && app.viewport.logicalHeight>=346) return drawArsenalTree(app, snapshot,tower);
-  if(tower.definitionId==='reactor' && app.viewport.logicalWidth>=400 && app.viewport.logicalHeight>=300) return drawReactorGrid(app, snapshot,tower);
+  if(tower.definitionId==='reactor') return drawReactorGrid(app, snapshot,tower);
   app.ui.uiHitboxes.length = 0;
   const width = Math.min(420, app.viewport.logicalWidth - 20), height = Math.min(288, app.viewport.logicalHeight - 16);
   const x = (app.viewport.logicalWidth - width) / 2, y = (app.viewport.logicalHeight - height) / 2;

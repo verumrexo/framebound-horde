@@ -6,6 +6,10 @@ import { handleSessionEvents } from '../src/app/session-events.js';
 import { EVENT } from '../src/core/protocol.js';
 import { TOWER_DEFINITIONS } from '../src/core/tower-catalog.js';
 import { pixelHudLayout } from '../src/ui/pixel-layout.js';
+import { TowerDamageTelemetry } from '../src/app/tower-telemetry.js';
+import { purchaseStationItem, stationItems } from '../src/app/research-actions.js';
+import { reactorEffectView } from '../src/ui/reactor-view.js';
+import { researchStat } from '../src/core/research.js';
 // Importing input must not register browser listeners before startup installs it.
 import { installInput } from '../src/app/input.js';
 
@@ -90,4 +94,70 @@ try {
   }
 }
 
-console.log('client modules: isolated state, live resize/projection, session switching, render reset, and placement events passed');
+// Cumulative counters arrive independently of rendered attacks or kill events.
+const damage = new TowerDamageTelemetry();
+const damageSnapshot = { sessionId: 'damage', runNumber: 1, mapId: 'map_01', seed: 1, runTick: 0,
+  towers: [{ id: 'one', definitionId: 'frame', hpPopped: 0 }] };
+const trackedTower = damageSnapshot.towers[0];
+for (let tick = 0; tick <= 1800; tick += 15) {
+  damageSnapshot.runTick = tick;
+  trackedTower.hpPopped = tick / 60 * 12;
+  damage.update(damageSnapshot);
+}
+assert.equal(damage.towers.get('one').hpPerSecond, 12, 'actual HP output, independent of kills');
+assert.ok(damage.towers.get('one').samples.length <= 22, 'history stays bounded');
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, 12, 'paused ticks hold their rate');
+for (let tick = 1815; tick <= 2460; tick += 15) {
+  damageSnapshot.runTick = tick;
+  damage.update(damageSnapshot);
+}
+assert.equal(damage.towers.get('one').hpPerSecond, 0, 'idle towers decay to zero');
+damageSnapshot.runTick = 100;
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, null, 'correction rewind starts a new observation');
+damageSnapshot.runTick = 130;
+trackedTower.hpPopped += 3;
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, 6);
+trackedTower.hpPopped = 0;
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, null, 'counter reset cannot produce negative output');
+damageSnapshot.runTick = 160;
+trackedTower.hpPopped = 6;
+trackedTower.definitionId = 'assault';
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, null, 'new form gets a fresh recent window');
+damageSnapshot.runTick = 900;
+trackedTower.hpPopped = 1000;
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, null, 'background gaps do not become damage spikes');
+damageSnapshot.runNumber += 1;
+damage.update(damageSnapshot);
+assert.equal(damage.towers.get('one').hpPerSecond, null, 'fresh run never inherits a rate');
+damageSnapshot.towers = [];
+damage.update(damageSnapshot);
+assert.equal(damage.towers.size, 0, 'sold towers release telemetry');
+
+const purchaseMessages = [];
+const purchaseSnapshot = { research: { unlocked: [], reactor: {} } };
+const purchaseApp = { ui: { reactorBuyCount: 5 }, game: { sessionSnapshot: purchaseSnapshot,
+  session: { send: (type, payload) => purchaseMessages.push({ type, payload }) } } };
+const reactor = { id: 'reactor', definitionId: 'reactor' };
+purchaseStationItem(purchaseApp, reactor, stationItems(purchaseSnapshot, reactor).find(item => item.id === 'damage'));
+assert.deepEqual(purchaseMessages[0], { type: 'reactor.purchase', payload: {
+  towerId: 'reactor', categoryId: 'damage', count: 5, expectedRank: 0, expectedCost: 744160
+} }, 'one command carries the complete reviewed batch');
+purchaseSnapshot.research.reactor.lives = 18;
+purchaseStationItem(purchaseApp, reactor, stationItems(purchaseSnapshot, reactor).find(item => item.id === 'lives'));
+assert.equal(purchaseMessages[1].payload.count, 2, 'send the available ranks near a cap');
+const arsenal = { id: 'arsenal', definitionId: 'arsenal' };
+purchaseStationItem(purchaseApp, arsenal, stationItems(purchaseSnapshot, arsenal)[0]);
+assert.deepEqual(purchaseMessages[2], { type: 'research.purchase', payload: { towerId: 'arsenal', researchId: 1, expectedCost: 100000 } });
+for (const [id, stat] of [['cadence', 'cadencePerSecond'], ['range', 'range'], ['velocity', 'projectileSpeed'], ['blast', 'geometryRadius'], ['beam', 'geometryWidth'], ['recovery', 'controlRecharge'], ['coverage', 'controlRadius']]) {
+  purchaseSnapshot.research.reactor[id] = 5;
+  assert.equal(parseFloat(reactorEffectView(id, 5).value), researchStat(purchaseSnapshot, stat, 100, {}, null), 'preview matches the actual reactor modifier');
+}
+assert.equal(reactorEffectView('damage', 5).value, 'x1.61');
+assert.equal(reactorEffectView('construction', 35).value, '+50%');
+console.log('client modules: state, session switching, placement, bounded damage telemetry, batch commands and effect previews passed');
