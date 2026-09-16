@@ -39,22 +39,22 @@ test('39 unique nodes form exactly 3/9/27 paths, and all can be purchased',()=>{
   for(const node of RESEARCH_NODES) a.purchaseResearch(command({towerId:station.id,researchId:node.id,expectedCost:node.cost}),player);
   assert.equal(arsenalChoices(a.state).length,0);
   assert.equal(new Set(a.state.research.unlocked).size,39);
-  assert.equal(before-a.state.teamEconomy.credits,279_300_000);
+  assert.equal(before-a.state.teamEconomy.credits,27_930_000);
 });
 
 test('races, wrong branches, wrong owners and insufficient funds do not spend money',()=>{
   const {a,player,command,tower}=setup();const one=tower('arsenal'),two=tower('arsenal');
-  a.purchaseResearch(command({towerId:one.id,researchId:1,expectedCost:100e3}),player);
+  a.purchaseResearch(command({towerId:one.id,researchId:1,expectedCost:10e3}),player);
   const before=a.state.teamEconomy.credits;
-  a.purchaseResearch(command({towerId:two.id,researchId:1,expectedCost:100e3}),player);
-  a.purchaseResearch(command({towerId:one.id,researchId:7,expectedCost:1e6}),player);
+  a.purchaseResearch(command({towerId:two.id,researchId:1,expectedCost:10e3}),player);
+  a.purchaseResearch(command({towerId:one.id,researchId:7,expectedCost:100e3}),player);
   a.purchaseResearch(command({towerId:two.id,researchId:1,expectedCost:0}),{id:'stranger'});
   assert.equal(a.state.teamEconomy.credits,before);
   assert.deepEqual(two.researchPath,[]);
   a.purchaseResearch(command({towerId:two.id,researchId:1,expectedCost:0}),player);
   assert.deepEqual(two.researchPath,[]);
   a.state.teamEconomy.credits=0;
-  a.purchaseResearch(command({towerId:one.id,researchId:4,expectedCost:1e6}),player);
+  a.purchaseResearch(command({towerId:one.id,researchId:4,expectedCost:100e3}),player);
   assert.deepEqual(one.researchPath,[]);
   assert.deepEqual(a.state.research.unlocked,[1]);
 });
@@ -77,7 +77,7 @@ test('all 12 reactor categories enforce global prices, caps and nonrefundable pu
   a.sellTower(command({towerId:station.id}),player);
   assert.equal(a.state.teamEconomy.credits-before,750);
   assert.equal(a.state.research.reactor.damage,1);
-  const next=tower('reactor');assert.equal(reactorQuote(a.state,'damage').cost,120_000);
+  const next=tower('reactor');assert.equal(reactorQuote(a.state,'damage').cost,12_000);
   assert.equal(next.totalInvestment,1500);
 });
 
@@ -209,9 +209,9 @@ test('reactor damage ranks multiply by 1.10 each and compound; arsenal stays add
   assert.equal(attack(t).effects[0].amount,3.113); // arsenal +20% measured against the rank-adjusted baseline (2.594 * 1.2)
 });
 
-test('arsenal tiers cost 100k / 1m / 10m; damage ranks cost 100k x1.20, every other category 10k x1.25',()=>{
+test('arsenal tiers cost 10k / 100k / 1m; damage ranks cost 10k x1.20, every other category 10k x1.25',()=>{
   assert.deepEqual([1,2,3].map((tier)=>new Set(RESEARCH_NODES.filter((node)=>node.tier===tier).map((node)=>node.cost))),
-    [new Set([100_000]),new Set([1_000_000]),new Set([10_000_000])]);
+    [new Set([10_000]),new Set([100_000]),new Set([1_000_000])]);
   const {a}=setup();
   for(const category of REACTOR_CATEGORIES){
     if(category.id==='damage') continue;
@@ -219,9 +219,9 @@ test('arsenal tiers cost 100k / 1m / 10m; damage ranks cost 100k x1.20, every ot
     a.state.research.reactor[category.id]=1;assert.equal(reactorQuote(a.state,category.id).cost,12_500,category.id);
     a.state.research.reactor[category.id]=4;assert.equal(reactorQuote(a.state,category.id).cost,Math.ceil(10_000*1.25**4),category.id);
   }
-  a.state.research.reactor={damage:0};assert.equal(reactorQuote(a.state,'damage').cost,100_000);
-  a.state.research.reactor={damage:1};assert.equal(reactorQuote(a.state,'damage').cost,120_000);
-  a.state.research.reactor={damage:20};assert.equal(reactorQuote(a.state,'damage').cost,Math.ceil(100_000*1.2**20));
+  a.state.research.reactor={damage:0};assert.equal(reactorQuote(a.state,'damage').cost,10_000);
+  a.state.research.reactor={damage:1};assert.equal(reactorQuote(a.state,'damage').cost,12_000);
+  a.state.research.reactor={damage:20};assert.equal(reactorQuote(a.state,'damage').cost,Math.ceil(10_000*1.2**20));
   assert.equal(REACTOR_CATEGORIES.find((category)=>category.id==='damage').maxRank,null,'damage stays uncapped');
   a.state.research.reactor={damage:3};
   assert.equal(reactorQuote(a.state,'cadence').cost,10_000,'categories price independently');

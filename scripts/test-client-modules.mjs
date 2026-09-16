@@ -146,14 +146,14 @@ const purchaseApp = { ui: { reactorBuyCount: 5 }, game: { sessionSnapshot: purch
 const reactor = { id: 'reactor', definitionId: 'reactor' };
 purchaseStationItem(purchaseApp, reactor, stationItems(purchaseSnapshot, reactor).find(item => item.id === 'damage'));
 assert.deepEqual(purchaseMessages[0], { type: 'reactor.purchase', payload: {
-  towerId: 'reactor', categoryId: 'damage', count: 5, expectedRank: 0, expectedCost: 744160
+  towerId: 'reactor', categoryId: 'damage', count: 5, expectedRank: 0, expectedCost: 74416
 } }, 'one command carries the complete reviewed batch');
 purchaseSnapshot.research.reactor.lives = 18;
 purchaseStationItem(purchaseApp, reactor, stationItems(purchaseSnapshot, reactor).find(item => item.id === 'lives'));
 assert.equal(purchaseMessages[1].payload.count, 2, 'send the available ranks near a cap');
 const arsenal = { id: 'arsenal', definitionId: 'arsenal' };
 purchaseStationItem(purchaseApp, arsenal, stationItems(purchaseSnapshot, arsenal)[0]);
-assert.deepEqual(purchaseMessages[2], { type: 'research.purchase', payload: { towerId: 'arsenal', researchId: 1, expectedCost: 100000 } });
+assert.deepEqual(purchaseMessages[2], { type: 'research.purchase', payload: { towerId: 'arsenal', researchId: 1, expectedCost: 10000 } });
 for (const [id, stat] of [['cadence', 'cadencePerSecond'], ['range', 'range'], ['velocity', 'projectileSpeed'], ['blast', 'geometryRadius'], ['beam', 'geometryWidth'], ['recovery', 'controlRecharge'], ['coverage', 'controlRadius']]) {
   purchaseSnapshot.research.reactor[id] = 5;
   assert.equal(parseFloat(reactorEffectView(id, 5).value), researchStat(purchaseSnapshot, stat, 100, {}, null), 'preview matches the actual reactor modifier');

@@ -35,10 +35,10 @@ function setup(){
  for(const node of RESEARCH_NODES)a.purchaseResearch(command({towerId:station.id,researchId:node.id,expectedCost:node.cost}),player);
  assert.equal(a.state.research.unlocked.length,39,'one arsenal unlocks every branch');
  const wallet=a.state.teamEconomy.credits;
- a.purchaseResearch(command({towerId:station.id,researchId:1,expectedCost:100000}),player);
+ a.purchaseResearch(command({towerId:station.id,researchId:1,expectedCost:10000}),player);
  assert.equal(a.state.teamEconomy.credits,wallet);
  for(const category of REACTOR_CATEGORIES){
-  const first=category.id==='damage'?100000:10000, growth=category.id==='damage'?1.2:1.25;
+  const first=10000, growth=category.id==='damage'?1.2:1.25;
   a.state.research.reactor[category.id]=0;assert.equal(reactorQuote(a.state,category.id).cost,first);
   a.state.research.reactor[category.id]=1;assert.equal(reactorQuote(a.state,category.id).cost,Math.ceil(first*growth-1e-8));
   a.state.research.reactor[category.id]=2;assert.equal(reactorQuote(a.state,category.id).cost,Math.ceil(first*growth**2-1e-8));

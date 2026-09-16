@@ -16,7 +16,7 @@ a.placeTower(cmd({ definitionId: 'frame', x: area.shape.x, y: area.shape.y }), p
 assert.equal(a.state.towers.length, 1); assert.equal(wallet.credits, 0);
 const station = a.normalizeTower({ id: 'research', ownerId: player.id, definitionId: 'arsenal', areaId: area.id, x: area.shape.x + 40, y: area.shape.y });
 a.state.towers.push(station);
-a.purchaseResearch(cmd({ towerId: station.id, researchId: 1, expectedCost: 100000 }), player);
+a.purchaseResearch(cmd({ towerId: station.id, researchId: 1, expectedCost: 10000 }), player);
 assert.ok(a.state.research.unlocked.includes(1)); assert.equal(wallet.credits, 0);
 station.definitionId = 'reactor';
 a.purchaseReactor(cmd({ towerId: station.id, categoryId: 'damage', expectedRank: 0, expectedCost: reactorQuote(a.state, 'damage').cost }), player);
