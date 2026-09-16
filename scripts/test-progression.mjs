@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   healthBudgetAt, spawnProfileAt, surgeScheduleAt, surgeRiftIds, surgeSpawnSources,
-  surgeStartSeconds, surgeArcSize, surgeRiftRing, LINEAR_RAMP_START_MINUTE,
+  surgeStartSeconds, surgeArcSize, surgeRiftRing, LINEAR_RAMP_START_MINUTE, HP_MIX_START_MINUTE,
   SURGE_PERIOD_SECONDS, SURGE_WARNING_SECONDS, SURGE_ACTIVE_SECONDS, SURGE_HOT_WEIGHT, SURGE_EXTRA_HP_FRACTION, surgeHpMultiplier,
   normalizePace, threatTickAt, DEFAULT_PACE, PACE_MIN, PACE_MAX
 } from '../src/core/progression.js';
@@ -21,9 +21,40 @@ for (let seconds = 0; seconds <= 80 * 60; seconds++) {
   assert.ok(Math.abs(profile.rate * profile.meanHp / healthBudgetAt(map, seconds * 60) - 1) < 1e-12);
   if (seconds >= 1200) assert.ok(Math.abs(profile.rate - cap) < 1e-9);
 }
-assert.equal(spawnProfileAt(map, 0).meanHp, 1.5);
+assert.equal(spawnProfileAt(map, 0).meanHp, 1);
+assert.equal(spawnProfileAt(map, HP_MIX_START_MINUTE * 3600).meanHp, 1);
 assert.equal(spawnProfileAt(map, 1200 * 60).meanHp, 2);
 console.log('budget identity retained; physical spawns flat from 20 minutes');
+
+// Exercise the real spawn cadence continuously through the opening, including group
+// carries, so an occasional heavier allocation cannot sneak past a profile-only check.
+{
+  const opening = new EnemySwarm({ seed: 7, map });
+  const sources = [{ x: 0, y: -1300, spreadX: 1, spreadY: 1 }];
+  let allowedHp = 0, spawnedHp = 0;
+  const firstSeen = new Map();
+  for (let tick = 1; tick <= 10 * 3600; tick += 1) {
+    const profile = spawnProfileAt(map, tick);
+    const previousCount = opening.count;
+    const spawned = opening.spawnAtRate(profile.rate, sources, 1, profile.meanHp);
+    allowedHp += spawned * profile.meanHp;
+    for (let index = previousCount; index < opening.count; index += 1) {
+      const hp = opening.hpById[opening.idByIndex[index]];
+      spawnedHp += hp;
+      if (!firstSeen.has(hp)) firstSeen.set(hp, tick / 3600);
+      if (tick <= HP_MIX_START_MINUTE * 3600) assert.equal(hp, 1, 'opening contains no tougher enemies');
+      if (tick <= 6 * 3600) assert.ok(hp <= 2, 'early mixture introduces light bodies first');
+    }
+    assert.ok(Math.abs(spawnedHp + opening.spawnHpAccumulator - allowedHp) < 1e-7, 'delaying heavies preserves the HP budget');
+  }
+  assert.ok(firstSeen.get(2) > HP_MIX_START_MINUTE && firstSeen.get(2) < 4);
+  assert.ok(firstSeen.get(3) > 6 && firstSeen.get(3) < 9, 'beefier bodies arrive later');
+  assert.ok(firstSeen.has(4), 'the later mixture still gains stronger tiers');
+  for (const pace of [0.6, 0.8, 1, 1.6]) {
+    assert.equal(spawnProfileAt(map, threatTickAt(HP_MIX_START_MINUTE * 3600 / pace, pace)).meanHp, 1);
+  }
+}
+console.log('opening: three light-only minutes, gradual HP tiers, unchanged threat budget');
 
 // A gentler opening joins a linear late ramp without a value or slope jump.
 const untapered = { ...map, spawnCurve: { ...map.spawnCurve, taper: false } };
@@ -114,6 +145,7 @@ for (const id of ['map_01', 'map_07', 'map_04']) {
   for (const minute of [1, 5, 10, 20, 40, 80]) for (const index of [0, 5, 20]) {
     const current = spawnProfileAt(world, minute * 3600);
     const sources = surgeSpawnSources(world.spawnSources, { ...surge, hpMultiplier: surgeHpMultiplier(index) }, current);
+    if (minute <= 6) assert.ok(sources.every((source) => !source.extraHp || source.extraHp <= 2), 'early surges respect the light-body window too');
     const extraHpPerSecond = sources.reduce((sum, source) => sum + (source.extraRatePerSecond || 0) * (source.extraHp || 0), 0);
     assert.ok(Math.abs(extraHpPerSecond / current.hpPerSecond - SURGE_EXTRA_HP_FRACTION) < 1e-12, 'surges track current HP pressure at every stage');
   }
@@ -172,6 +204,10 @@ console.log('rift surges are deterministic, contiguous, rotating, additive and c
   fallback.applyCorrectionSnapshot(legacy);
   assert.equal(fallback.swarm.spawnMixCursor, 0, 'previous-version saves start a new HP group');
   assert.equal(fallback.swarm.spawnMixFraction, 0);
+  const previousVersion = paced.correctionSnapshot();
+  previousVersion.protocolVersion = 25; previousVersion.state.protocolVersion = 25;
+  fallback.applyCorrectionSnapshot(previousVersion);
+  assert.deepEqual(fallback.swarm.exportCorrection(), paced.swarm.exportCorrection(), 'protocol 25 saves retain their mixed-HP state');
   paced.restartSession({ clientId: 'p', playerId: host.id, sequence: 2, payload: { mapId: 'map_01' } });
   assert.equal(paced.state.pace, DEFAULT_PACE, 'a restart without a pace uses the designed pace');
 }
@@ -186,7 +222,7 @@ for (let i = 0; i < swarm.count; i++) {
   hp += swarm.hpById[swarm.idByIndex[i]];
   tiers.add(swarm.hpById[swarm.idByIndex[i]]);
 }
-assert.equal(hp, 240); assert.ok(tiers.size >= 3, 'opening already contains three HP tiers');
+assert.equal(hp, 240); assert.ok(tiers.size >= 3, 'the established mixture contains three HP tiers');
 for (const mean of [1, 1.25, 1.5, 1.625, 2, 6.7, 100.37, 1234.56]) {
   const mixed = new EnemySwarm({ seed: 7, map });
   const health = new Set(); let budget = 0, spent = 0;

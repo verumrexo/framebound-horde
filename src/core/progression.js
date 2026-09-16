@@ -18,6 +18,8 @@ export function threatTickAt(runTick, pace = DEFAULT_PACE) {
 }
 
 export const LINEAR_RAMP_START_MINUTE = 20;
+export const HP_MIX_START_MINUTE = 3;
+export const LIGHT_MIX_MAX_MEAN_HP = 1.2;
 
 export function healthBudgetAt(map, runTick, tickRate = 60) {
   const minutes = Math.max(0, runTick) / tickRate / 60;
@@ -33,9 +35,11 @@ export function healthBudgetAt(map, runTick, tickRate = 60) {
 export function spawnProfileAt(map, runTick, tickRate = 60) {
   const minutes = Math.max(0, runTick) / tickRate / 60;
   const hpPerSecond = healthBudgetAt(map, runTick, tickRate);
-  // Mixed light/medium/heavy bodies from deployment. Their average is paid for by
-  // fewer bodies, so variety never adds HP or credit income to the threat curve.
-  const openingHp = 1.5 + 0.5 * Math.min(1, minutes / LINEAR_RAMP_START_MINUTE);
+  // Give the opening time to breathe: only 1 HP bodies for three threat minutes,
+  // then ease the mixture to its existing 2 HP average at the twenty-minute cap.
+  // Body rate pays for the mixture, preserving the same HP/sec and credit budget.
+  const openingHp = 1 + Math.max(0, Math.min(1,
+    (minutes - HP_MIX_START_MINUTE) / (LINEAR_RAMP_START_MINUTE - HP_MIX_START_MINUTE)));
   const bodyCap = healthBudgetAt(map, LINEAR_RAMP_START_MINUTE * 60 * tickRate, tickRate) / 2;
   const meanHp = Math.max(openingHp, bodyCap > 0 ? hpPerSecond / bodyCap : 1);
   return { rate: hpPerSecond / meanHp, meanHp, hpPerSecond, bodyCap };
@@ -149,7 +153,9 @@ export function surgeSpawnSources(sources, surge, profile) {
   const hot = new Set(surge.riftIds);
   const hotCount = sources.filter((source) => hot.has(source.id)).length;
   if (hotCount === 0) return sources;
-  const extraHp = Math.max(1, Math.round(profile.meanHp * surge.hpMultiplier));
+  const heavyHp = Math.max(1, Math.round(profile.meanHp * surge.hpMultiplier));
+  // Short maps can surge during the opening; respect the same light-body window.
+  const extraHp = profile.meanHp <= LIGHT_MIX_MAX_MEAN_HP ? Math.min(2, heavyHp) : heavyHp;
   // Pay for heavier surge bodies from a fixed fraction of *current* pressure.
   // Using the late-game body cap here made early surges dwarf the ordinary stream.
   const extraRate = profile.hpPerSecond * SURGE_EXTRA_HP_FRACTION / extraHp / hotCount;

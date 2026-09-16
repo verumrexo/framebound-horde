@@ -1,5 +1,6 @@
 import { damageFixed } from './research-combat.js';
 import { AUTHORITY_TICK_RATE } from './protocol.js';
+import { LIGHT_MIX_MAX_MEAN_HP } from './progression.js';
 import { defenseAreaBounds, defenseAreaField } from './world-config.js';
 
 const STATE_STRIDE = 4;
@@ -314,6 +315,15 @@ export class EnemySwarm {
 
   nextMixedHp(meanHp) {
     this.spawnHpAccumulator += meanHp;
+    if (meanHp <= LIGHT_MIX_MAX_MEAN_HP) {
+      // Introduce the first extra HP one body at a time. Banking it across a whole
+      // mixed group could otherwise concentrate two extras into an early 3 HP body.
+      this.spawnMixCursor = 0;
+      this.spawnMixFraction = 0;
+      const hp = Math.max(1, Math.min(2, Math.floor(this.spawnHpAccumulator + 1e-9)));
+      this.spawnHpAccumulator = Math.max(0, this.spawnHpAccumulator - hp);
+      return hp;
+    }
     const lightHp = Math.max(1, Math.floor(meanHp * 0.4));
     this.spawnMixFraction += (meanHp - lightHp) * HP_MIX_WEIGHTS[this.spawnMixCursor];
     const extraHp = Math.floor(this.spawnMixFraction + 1e-9);

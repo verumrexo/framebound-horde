@@ -110,6 +110,14 @@ for (const zoom of zooms) for (const units of [1, 2, 3, 4, 5, 100]) {
   assert.ok(size >= 2);
   assert.equal(size, oldSize * 0.8);
   if (units > 1) assert.ok(size > enemyPointSize(zoom, 1));
+  let previousSize = size;
+  for (const hp of [2, 3, 4, 8, 16, 32, 100, 10000]) {
+    const heavySize = enemyPointSize(zoom, units, hp);
+    assert.ok(heavySize > size && heavySize >= previousSize, 'remaining HP gives a monotonic visual size cue');
+    assert.ok(heavySize <= size * 1.20, 'even huge HP never grows beyond the subtle size cap');
+    assert.equal(enemyPointSize(zoom, units, hp - 0.25), heavySize, 'size follows the same rounded HP as the silhouette');
+    previousSize = heavySize;
+  }
 }
 
 // Projectile heads and kill marks follow the turret footprint through every zoom and

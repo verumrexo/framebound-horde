@@ -1,6 +1,6 @@
 import { AUTHORITY_TICK_RATE } from '../core/protocol.js';
 import { createProgram } from './webgl.js';
-import { enemyPointSize } from './world-appearance.js';
+import { ENEMY_HP_SIZE_CAP, ENEMY_HP_SIZE_STEP, enemyPointSize } from './world-appearance.js';
 import { ENEMY_SPRITE_GLSL } from './enemy-sprites.js';
 import { COLOR } from '../ui/palette.js';
 
@@ -28,6 +28,8 @@ void main() {
   vec2 clip = vec2(screen.x / u_resolution.x * 2.0 - 1.0, 1.0 - screen.y / u_resolution.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
   v_pointSize = a_units > 1.5 ? u_pointSizes.y : u_pointSizes.x;
+  // HP only nudges the existing footprint; even very late heavies stay compact.
+  v_pointSize *= 1.0 + min(${ENEMY_HP_SIZE_CAP.toFixed(2)}, ${ENEMY_HP_SIZE_STEP.toFixed(2)} * log2(max(1.0, a_hp)));
   gl_PointSize = v_pointSize * u_renderScale;
   v_status = a_status;
   v_units = a_units;

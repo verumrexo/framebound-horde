@@ -3,6 +3,8 @@ import { isRelayForm } from '../core/network-descendants.js';
 
 export const ENEMY_VISUAL_SCALE = 0.8;
 export const ENEMY_MIN_PIXELS = 2;
+export const ENEMY_HP_SIZE_STEP = 0.04;
+export const ENEMY_HP_SIZE_CAP = 0.20;
 export const BASE_HIT_TICKS = Math.ceil(0.18 * AUTHORITY_TICK_RATE);
 export const NEBULA_SHADE_FLOOR = 0.006;
 export const NEBULA_LEVELS = Object.freeze({
@@ -87,9 +89,10 @@ export function relayNetworkPresentation(snapshot) {
   return presentation;
 }
 
-export function enemyPointSize(viewScale, units = 1) {
+export function enemyPointSize(viewScale, units = 1, hp = 1) {
   const baseSize = Math.floor(Math.max(3, Math.min(6, 13 / viewScale)) + 0.5);
-  return Math.max(ENEMY_MIN_PIXELS, (baseSize + (units > 1.5 ? 3 : 0)) * ENEMY_VISUAL_SCALE);
+  const healthScale = 1 + Math.min(ENEMY_HP_SIZE_CAP, ENEMY_HP_SIZE_STEP * Math.log2(Math.max(1, Math.ceil(hp))));
+  return Math.max(ENEMY_MIN_PIXELS, (baseSize + (units > 1.5 ? 3 : 0)) * ENEMY_VISUAL_SCALE) * healthScale;
 }
 
 export function baseAppearance(base, startingLives, runTick, hitTick = null, reducedMotion = false) {

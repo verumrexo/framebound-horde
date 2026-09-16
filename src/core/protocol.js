@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 25;
+export const PROTOCOL_VERSION = 26;
 export const AUTHORITY_TICK_RATE = 60;
 export const AUTHORITY_TICK_MS = 1000 / AUTHORITY_TICK_RATE;
 

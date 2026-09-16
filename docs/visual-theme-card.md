@@ -86,7 +86,7 @@ use one authored silhouette per field, built from torn islands, angled wisps, or
 
 hostiles are compact abstract shards, hooks, forks, broken kites, and thorns with dark cores. each remaining-hp value selects a consistent silhouette; higher hp uses irregular limb combinations (256 variants). ordinary 1–5 hp colours are coral, gold, blue, violet, and pink, with striped higher tiers. the optional magenta palette remains available. colours describe remaining hp, not cosmetic randomness. status colours replace the core while leaving the hp-coloured body readable.
 
-the seven-pixel masks stay in the existing single point-sprite draw with the same world footprint; they simplify below four device pixels. a crowd reads as a liquid because bodies share momentum and pressure. compressed crowds remain visibly plural, with separated blocks and an overload marker.
+the seven-pixel masks stay in the existing single point-sprite draw. 1 hp bodies keep their compact footprint; each doubling of remaining hp adds 4% to the sprite size, capped at 20% larger. this is a visual cue only and does not change collision or movement. masks simplify below four device pixels. a crowd reads as a liquid because bodies share momentum and pressure. compressed crowds remain visibly plural, with separated blocks and an overload marker.
 
 offscreen pings and warning/active surges use small diamond markers and outward chevrons on the playable viewport edge, including corners. exclude both hud bands. nearby surge rifts share an indicator; visible rifts and pings keep their world markers. reduced motion holds marker animation still.
 
