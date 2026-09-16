@@ -99,7 +99,7 @@ export const NETWORK_DESCENDANTS = Object.freeze({
   aperture: form('aperture', 'overclock', ['blast / field size +10%', 'beam width +10%', 'extra copies +1%'], {
     modifiers: ['geometryRadius', 'geometryWidth', 'controlRadius', 'controlWidth'].map((stat) => modifier(`aperture_${stat}`, stat, 0.1))
   }),
-  mint: form('mint', 'forge', ['ordinary hp income +20%', 'extra copies +1%', 'fractional income saved']),
+  mint: form('mint', 'forge', ['ordinary hp income +20%', 'extra copies +1.5%', 'fractional income saved']),
   reactor: form('reactor', 'forge', ['global passive upgrades', 'rising prices per rank', '12 upgrade categories']),
   arsenal: form('arsenal', 'forge', ['one global upgrade tree', '39 unique global upgrades', 'all branches in one station']),
   amplifier: form('amplifier', 'relay', ['local combat buffs x1.5', 'no economy amplification', 'does not stack']),

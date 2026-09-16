@@ -1437,7 +1437,7 @@ export class EmbeddedAuthority {
     const mints = (this.networkSourcesByArea?.get(areaId) || []).filter((tower) => tower.definitionId === 'mint');
     if (mints.length && totalReward > 0) {
       const key = `mint:${areaId}`;
-      const points = (this.state.supportCounters[key] || 0) + totalReward * (20 + mints.length - 1);
+      const points = (this.state.supportCounters[key] || 0) + totalReward * (20 + (mints.length - 1) * 1.5);
       const credits = Math.floor(points / 100);
       this.state.supportCounters[key] = points % 100;
       if (credits) {

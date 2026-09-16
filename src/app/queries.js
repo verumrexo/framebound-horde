@@ -85,7 +85,7 @@ export function economyNetworkSummary(snapshot, tower) {
   const forges = networkTowers.filter((candidate) => candidate.definitionId === 'forge');
   return {
     mintCount: mints.length,
-    mintBonusPercent: mints.length ? 20 + mints.length - 1 : 0,
+    mintBonusPercent: mints.length ? 20 + (mints.length - 1) * 1.5 : 0,
     mintCredits: mints.reduce((total, candidate) => total + (candidate.bonusCredits || 0), 0),
     forgeCount: forges.length,
     forgeCredits: forges.reduce((total, candidate) => total + (candidate.bonusCredits || 0), 0)
