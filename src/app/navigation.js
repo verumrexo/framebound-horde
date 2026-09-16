@@ -203,13 +203,13 @@ export function closeMainOptions(app) {
 export function toggleHostilePalette(app) {
   app.preferences.hostilePalette = app.preferences.hostilePalette === 'magenta' ? 'red' : 'magenta';
   saveGameplayPreferences(app);
-  setStatus(app, `hostile palette ${app.preferences.hostilePalette}`);
+  setStatus(app, `hostile palette ${app.preferences.hostilePalette === 'magenta' ? 'magenta' : 'mixed'}`);
 }
 
 export function hostilePaletteLabel(app, prefix) {
   return app.preferences.hostilePalette === 'magenta'
     ? `${prefix}: magenta 1 / pink 2 / white 3`
-    : `${prefix}: red 1 / orange 2 / yellow 3`;
+    : `${prefix}: coral 1 / gold 2 / blue 3 / violet 4`;
 }
 
 export function toggleAutoSelectPlacedFrame(app) {

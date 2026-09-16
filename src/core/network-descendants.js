@@ -43,7 +43,7 @@ export function networkSources(snapshot, areaId, id) {
 // priced decision instead of a free multiplier on damage. Upgrades of existing towers
 // are never escalated; the test field is exempt.
 export const FREE_PLACEMENTS = 30;
-export const PLACEMENT_ESCALATOR = 1.06;
+export const PLACEMENT_ESCALATOR = 1.035;
 
 export function placementEscalation(snapshot) {
   if (snapshot?.test) return 1;
@@ -52,10 +52,13 @@ export function placementEscalation(snapshot) {
   return PLACEMENT_ESCALATOR ** Math.max(0, placed + 1 - FREE_PLACEMENTS);
 }
 
-export function purchaseCost(snapshot, areaId, baseCost, { placement = false } = {}) {
+// Only the base placement price escalates with tower count; evolution costs already
+// folded into a full-path quote (see towerBuildQuote) stay at their catalog price.
+export function purchaseCost(snapshot, areaId, baseCost, { placement = false, escalatableCost = baseCost } = {}) {
   const fraction = Math.max(0.5, 0.98 ** reactorRank(snapshot, 'construction'));
   const escalation = placement ? placementEscalation(snapshot) : 1;
-  return Math.max(1, Math.ceil(baseCost * escalation * fraction - 1e-8));
+  const fixedCost = baseCost - escalatableCost;
+  return Math.max(1, Math.ceil((escalatableCost * escalation + fixedCost) * fraction - 1e-8));
 }
 
 export function saleRefund(snapshot, tower) {

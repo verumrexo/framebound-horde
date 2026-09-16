@@ -2,6 +2,7 @@ import { project } from '../app/camera.js';
 import { playerActivity, playerColor } from '../app/social.js';
 import { registerHitbox } from '../app/ui-state.js';
 import { compactMetric } from '../core/format.js';
+import { drawEdgeIndicator, edgeIndicatorForPoint } from '../render/edge-indicators.js';
 import { towerScreenBounds } from '../render/tower-sprites.js';
 import { drawBodyBrackets } from '../render/world-sprites.js';
 import { drawTower } from '../render/world.js';
@@ -38,16 +39,30 @@ export function drawRemotePresence(app, now) {
     app.renderer.shapes.rect(p.x, p.y + 2, 1, 3, color);
     app.renderer.bitmapText.draw(clippedUiText(player.label, 72), p.x + 7, p.y - 4, color, 1);
   }
+}
+
+export function drawPings(app, now) {
   app.social.pings = app.social.pings.filter((ping) => now - ping.receivedAt < 3000);
+  // Pings render above the roster, so clip world rings explicitly at the HUD bands.
+  const rect = (x, y, width, height, color) => {
+    const left = Math.max(0, x), top = Math.max(app.viewport.HUD_TOP_HEIGHT, y);
+    const right = Math.min(app.viewport.logicalWidth, x + width), bottom = Math.min(app.viewport.hudBottomY, y + height);
+    if (right > left && bottom > top) app.renderer.shapes.rect(left, top, right - left, bottom - top, color);
+  };
   for (const ping of app.social.pings) {
     const p = project(app, ping.x, ping.y);
     const color = playerColor(app, ping.playerId);
-    const phase = Math.floor((now - ping.receivedAt) / 150) % 4;
+    const phase = app.effects.reducedNetworkMotion.matches ? 0 : Math.floor((now - ping.receivedAt) / 150) % 4;
+    const edge = edgeIndicatorForPoint(p, app.viewport);
+    if (edge) {
+      drawEdgeIndicator(app, edge, color, { pulse: phase % 2 });
+      continue;
+    }
     const radius = 8 + phase * 3;
-    app.renderer.shapes.rect(p.x - radius, p.y - radius, radius * 2 + 1, 1, color);
-    app.renderer.shapes.rect(p.x - radius, p.y + radius, radius * 2 + 1, 1, color);
-    app.renderer.shapes.rect(p.x - radius, p.y - radius + 1, 1, radius * 2 - 1, color);
-    app.renderer.shapes.rect(p.x + radius, p.y - radius + 1, 1, radius * 2 - 1, color);
+    rect(p.x - radius, p.y - radius, radius * 2 + 1, 1, color);
+    rect(p.x - radius, p.y + radius, radius * 2 + 1, 1, color);
+    rect(p.x - radius, p.y - radius + 1, 1, radius * 2 - 1, color);
+    rect(p.x + radius, p.y - radius + 1, 1, radius * 2 - 1, color);
   }
 }
 

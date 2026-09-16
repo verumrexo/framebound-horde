@@ -61,7 +61,7 @@ export function drawBuildCatalog(app, snapshot) {
       const definition = catalogDefinition(snapshot, entry.definitionId);
       const quote = towerBuildQuote(snapshot.towerCatalog, entry.definitionId);
       if (!definition || !quote) return;
-      const price = purchaseCost(snapshot, null, quote.cost, { placement: true });
+      const price = purchaseCost(snapshot, null, quote.cost, { placement: true, escalatableCost: quote.rootCost });
       const affordable = app.game.sessionMode === 'test' || snapshot.dev?.infiniteMoney || economy.credits >= price;
       drawCatalogEntry(app,
         `build_catalog_${entry.definitionId}`,

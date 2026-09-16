@@ -1,8 +1,5 @@
-// The original exponential curve is retained as the economic HP budget for the first
-// twenty minutes. After that the per-minute growth factor eases from 1.22 to a lower
-// late-game factor so the geometric reactor and a growing tower count can chase it for
-// roughly half an hour instead of five minutes; the curve stays exponential, so every
-// run still ends.
+// Threat is an HP/sec budget. A gentler opening joins a linear late ramp with the
+// same value and slope at twenty minutes: pressure keeps rising without compounding.
 // Horde pace: a run-wide time stretch on the threat clock (spawn curve, hp mixture,
 // rift unlocks and surges together). Chosen at deployment, carried in state and saves.
 export const PACE_MIN = 0.6;
@@ -20,63 +17,40 @@ export function threatTickAt(runTick, pace = DEFAULT_PACE) {
   return Math.max(0, runTick) * normalizePace(pace);
 }
 
-export const TAPER_START_MINUTE = 20;
-export const TAPER_END_MINUTE = 40;
-export const LATE_GROWTH_PER_MINUTE = 1.12;
-
-function logGrowthAt(curve, minutes) {
-  const opening = Math.log(curve.growthPerMinute);
-  if (!curve.taper || minutes <= TAPER_START_MINUTE) return opening;
-  const late = Math.log(LATE_GROWTH_PER_MINUTE);
-  if (minutes >= TAPER_END_MINUTE) return late;
-  return opening + (late - opening) * (minutes - TAPER_START_MINUTE) / (TAPER_END_MINUTE - TAPER_START_MINUTE);
-}
-
-// Closed-form integral of the piecewise log-linear growth exponent, so peers and saves
-// agree bit-for-bit without numeric integration.
-export function growthLogIntegral(curve, minutes) {
-  const opening = Math.log(curve.growthPerMinute);
-  if (!curve.taper || minutes <= TAPER_START_MINUTE) return opening * minutes;
-  const late = Math.log(LATE_GROWTH_PER_MINUTE);
-  const span = TAPER_END_MINUTE - TAPER_START_MINUTE;
-  let total = opening * TAPER_START_MINUTE;
-  const inTaper = Math.min(minutes, TAPER_END_MINUTE) - TAPER_START_MINUTE;
-  // ∫ (opening + (late - opening) * u / span) du from 0 to inTaper
-  total += opening * inTaper + (late - opening) * inTaper * inTaper / (2 * span);
-  if (minutes > TAPER_END_MINUTE) total += late * (minutes - TAPER_END_MINUTE);
-  return total;
-}
-
-export function growthFactorAt(curve, minutes) {
-  return Math.exp(logGrowthAt(curve, minutes));
-}
+export const LINEAR_RAMP_START_MINUTE = 20;
 
 export function healthBudgetAt(map, runTick, tickRate = 60) {
   const minutes = Math.max(0, runTick) / tickRate / 60;
   const curve = map.spawnCurve;
-  return (curve.basePerSecond + curve.linearPerMinute * minutes) * Math.exp(growthLogIntegral(curve, minutes));
+  const openingMinutes = curve.taper ? Math.min(minutes, LINEAR_RAMP_START_MINUTE) : minutes;
+  const growth = Math.pow(curve.growthPerMinute, openingMinutes);
+  const openingBudget = (curve.basePerSecond + curve.linearPerMinute * openingMinutes) * growth;
+  if (!curve.taper || minutes <= LINEAR_RAMP_START_MINUTE) return openingBudget;
+  const slope = curve.linearPerMinute * growth + openingBudget * Math.log(curve.growthPerMinute);
+  return openingBudget + slope * (minutes - LINEAR_RAMP_START_MINUTE);
 }
 
 export function spawnProfileAt(map, runTick, tickRate = 60) {
   const minutes = Math.max(0, runTick) / tickRate / 60;
   const hpPerSecond = healthBudgetAt(map, runTick, tickRate);
-  // A few oranges after two minutes; the red/orange mixture reaches all-orange at 20.
-  const openingHp = 1 + Math.max(0, Math.min(1, (minutes - 2) / 18));
-  const bodyCap = healthBudgetAt(map, 20 * 60 * tickRate, tickRate) / 2;
+  // Mixed light/medium/heavy bodies from deployment. Their average is paid for by
+  // fewer bodies, so variety never adds HP or credit income to the threat curve.
+  const openingHp = 1.5 + 0.5 * Math.min(1, minutes / LINEAR_RAMP_START_MINUTE);
+  const bodyCap = healthBudgetAt(map, LINEAR_RAMP_START_MINUTE * 60 * tickRate, tickRate) / 2;
   const meanHp = Math.max(openingHp, bodyCap > 0 ? hpPerSecond / bodyCap : 1);
   return { rate: hpPerSecond / meanHp, meanHp, hpPerSecond, bodyCap };
 }
 
 // Rift surges: once every rift is open, a short arc of neighbouring rifts periodically
 // runs hot. Hot rifts carry a larger share of the ordinary stream and add a heavier
-// stream on top; both escalate with the surge index. The schedule is a pure function of
+// stream with a fixed HP budget; individual HP rises with the surge index. The schedule is a pure function of
 // the map, seed and tick so every peer, save and correction reproduces it.
 export const SURGE_PERIOD_SECONDS = 360;
 export const SURGE_WARNING_SECONDS = 45;
 export const SURGE_ACTIVE_SECONDS = 120;
 export const SURGE_LEAD_SECONDS = 60;
 export const SURGE_HOT_WEIGHT = 3;
-export const SURGE_EXTRA_BODY_FRACTION = 0.15;
+export const SURGE_EXTRA_HP_FRACTION = 0.30;
 export const SURGE_HP_BASE = 3;
 export const SURGE_HP_PER_INDEX = 0.5;
 
@@ -175,8 +149,10 @@ export function surgeSpawnSources(sources, surge, profile) {
   const hot = new Set(surge.riftIds);
   const hotCount = sources.filter((source) => hot.has(source.id)).length;
   if (hotCount === 0) return sources;
-  const extraRate = profile.bodyCap * SURGE_EXTRA_BODY_FRACTION / hotCount;
-  const extraHp = Math.max(1, profile.meanHp * surge.hpMultiplier);
+  const extraHp = Math.max(1, Math.round(profile.meanHp * surge.hpMultiplier));
+  // Pay for heavier surge bodies from a fixed fraction of *current* pressure.
+  // Using the late-game body cap here made early surges dwarf the ordinary stream.
+  const extraRate = profile.hpPerSecond * SURGE_EXTRA_HP_FRACTION / extraHp / hotCount;
   return sources.map((source) => hot.has(source.id)
     ? { ...source, weight: (source.weight || 1) * SURGE_HOT_WEIGHT, extraRatePerSecond: extraRate, extraHp }
     : source);

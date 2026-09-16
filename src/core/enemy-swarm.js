@@ -51,6 +51,10 @@ const BOND_TABLES = Object.freeze([
 ]);
 const CONTROL_ID_NAMES = Object.freeze(Object.keys(CONTROL_ID_TABLES));
 
+// Sum = 16. Light bodies bank HP for interleaved medium/heavy bodies; every complete
+// cycle spends exactly its accrued budget (apart from the retained fractional HP).
+const HP_MIX_WEIGHTS = Object.freeze([0, 0.5, 0, 1, 0, 2, 0.5, 0, 4, 0.5, 1, 0, 2, 0, 0.5, 4]);
+
 function hash32(value) {
   let hash = value >>> 0;
   hash ^= hash >>> 16;
@@ -97,6 +101,8 @@ export class EnemySwarm {
     this.tickNumber = 0;
     this.spawnAccumulator = 0;
     this.spawnHpAccumulator = 0;
+    this.spawnMixCursor = 0;
+    this.spawnMixFraction = 0;
     this.surgeAccumulator = 0;
     this.spawnSourceCursor = 0;
     this.spawnedTotal = 0;
@@ -288,9 +294,7 @@ export class EnemySwarm {
     const mergedUnitsBySource = new Map();
     while (remaining > 0) {
       if (meanHp !== null) {
-        this.spawnHpAccumulator += meanHp;
-        enemyHp = Math.max(1, Math.floor(this.spawnHpAccumulator));
-        this.spawnHpAccumulator -= enemyHp;
+        enemyHp = this.nextMixedHp(meanHp);
       }
       const packetUnits = meanHp !== null ? 1 : Math.min(remaining, this.packetSizeForPopulation(enemyHp));
       const source = this.selectSpawnSource(sources);
@@ -306,6 +310,20 @@ export class EnemySwarm {
       if (!this.mergeSpawnUnits(source, unitCount, enemyHp)) this.spawnOne(source, enemyHp, unitCount);
     }
     return spawnCount + this.spawnSurgeStream(sources);
+  }
+
+  nextMixedHp(meanHp) {
+    this.spawnHpAccumulator += meanHp;
+    const lightHp = Math.max(1, Math.floor(meanHp * 0.4));
+    this.spawnMixFraction += (meanHp - lightHp) * HP_MIX_WEIGHTS[this.spawnMixCursor];
+    const extraHp = Math.floor(this.spawnMixFraction + 1e-9);
+    this.spawnMixFraction = Math.max(0, this.spawnMixFraction - extraHp);
+    this.spawnMixCursor = (this.spawnMixCursor + 1) % HP_MIX_WEIGHTS.length;
+    const available = Math.floor(this.spawnHpAccumulator + 1e-9);
+    const hp = Math.max(1, this.spawnMixCursor === 0 ? available : Math.min(available, lightHp + extraHp));
+    this.spawnHpAccumulator = Math.max(0, this.spawnHpAccumulator - hp);
+    if (this.spawnMixCursor === 0) this.spawnMixFraction = 0;
+    return hp;
   }
 
   // Surge rifts add a separate heavier stream on top of the ordinary budget. The stream
@@ -388,6 +406,8 @@ export class EnemySwarm {
     }
     this.spawnAccumulator = 0;
     this.spawnHpAccumulator = 0;
+    this.spawnMixCursor = 0;
+    this.spawnMixFraction = 0;
     this.surgeAccumulator = 0;
     this.activeUnitCount = 0;
     this.rebuildSpatialIndex();
@@ -397,6 +417,8 @@ export class EnemySwarm {
     this.tickNumber = 0;
     this.spawnAccumulator = 0;
     this.spawnHpAccumulator = 0;
+    this.spawnMixCursor = 0;
+    this.spawnMixFraction = 0;
     this.surgeAccumulator = 0;
     this.spawnSourceCursor = 0;
     this.spawnedTotal = 0;
@@ -1690,6 +1712,8 @@ export class EnemySwarm {
       this.spawnedTotal,
       Math.round(this.spawnAccumulator * 1000000),
       Math.round(this.spawnHpAccumulator * 1000000),
+      this.spawnMixCursor,
+      Math.round(this.spawnMixFraction * 1000000),
       Math.round(this.surgeAccumulator * 1000000)
     ]) {
       checksum ^= value;
@@ -1754,6 +1778,8 @@ export class EnemySwarm {
       freeCount: this.freeCount,
       spawnAccumulator: this.spawnAccumulator,
       spawnHpAccumulator: this.spawnHpAccumulator,
+      spawnMixCursor: this.spawnMixCursor,
+      spawnMixFraction: this.spawnMixFraction,
       surgeAccumulator: this.surgeAccumulator,
       spawnSourceCursor: this.spawnSourceCursor,
       spawnedTotal: this.spawnedTotal,
@@ -1821,6 +1847,8 @@ export class EnemySwarm {
     this.freeCount = correction.freeCount;
     this.spawnAccumulator = correction.spawnAccumulator;
     this.spawnHpAccumulator = correction.spawnHpAccumulator || 0;
+    this.spawnMixCursor = correction.spawnMixCursor || 0;
+    this.spawnMixFraction = correction.spawnMixFraction || 0;
     this.surgeAccumulator = correction.surgeAccumulator || 0;
     this.spawnSourceCursor = correction.spawnSourceCursor;
     this.spawnedTotal = correction.spawnedTotal;

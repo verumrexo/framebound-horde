@@ -19,6 +19,7 @@ import { drawBaseSprite, drawBodyBrackets, drawRiftSprite, RIFT_BOUNDS } from '.
 import { ASSEMBLY_SIZE, ASSEMBLY_TICKS, AssemblyPresentation, drawAssemblyFrame } from '../src/render/assembly.js';
 import { drawMapThumbnail, mapThumbnail } from '../src/render/map-thumbnail.js';
 import { playableMaps } from '../src/core/world-config.js';
+import { enemySpriteMask } from '../src/render/enemy-sprites.js';
 import { BURST_MERGE_SECONDS, BURST_SECONDS, MAX_CONTROL_LINKS, MAX_LIVE_BURSTS, admitBurst, combatMetrics,
   drawImpactMark, impactColors, impactFamily } from '../src/render/combat-marks.js';
 
@@ -40,6 +41,21 @@ const capture = (draw) => {
   }
   return rectangles;
 };
+
+// Every ordinary HP value in the tuned run has a distinct, centred abstract mask.
+// The same declarations generate the GPU mask selector without a texture upload.
+const enemyMasks = new Set();
+for (let hp = 1; hp <= 261; hp += 1) {
+  const [low, high] = enemySpriteMask(hp);
+  const bits = BigInt(low) | (BigInt(high) << 32n);
+  assert.ok((bits & (1n << 24n)) !== 0n, 'every silhouette has a readable core');
+  assert.ok(bits > 0n && bits < (1n << 49n));
+  const filled = bits.toString(2).replaceAll('0', '').length;
+  assert.ok(filled >= 14 && filled <= 35, 'sprite retains open space rather than becoming a square');
+  assert.ok(!enemyMasks.has(bits.toString()), `hp ${hp} shares another silhouette`);
+  enemyMasks.add(bits.toString());
+  assert.deepEqual(enemySpriteMask(hp - 0.25), [low, high], 'remaining fractional HP rounds up just like the renderer');
+}
 
 // The complete animated envelope must fit a diameter smaller than placement spacing.
 // Check all rail poses independently of the one-time sampling used to measure it.

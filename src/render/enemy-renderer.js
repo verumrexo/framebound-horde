@@ -1,6 +1,7 @@
 import { AUTHORITY_TICK_RATE } from '../core/protocol.js';
 import { createProgram } from './webgl.js';
 import { enemyPointSize } from './world-appearance.js';
+import { ENEMY_SPRITE_GLSL } from './enemy-sprites.js';
 import { COLOR } from '../ui/palette.js';
 
 export const SWARM_RENDER_VERTEX = `#version 300 es
@@ -19,6 +20,8 @@ flat out float v_status;
 flat out float v_units;
 flat out float v_hp;
 flat out float v_pointSize;
+flat out uvec2 v_shape;
+${ENEMY_SPRITE_GLSL}
 void main() {
   vec2 world = a_state.xy + a_state.zw * (u_tickAlpha / ${AUTHORITY_TICK_RATE.toFixed(1)});
   vec2 screen = ((world - u_camera) / u_viewScale + u_resolution * 0.5);
@@ -29,22 +32,30 @@ void main() {
   v_status = a_status;
   v_units = a_units;
   v_hp = a_hp;
+  v_shape = enemySpriteMask(a_hp);
 }
 `;
 
 export const SWARM_RENDER_FRAGMENT = `#version 300 es
 precision highp float;
+precision highp int;
 flat in float v_status;
 flat in float v_units;
 flat in float v_hp;
 flat in float v_pointSize;
+flat in uvec2 v_shape;
 uniform float u_renderScale;
 uniform float u_hostilePalette;
 out vec4 outColor;
 void main() {
   vec2 point = gl_PointCoord;
   vec2 center = abs(point - vec2(0.5));
-  bool body = true;
+  ivec2 spriteCell = min(ivec2(6), ivec2(floor(point * 7.0)));
+  int spriteBit = spriteCell.y * 7 + spriteCell.x;
+  uint rowBits = spriteBit < 32 ? v_shape.x : v_shape.y;
+  bool body = (rowBits & (1u << uint(spriteBit % 32))) != 0u;
+  // Below four device pixels, preserve the silhouette's footprint and visibility.
+  if (v_pointSize * u_renderScale < 4.0) body = center.x + center.y <= 0.6;
   if (v_units > 1.5 && v_units < 2.5) {
     body = (point.x < 0.44 && point.y < 0.44) || (point.x > 0.56 && point.y > 0.56);
   } else if (v_units > 2.5 && v_units < 3.5) {
@@ -61,8 +72,9 @@ void main() {
   float markerSize = min(deviceSize - 1.0, max(1.0, floor(max(u_renderScale, deviceSize * 0.3) + 0.5)));
   float markerStart = floor((deviceSize - markerSize) * 0.5);
   vec2 cell = floor(point * deviceSize);
-  bool statusPixel = v_status > 0.5 && all(greaterThanEqual(cell, vec2(markerStart)))
+  bool corePixel = all(greaterThanEqual(cell, vec2(markerStart)))
     && all(lessThan(cell, vec2(markerStart + markerSize)));
+  bool statusPixel = v_status > 0.5 && corePixel;
   if (!body && !statusPixel) discard;
   if (statusPixel) {
     if (v_status > 4.5) outColor = vec4(${COLOR.green.join(',')});
@@ -71,19 +83,22 @@ void main() {
     else outColor = vec4(${COLOR.cyan.join(',')});
   } else {
     bool alt = u_hostilePalette > 0.5;
-    if (v_hp < 1.5) outColor = alt ? vec4(1.0, 0.30, 0.90, 1.0) : vec4(${COLOR.red.join(',')});
-    else if (v_hp < 2.5) outColor = alt ? vec4(1.0, 0.62, 0.86, 1.0) : vec4(1.0, 0.48, 0.12, 1.0);
-    else if (v_hp < 3.5) outColor = alt ? vec4(1.0, 0.96, 0.90, 1.0) : vec4(1.0, 0.86, 0.18, 1.0);
+    if (v_hp < 1.5) outColor = alt ? vec4(1.0, 0.30, 0.90, 1.0) : vec4(1.0, 0.37, 0.52, 1.0);
+    else if (v_hp < 2.5) outColor = alt ? vec4(1.0, 0.62, 0.86, 1.0) : vec4(1.0, 0.77, 0.28, 1.0);
+    else if (v_hp < 3.5) outColor = alt ? vec4(1.0, 0.96, 0.90, 1.0) : vec4(0.39, 0.68, 1.0, 1.0);
     else if (v_hp < 4.5) outColor = alt ? vec4(0.62, 0.50, 1.0, 1.0) : vec4(0.64, 0.40, 1.0, 1.0);
     else if (v_hp < 5.5) outColor = alt ? vec4(0.42, 0.30, 0.86, 1.0) : vec4(1.0, 0.30, 0.75, 1.0);
     else {
       float tier = mod(floor(log2(v_hp)), 3.0);
       vec3 shell = alt
         ? (tier < 0.5 ? vec3(1.0, 0.40, 0.92) : tier < 1.5 ? vec3(0.62, 0.50, 1.0) : vec3(1.0, 0.80, 0.95))
-        : (tier < 0.5 ? vec3(1.0, 0.58, 0.18) : tier < 1.5 ? vec3(0.74, 0.48, 1.0) : vec3(1.0, 0.38, 0.70));
+        : (tier < 0.5 ? vec3(0.39, 0.68, 1.0) : tier < 1.5 ? vec3(0.74, 0.48, 1.0) : vec3(1.0, 0.77, 0.28));
       bool stripe = abs(point.y - 0.5) < 0.10;
       outColor = vec4(stripe ? vec3(1.0) : shell, 1.0);
     }
+    // Status colours replace the dark core, never the HP-coloured shell. At the
+    // smallest device sizes keep all available pixels bright for swarm readability.
+    if (v_units < 1.5 && deviceSize >= 4.0 && corePixel) outColor.rgb *= 0.25;
   }
 }
 `;

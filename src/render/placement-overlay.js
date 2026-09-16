@@ -227,7 +227,7 @@ export function drawBuildState(app, snapshot) {
     return point && Math.hypot(point.x - world.x, point.y - world.y) <= 10;
   });
   const areaId = socketHost?.areaId || findDefenseAreaAt(app.game.currentMap, world.x, world.y);
-  const price = quote ? purchaseCost(snapshot, areaId, quote.cost, { placement: true }) : Infinity;
+  const price = quote ? purchaseCost(snapshot, areaId, quote.cost, { placement: true, escalatableCost: quote.rootCost }) : Infinity;
   const snappedPoint = socketHost ? socketPoint(snapshot, app.game.currentMap, socketHost) : world;
   const clear = towerPlacementClear(snapshot.towers, snappedPoint.x, snappedPoint.y);
   const canPlace = clear && Boolean(areaId) && (!socketHost || (placementDefinitionId !== 'hardpoint' && !snapshot.towers.some((tower) => tower.socketHostId === socketHost.id))) && (app.game.sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) >= price;

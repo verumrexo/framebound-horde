@@ -3,6 +3,7 @@ import { drawBackground } from '../render/background.js';
 import { drawAttackFlashes, drawImpactBursts } from '../render/combat-effects.js';
 import { drawControlFields, drawSelectedBondLinks } from '../render/control-fields.js';
 import { drawSweep } from '../render/laser-effects.js';
+import { drawSurgeEdgeIndicators } from '../render/edge-indicators.js';
 import { mapWalls } from '../render/map-thumbnail.js';
 import { drawNetworkLinks, drawRelayCollapse } from '../render/network.js';
 import { drawBuildState } from '../render/placement-overlay.js';
@@ -13,7 +14,7 @@ import { drawHud } from '../ui/hud.js';
 import { drawCoopMenu, drawDevTools, drawEscapeMenu, drawMainMenu, drawMapSelection, drawOptionsScreen } from '../ui/menus.js';
 import { COLOR } from '../ui/palette.js';
 import { drawResearchStation, drawStatsPanel } from '../ui/research.js';
-import { drawChat, drawCursor, drawGameplayRoster, drawRemotePresence } from '../ui/social.js';
+import { drawChat, drawCursor, drawGameplayRoster, drawPings, drawRemotePresence } from '../ui/social.js';
 
 export function renderFrame(app, now, dt, fps) {
   const enemyFrame = app.game.session.presentation();
@@ -94,6 +95,8 @@ export function renderFrame(app, now, dt, fps) {
     if (app.ui.showStatsPanel) drawStatsPanel(app, app.game.sessionSnapshot);
     drawGameplayRoster(app, app.game.sessionSnapshot);
     drawChat(app, app.game.sessionSnapshot, now);
+    drawSurgeEdgeIndicators(app, app.game.sessionSnapshot);
+    drawPings(app, now);
   }
   drawCursor(app);
   app.renderer.shapes.flush();

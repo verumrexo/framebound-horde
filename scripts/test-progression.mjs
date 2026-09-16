@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {
-  healthBudgetAt, spawnProfileAt, growthLogIntegral, growthFactorAt, surgeScheduleAt, surgeRiftIds, surgeSpawnSources,
-  surgeStartSeconds, surgeArcSize, surgeRiftRing, TAPER_START_MINUTE, TAPER_END_MINUTE, LATE_GROWTH_PER_MINUTE,
-  SURGE_PERIOD_SECONDS, SURGE_WARNING_SECONDS, SURGE_ACTIVE_SECONDS, SURGE_HOT_WEIGHT, SURGE_EXTRA_BODY_FRACTION, surgeHpMultiplier,
+  healthBudgetAt, spawnProfileAt, surgeScheduleAt, surgeRiftIds, surgeSpawnSources,
+  surgeStartSeconds, surgeArcSize, surgeRiftRing, LINEAR_RAMP_START_MINUTE,
+  SURGE_PERIOD_SECONDS, SURGE_WARNING_SECONDS, SURGE_ACTIVE_SECONDS, SURGE_HOT_WEIGHT, SURGE_EXTRA_HP_FRACTION, surgeHpMultiplier,
   normalizePace, threatTickAt, DEFAULT_PACE, PACE_MIN, PACE_MAX
 } from '../src/core/progression.js';
 import { getMapDefinition, playableMaps, defenseAreaField } from '../src/core/world-config.js';
@@ -21,34 +21,33 @@ for (let seconds = 0; seconds <= 80 * 60; seconds++) {
   assert.ok(Math.abs(profile.rate * profile.meanHp / healthBudgetAt(map, seconds * 60) - 1) < 1e-12);
   if (seconds >= 1200) assert.ok(Math.abs(profile.rate - cap) < 1e-9);
 }
-assert.equal(spawnProfileAt(map, 120 * 60).meanHp, 1);
+assert.equal(spawnProfileAt(map, 0).meanHp, 1.5);
 assert.equal(spawnProfileAt(map, 1200 * 60).meanHp, 2);
 console.log('budget identity retained; physical spawns flat from 20 minutes');
 
-// The opening curve is byte-identical through the taper start; afterwards the growth
-// exponent eases log-linearly to the late factor and the budget stays exponential.
+// A gentler opening joins a linear late ramp without a value or slope jump.
 const untapered = { ...map, spawnCurve: { ...map.spawnCurve, taper: false } };
-for (let seconds = 0; seconds <= TAPER_START_MINUTE * 60; seconds += 7) {
+for (let seconds = 0; seconds <= LINEAR_RAMP_START_MINUTE * 60; seconds += 7) {
   assert.equal(healthBudgetAt(map, seconds * 60), healthBudgetAt(untapered, seconds * 60));
 }
 assert.ok(healthBudgetAt(map, 30 * 3600) < healthBudgetAt(untapered, 30 * 3600));
-assert.ok(Math.abs(growthFactorAt(map.spawnCurve, TAPER_START_MINUTE) - 1.22) < 1e-12);
-assert.ok(Math.abs(growthFactorAt(map.spawnCurve, (TAPER_START_MINUTE + TAPER_END_MINUTE) / 2) - Math.sqrt(1.22 * LATE_GROWTH_PER_MINUTE)) < 1e-12);
-assert.ok(Math.abs(growthFactorAt(map.spawnCurve, 70) - LATE_GROWTH_PER_MINUTE) < 1e-12);
-// closed-form integral matches a fine numeric integration of the exponent
-let numeric = 0;
-for (let step = 0; step < 60 * 600; step += 1) numeric += Math.log(growthFactorAt(map.spawnCurve, (step + 0.5) / 600)) / 600;
-assert.ok(Math.abs(numeric - growthLogIntegral(map.spawnCurve, 60)) < 1e-6);
-for (let m = 41; m <= 80; m += 1) {
-  const ratio = healthBudgetAt(map, m * 3600) / healthBudgetAt(map, (m - 1) * 3600);
-  assert.ok(ratio > LATE_GROWTH_PER_MINUTE && ratio < 1.22, `late growth stays exponential at minute ${m}`);
+for (const world of playableMaps()) {
+  const at = (minutes) => healthBudgetAt(world, minutes * 3600);
+  const join = LINEAR_RAMP_START_MINUTE;
+  const delta = 0.0001;
+  assert.ok(Math.abs((at(join) - at(join - delta)) / delta - (at(join + delta) - at(join)) / delta) < 0.01);
+  const increase = at(join + 1) - at(join);
+  assert.ok(increase > 0);
+  for (let minute = join + 2; minute <= 120; minute += 1) {
+    assert.ok(Math.abs(at(minute) - at(minute - 1) - increase) < 1e-8, 'late pressure rises by a steady amount');
+  }
+  for (let minute = 1; minute <= 20; minute += 1) {
+    const oldBudget = (2 + 0.8 * minute) * 1.22 ** minute;
+    assert.ok(at(minute) < oldBudget && at(minute) > oldBudget * 0.70, 'opening is modestly easier');
+  }
 }
-const meanAt = (minutes) => spawnProfileAt(map, minutes * 3600).meanHp;
-assert.ok(meanAt(30) > 15 && meanAt(30) < 19, `mean hp ${meanAt(30)} at 30`);
-assert.ok(meanAt(45) > 150 && meanAt(45) < 190, `mean hp ${meanAt(45)} at 45`);
-assert.ok(meanAt(60) > 1100 && meanAt(60) < 1350, `mean hp ${meanAt(60)} at 60`);
 assert.equal(healthBudgetAt(getMapDefinition('test_field'), 50 * 3600), 0, 'test field keeps its flat zero curve');
-console.log('threat taper: identical opening, eased exponent, still exponential');
+console.log('threat curve: gentler opening, continuous slope, steady late ramp');
 
 // Rift surges are a pure function of map, seed and tick.
 for (const id of ['map_01', 'map_07', 'map_04']) {
@@ -87,8 +86,8 @@ for (const id of ['map_01', 'map_07', 'map_04']) {
   assert.equal(hot.length, 3);
   for (const source of hot) {
     assert.equal(source.weight, SURGE_HOT_WEIGHT);
-    assert.ok(Math.abs(source.extraRatePerSecond * 3 - profile.bodyCap * SURGE_EXTRA_BODY_FRACTION) < 1e-9);
-    assert.equal(source.extraHp, profile.meanHp * 3);
+    assert.ok(Math.abs(source.extraRatePerSecond * source.extraHp * 3 - profile.hpPerSecond * SURGE_EXTRA_HP_FRACTION) < 1e-9);
+    assert.equal(source.extraHp, Math.round(profile.meanHp * 3));
   }
   assert.ok(decorated.filter((source) => !surge.riftIds.includes(source.id)).every((source) => source.weight === 1 && source.extraRatePerSecond === undefined));
   assert.strictEqual(surgeSpawnSources(world.spawnSources, { phase: 'idle', riftIds: [] }, profile), world.spawnSources);
@@ -100,7 +99,8 @@ for (const id of ['map_01', 'map_07', 'map_04']) {
     plain.spawnAtRate(profile.rate, world.spawnSources, 1, profile.meanHp);
   }
   const extra = surged.spawnedTotal - plain.spawnedTotal;
-  assert.ok(Math.abs(extra - profile.bodyCap * SURGE_EXTRA_BODY_FRACTION * 10) <= 2, `extra bodies ${extra}`);
+  const extraRate = hot.reduce((total, source) => total + source.extraRatePerSecond, 0);
+  assert.ok(Math.abs(extra - extraRate * 10) <= 2, `extra bodies ${extra}`);
   let heavy = 0;
   for (let i = 0; i < surged.count; i++) if (surged.maxHpById[surged.idByIndex[i]] >= Math.round(profile.meanHp * 3)) heavy += 1;
   assert.ok(heavy >= extra * 0.95, `heavy bodies ${heavy} of ${extra}`);
@@ -111,6 +111,12 @@ for (const id of ['map_01', 'map_07', 'map_04']) {
     copy.spawnAtRate(profile.rate, decorated, 1, profile.meanHp);
   }
   assert.deepEqual(copy.exportCorrection(), surged.exportCorrection());
+  for (const minute of [1, 5, 10, 20, 40, 80]) for (const index of [0, 5, 20]) {
+    const current = spawnProfileAt(world, minute * 3600);
+    const sources = surgeSpawnSources(world.spawnSources, { ...surge, hpMultiplier: surgeHpMultiplier(index) }, current);
+    const extraHpPerSecond = sources.reduce((sum, source) => sum + (source.extraRatePerSecond || 0) * (source.extraHp || 0), 0);
+    assert.ok(Math.abs(extraHpPerSecond / current.hpPerSecond - SURGE_EXTRA_HP_FRACTION) < 1e-12, 'surges track current HP pressure at every stage');
+  }
 }
 // The production authority exposes the surge in its swarm summary without extra state.
 {
@@ -161,6 +167,11 @@ console.log('rift surges are deterministic, contiguous, rotating, additive and c
   const legacy = paced.correctionSnapshot(); delete legacy.state.pace;
   const fallback = new EmbeddedAuthority(config); fallback.applyCorrectionSnapshot(legacy);
   assert.equal(fallback.state.pace, DEFAULT_PACE, 'saves without a pace load at the designed pace');
+  legacy.protocolVersion = 24; legacy.state.protocolVersion = 24;
+  delete legacy.swarm.spawnMixCursor; delete legacy.swarm.spawnMixFraction;
+  fallback.applyCorrectionSnapshot(legacy);
+  assert.equal(fallback.swarm.spawnMixCursor, 0, 'previous-version saves start a new HP group');
+  assert.equal(fallback.swarm.spawnMixFraction, 0);
   paced.restartSession({ clientId: 'p', playerId: host.id, sequence: 2, payload: { mapId: 'map_01' } });
   assert.equal(paced.state.pace, DEFAULT_PACE, 'a restart without a pace uses the designed pace');
 }
@@ -168,13 +179,29 @@ console.log('horde pace stretches curve, rifts and surges together and survives 
 
 const source = { x: 0, y: -1300, spreadX: 1, spreadY: 1 };
 const swarm = new EnemySwarm({ seed: 42, map });
-for (let i = 0; i < 60; i++) swarm.spawnAtRate(60, [source], 1, 1.25);
-let hp = 0, oranges = 0;
+for (let i = 0; i < 160; i++) swarm.spawnAtRate(60, [source], 1, 1.5);
+let hp = 0;
+const tiers = new Set();
 for (let i = 0; i < swarm.count; i++) {
   hp += swarm.hpById[swarm.idByIndex[i]];
-  oranges += Number(swarm.hpById[swarm.idByIndex[i]] === 2);
+  tiers.add(swarm.hpById[swarm.idByIndex[i]]);
 }
-assert.equal(hp, 75); assert.equal(oranges, 15);
+assert.equal(hp, 240); assert.ok(tiers.size >= 3, 'opening already contains three HP tiers');
+for (const mean of [1, 1.25, 1.5, 1.625, 2, 6.7, 100.37, 1234.56]) {
+  const mixed = new EnemySwarm({ seed: 7, map });
+  const health = new Set(); let budget = 0, spent = 0;
+  for (let index = 0; index < 1600; index += 1) {
+    const expected = mean + (mean === 1 ? 0 : index / 10000);
+    const nextHp = mixed.nextMixedHp(expected);
+    budget += expected; spent += nextHp; health.add(nextHp);
+    assert.ok(Number.isInteger(nextHp) && nextHp >= 1);
+    assert.ok(Math.abs(spent + mixed.spawnHpAccumulator - budget) < 1e-7, 'variety spends only accrued HP');
+    if ((index + 1) % 16 === 0) assert.ok(mixed.spawnHpAccumulator < 1, 'every full group pays its budget');
+  }
+  if (mean >= 1.5) assert.ok(health.size >= 3, 'tiers stay mixed as average HP rises');
+}
+// Save mid-group, including banked HP and the fractional tier allocation.
+for (let i = 0; i < 7; i++) swarm.spawnAtRate(60, [source], 1, 1.37);
 const restored = new EnemySwarm({ seed: 42, map });
 restored.applyCorrection(swarm.exportCorrection());
 for (let i = 0; i < 61; i++) {
@@ -182,6 +209,16 @@ for (let i = 0; i < 61; i++) {
   restored.spawnAtRate(60, [source], 1, 1.37);
 }
 assert.deepEqual(restored.exportCorrection(), swarm.exportCorrection());
+assert.equal(restored.updateChecksum(), swarm.updateChecksum());
+const changedMix = new EnemySwarm({ seed: 42, map });
+changedMix.applyCorrection(swarm.exportCorrection());
+changedMix.spawnMixCursor = (changedMix.spawnMixCursor + 1) % 16;
+assert.notEqual(changedMix.updateChecksum(), swarm.updateChecksum(), 'future HP composition participates in authority checksums');
+const legacy = swarm.exportCorrection(); delete legacy.spawnMixCursor; delete legacy.spawnMixFraction;
+restored.applyCorrection(legacy);
+assert.equal(restored.spawnMixCursor, 0); assert.equal(restored.spawnMixFraction, 0);
+restored.clearEnemies();
+assert.equal(restored.spawnHpAccumulator, 0); assert.equal(restored.spawnMixCursor, 0); assert.equal(restored.spawnMixFraction, 0);
 const tough = swarm.spawnOne(source, 100000);
 assert.equal(tough.hp, 100000);
 assert.equal(swarm.damage(tough.id, tough.generation, 7).hpPopped, 7);

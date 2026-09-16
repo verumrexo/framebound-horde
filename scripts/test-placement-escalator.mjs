@@ -41,9 +41,10 @@ test('the first thirty placements cost their catalog price; later sockets escala
   assert.equal(place('frame'), Math.ceil(100 * PLACEMENT_ESCALATOR - 1e-8));
   assert.equal(place('frame'), Math.ceil(100 * PLACEMENT_ESCALATOR ** 2 - 1e-8));
   assert.equal(placementEscalation(a.state), PLACEMENT_ESCALATOR ** 3);
-  assert.equal(purchaseCost(a.state, null, 1500, { placement: true }), Math.ceil(1500 * PLACEMENT_ESCALATOR ** 3 - 1e-8));
-  assert.equal(place('flechette'), Math.ceil(1500 * PLACEMENT_ESCALATOR ** 3 - 1e-8));
-  assert.ok(purchaseCost(a.state, null, 1500, { placement: true }) > 1500 * 1.15, 'placement 34 costs a visible premium');
+  const fullForm = { placement: true, escalatableCost: 100 };
+  assert.equal(purchaseCost(a.state, null, 1500, fullForm), Math.ceil(1400 + 100 * PLACEMENT_ESCALATOR ** 3 - 1e-8));
+  assert.equal(place('flechette'), Math.ceil(1400 + 100 * PLACEMENT_ESCALATOR ** 3 - 1e-8));
+  assert.equal(purchaseCost(a.state, null, 1500, fullForm), Math.ceil(1400 + 100 * PLACEMENT_ESCALATOR ** 4 - 1e-8), 'only the frame portion pays the next placement premium');
 });
 
 test('upgrades are never escalated and selling lowers the next placement price', () => {
@@ -63,10 +64,11 @@ test('upgrades are never escalated and selling lowers the next placement price',
 test('the construction reactor discount multiplies the escalated price', () => {
   const { a, place } = production();
   for (let index = 0; index < FREE_PLACEMENTS + 10; index += 1) place('frame');
-  const full = purchaseCost(a.state, null, 1500, { placement: true });
+  const fullForm = { placement: true, escalatableCost: 100 };
+  const full = purchaseCost(a.state, null, 1500, fullForm);
   a.state.research.reactor.construction = 35;
-  assert.equal(purchaseCost(a.state, null, 1500, { placement: true }), Math.max(1, Math.ceil(1500 * PLACEMENT_ESCALATOR ** 11 * 0.5 - 1e-8)));
-  assert.ok(purchaseCost(a.state, null, 1500, { placement: true }) < full);
+  assert.equal(purchaseCost(a.state, null, 1500, fullForm), Math.max(1, Math.ceil((1400 + 100 * PLACEMENT_ESCALATOR ** 11) * 0.5 - 1e-8)));
+  assert.ok(purchaseCost(a.state, null, 1500, fullForm) < full);
 });
 
 test('the test field never escalates', () => {

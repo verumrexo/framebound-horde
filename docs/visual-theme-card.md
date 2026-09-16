@@ -4,7 +4,7 @@ this is the handoff source of truth for carrying the framebound visual language 
 
 ## theme signature
 
-hard-pixel survival telemetry suspended over a near-black void. friendly information is surgical cyan and mint. danger is a dense hostile-red mass. the result should feel severe, alive, and slightly improvised—not glossy, nostalgic, or corporate.
+hard-pixel survival telemetry suspended over a near-black void. friendly information is surgical cyan and mint. danger is a dense mass of irregular, hp-coloured hostiles. the result should feel severe, alive, and slightly improvised—not glossy, nostalgic, or corporate.
 
 three words: `hard // hostile // legible`
 
@@ -84,7 +84,11 @@ use one authored silhouette per field, built from torn islands, angled wisps, or
 
 ### hostiles
 
-hostiles are chunky `hostile-red` squares. a crowd reads as a liquid because many discrete squares share momentum and pressure—not because the rendering is soft. compressed crowds remain visibly plural, with two-to-four separated blocks and a center overload pixel when needed.
+hostiles are compact abstract shards, hooks, forks, broken kites, and thorns with dark cores. each remaining-hp value selects a consistent silhouette; higher hp uses irregular limb combinations (256 variants). ordinary 1–5 hp colours are coral, gold, blue, violet, and pink, with striped higher tiers. the optional magenta palette remains available. colours describe remaining hp, not cosmetic randomness. status colours replace the core while leaving the hp-coloured body readable.
+
+the seven-pixel masks stay in the existing single point-sprite draw with the same world footprint; they simplify below four device pixels. a crowd reads as a liquid because bodies share momentum and pressure. compressed crowds remain visibly plural, with separated blocks and an overload marker.
+
+offscreen pings and warning/active surges use small diamond markers and outward chevrons on the playable viewport edge, including corners. exclude both hud bands. nearby surge rifts share an indicator; visible rifts and pings keep their world markers. reduced motion holds marker animation still.
 
 ### friendly technology
 

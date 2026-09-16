@@ -69,8 +69,8 @@ export function selectBulkPlacementDefinition(app, definitionId) {
     setStatus(app, 'tower build path is unavailable');
     return;
   }
-  if ((app.game.sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < Math.min(...app.game.currentMap.defenseAreas.map((area) => purchaseCost(app.game.sessionSnapshot, area.id, quote.cost, { placement: true })))) {
-    setStatus(app, `need ${compactMetric(purchaseCost(app.game.sessionSnapshot, null, quote.cost, { placement: true }))} credits for ${definition.label}`);
+  if ((app.game.sessionSnapshot.dev?.infiniteMoney ? Number.MAX_SAFE_INTEGER : (economy?.credits || 0)) < Math.min(...app.game.currentMap.defenseAreas.map((area) => purchaseCost(app.game.sessionSnapshot, area.id, quote.cost, { placement: true, escalatableCost: quote.rootCost })))) {
+    setStatus(app, `need ${compactMetric(purchaseCost(app.game.sessionSnapshot, null, quote.cost, { placement: true, escalatableCost: quote.rootCost }))} credits for ${definition.label}`);
     return;
   }
   app.ui.bulkPlacementDefinitionId = definitionId;
@@ -78,7 +78,7 @@ export function selectBulkPlacementDefinition(app, definitionId) {
   app.ui.buildCatalogOpen = false;
   app.ui.selectedTowerId = null;
   app.ui.towerMenuMode = null;
-  setStatus(app, `${definition.label} ${compactMetric(purchaseCost(app.game.sessionSnapshot, null, quote.cost, { placement: true }))} // place many // right click ends`);
+  setStatus(app, `${definition.label} ${compactMetric(purchaseCost(app.game.sessionSnapshot, null, quote.cost, { placement: true, escalatableCost: quote.rootCost }))} // place many // right click ends`);
 }
 
 export function switchTestTowerForm(app, definitionId) {

@@ -323,7 +323,7 @@ export function drawEscapeMenu(app, snapshot) {
     app.renderer.bitmapText.draw('hostile colours', x + 18, y + 98, COLOR.ink, 1);
     drawMenuButton(app,
       'option_hostile_palette',
-      `2 hostile palette // ${app.preferences.hostilePalette === 'magenta' ? 'magenta' : 'red'}`,
+      `2 hostile palette // ${app.preferences.hostilePalette === 'magenta' ? 'magenta' : 'mixed'}`,
       buttonX,
       y + 110,
       buttonWidth,
@@ -331,7 +331,7 @@ export function drawEscapeMenu(app, snapshot) {
       toggleHostilePalette.bind(null, app),
       app.preferences.hostilePalette === 'magenta'
     );
-    app.renderer.bitmapText.draw(app.preferences.hostilePalette === 'magenta' ? 'magenta ramp keeps hostiles apart from green' : 'red ramp // switch if red and green blur', x + 18, y + 132, COLOR.dimMint, 1);
+    app.renderer.bitmapText.draw(app.preferences.hostilePalette === 'magenta' ? 'magenta ramp keeps hostiles apart from green' : 'mixed hp colours // dark cores mark hostiles', x + 18, y + 132, COLOR.dimMint, 1);
     drawTierDivider(app, buttonX, y + 144, buttonWidth);
     app.renderer.bitmapText.draw('audio // drag the sliders', x + 18, y + 150, COLOR.ink, 1);
     drawVolumeSliders(app, x + 18, y + 162, buttonWidth - 2);

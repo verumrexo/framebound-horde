@@ -766,7 +766,7 @@ export function towerBuildQuote(catalog, definitionId) {
     if (!step || !Number.isFinite(step.evolutionCost)) return null;
     cost += step.evolutionCost;
   }
-  return { definitionId, path, cost };
+  return { definitionId, path, cost, rootCost: root.cost };
 }
 
 export function validateTowerCatalog(catalog = TOWER_DEFINITIONS) {

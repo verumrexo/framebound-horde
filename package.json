@@ -24,7 +24,7 @@
     "test:sweep": "node scripts/test-sweep-collision.mjs",
     "test:options": "node scripts/test-gameplay-options.mjs && node scripts/test-arena-map.mjs",
     "test:ui": "node scripts/test-pixel-ui.mjs && node scripts/test-tactical-actions.mjs",
-    "test:visual": "node scripts/test-world-art.mjs",
+    "test:visual": "node scripts/test-world-art.mjs && node scripts/test-edge-indicators.mjs",
     "test:client": "node scripts/test-client-modules.mjs",
     "bake:sounds": "node scripts/bake-default-sounds.mjs"
   },

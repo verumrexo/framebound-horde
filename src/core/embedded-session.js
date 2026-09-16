@@ -1803,7 +1803,7 @@ export class EmbeddedAuthority {
     const areaId = socket?.areaId || findDefenseAreaAt(this.map, x, y);
     if (!areaId) return this.reject(command, 'tower must be inside a defense area');
     if (!towerPlacementClear(this.state.towers, point.x, point.y)) return this.reject(command, 'towers need 24 units of clearance');
-    const cost = purchaseCost(this.state, areaId, build.cost, { placement: true });
+    const cost = purchaseCost(this.state, areaId, build.cost, { placement: true, escalatableCost: build.rootCost });
     const economy = this.state.teamEconomy;
     if (!this.state.dev?.infiniteMoney && economy.credits < cost) return this.reject(command, 'insufficient credits');
     if (!this.state.dev?.infiniteMoney) economy.credits -= cost;
@@ -2174,7 +2174,7 @@ export class EmbeddedAuthority {
   }
 
   applyCorrectionSnapshot(correction) {
-    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
+    if (!correction || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, PROTOCOL_VERSION].includes(correction.protocolVersion) || !correction.mapId) {
       throw new Error('session correction is incompatible');
     }
     const correctionSeed = correction.state?.seed;
